@@ -133,6 +133,37 @@
                         {% endif %}
                     </div>
                 </div>
+
+                {# Formato del JSON de Plugins Privados #}
+                <div class="panel panel-info" style="margin-top: 15px;">
+                    <div class="panel-heading">
+                        <h4 class="panel-title"><i class="fa fa-code"></i> Formato del JSON</h4>
+                    </div>
+                    <div class="panel-body">
+                        <p><small>El archivo JSON debe tener el siguiente formato:</small></p>
+                        <pre style="background-color: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 11px; overflow-x: auto;">[
+  {
+    "id": 1,
+    "nombre": "mi_plugin_privado",
+    "link": "https://github.com/USUARIO/mi-plugin-privado",
+    "zip_link": "https://api.github.com/repos/USUARIO/mi-plugin-privado/zipball/master",
+    "branch": "master",
+    "estable": true,
+    "tipo": "privado",
+    "ultima_modificacion": "01-01-2026"
+  }
+]</pre>
+                        <div class="alert alert-success" style="margin-top: 10px; padding: 8px;">
+                            <small><i class="fa fa-magic"></i> <strong>Automático:</strong> La <b>versión</b> y <b>descripción</b> se obtienen automáticamente del archivo <code>fsframework.ini</code> del repositorio.</small>
+                        </div>
+                        <p class="help-block" style="margin-top: 10px;">
+                            <small><strong>Campos obligatorios:</strong></small><br>
+                            <small><code>nombre</code>, <code>link</code>, <code>zip_link</code></small><br><br>
+                            <small><strong>Campos opcionales:</strong></small><br>
+                            <small><code>branch</code> (default: master), <code>estable</code> (true/false), <code>imagen</code></small>
+                        </p>
+                    </div>
+                </div>
             </div>
 
             {# Lista de plugins privados #}
