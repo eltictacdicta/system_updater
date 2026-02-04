@@ -45,6 +45,7 @@ class backup_manager
      */
     private $excludedDirs = array(
         'backups',           // Don't backup backups
+        'plugins/system_updater', // Don't backup/restore the updater plugin itself (could cause issues during restore)
         'tmp',
         '.git',
         '.idea',
@@ -482,7 +483,7 @@ class backup_manager
         );
 
         // Helper to call progress callback
-        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
                 call_user_func($progressCallback, $step, $message, $percent);
             }
@@ -591,7 +592,7 @@ class backup_manager
         $result = array('success' => false);
 
         // Helper to call progress callback
-        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
                 call_user_func($progressCallback, $step, $message, $percent);
             }
@@ -670,7 +671,7 @@ class backup_manager
     {
         $result = array('success' => false);
 
-        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
                 call_user_func($progressCallback, $step, $message, $percent);
             }
@@ -722,7 +723,7 @@ class backup_manager
 
         // Tablas a preservar (para mantener acceso a recovery)
         $tablesToPreserve = array('fs_users', 'users', 'user');
-        
+
         // Filtrar tablas a eliminar (excluir las de preservación)
         $tablesToDrop = array();
         foreach ($tables as $table) {
@@ -730,10 +731,10 @@ class backup_manager
                 $tablesToDrop[] = $table;
             }
         }
-        
+
         $totalTablesToDrop = count($tablesToDrop);
         $preservedCount = count($tables) - $totalTablesToDrop;
-        
+
         if ($totalTablesToDrop > 0) {
             $reportProgress('db_drop', "Eliminando {$totalTablesToDrop} tablas (preservando {$preservedCount} tabla(s) de usuarios)...", 62);
 
@@ -865,7 +866,7 @@ class backup_manager
     private function extract_unified_package($packagePath, $extractTo, $progressCallback = null)
     {
         // Helper to call progress callback
-        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
                 call_user_func($progressCallback, $step, $message, $percent);
             }
@@ -981,11 +982,38 @@ class backup_manager
         $source = rtrim($source, '/\\');
         $dest = rtrim($dest, '/\\');
 
+        // Directories to exclude during restore (in addition to files)
+        $excludeDirs = array(
+            'backups',              // Never overwrite backups directory
+            'plugins/system_updater', // Don't overwrite the updater plugin during restore
+        );
+
         // Helper to call progress callback
-        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
                 call_user_func($progressCallback, $step, $message, $percent);
             }
+        };
+
+        // Helper to check if path should be excluded
+        $shouldExclude = function ($relativePath) use ($excludeFiles, $excludeDirs) {
+            // Normalize path separators
+            $relativePath = str_replace('\\', '/', $relativePath);
+
+            // Check if file is in exclude list
+            if (in_array(basename($relativePath), $excludeFiles)) {
+                return true;
+            }
+
+            // Check if path starts with any excluded directory
+            foreach ($excludeDirs as $excludedDir) {
+                $excludedDir = str_replace('\\', '/', $excludedDir);
+                if (strpos($relativePath, $excludedDir . '/') === 0 || $relativePath === $excludedDir) {
+                    return true;
+                }
+            }
+
+            return false;
         };
 
         // First pass: count total files
@@ -997,7 +1025,7 @@ class backup_manager
 
         foreach ($countIterator as $item) {
             $relativePath = substr($item->getPathname(), strlen($source) + 1);
-            if (!in_array(basename($relativePath), $excludeFiles)) {
+            if (!$shouldExclude($relativePath)) {
                 $totalFiles++;
             }
         }
@@ -1022,8 +1050,8 @@ class backup_manager
             $relativePath = substr($item->getPathname(), strlen($source) + 1);
             $destPath = $dest . '/' . $relativePath;
 
-            // Skip excluded files
-            if (in_array(basename($relativePath), $excludeFiles)) {
+            // Skip excluded files and directories
+            if ($shouldExclude($relativePath)) {
                 continue;
             }
 
