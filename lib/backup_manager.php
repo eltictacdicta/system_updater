@@ -470,9 +470,10 @@ class backup_manager
      * Restore a complete backup (files + database).
      *
      * @param string $backupFile The unified backup file name or path
+     * @param callable|null $progressCallback Optional callback function($step, $message, $percent) for progress updates
      * @return array Result with success status
      */
-    public function restore_complete($backupFile)
+    public function restore_complete($backupFile, $progressCallback = null)
     {
         $results = array(
             'success' => false,
@@ -480,57 +481,87 @@ class backup_manager
             'database' => null,
         );
 
+        // Helper to call progress callback
+        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
+        $reportProgress('start', 'Iniciando restauración completa...', 0);
+
         // Get full path
         $backupPath = $this->get_backup_file_path($backupFile);
         if (!$backupPath) {
             $this->errors[] = "Archivo de backup no encontrado: " . $backupFile;
+            $reportProgress('error', 'Archivo de backup no encontrado', 0);
             return $results;
         }
 
+        $reportProgress('extract', 'Extrayendo paquete de backup...', 5);
+
         // Extract unified package to temp dir
         $tempDir = $this->backupPath . '/temp_restore_' . time();
-        if (!$this->extract_unified_package($backupPath, $tempDir)) {
+        if (!$this->extract_unified_package($backupPath, $tempDir, $progressCallback)) {
+            $reportProgress('error', 'Error al extraer el paquete', 0);
             return $results;
         }
+
+        $reportProgress('extract_done', 'Paquete extraído correctamente', 20);
 
         // Find the database and files backups inside
         $metadata = $this->read_package_metadata($tempDir);
 
         // Restore files first
+        $reportProgress('files', 'Preparando restauración de archivos...', 25);
         $filesBackup = $tempDir . '/files/' . ($metadata['files_file'] ?? '');
         if (file_exists($filesBackup)) {
-            $results['files'] = $this->restore_files($filesBackup);
+            $results['files'] = $this->restore_files($filesBackup, $progressCallback);
         } else {
             // Try to find any zip file in files folder
             $filesDir = $tempDir . '/files';
             if (is_dir($filesDir)) {
                 foreach (scandir($filesDir) as $f) {
                     if (substr($f, -4) === '.zip') {
-                        $results['files'] = $this->restore_files($filesDir . '/' . $f);
+                        $results['files'] = $this->restore_files($filesDir . '/' . $f, $progressCallback);
                         break;
                     }
                 }
             }
         }
 
+        if (!($results['files']['success'] ?? false)) {
+            $reportProgress('error', 'Error al restaurar archivos', 50);
+        } else {
+            $reportProgress('files_done', 'Archivos restaurados correctamente', 50);
+        }
+
         // Then restore database
+        $reportProgress('database', 'Preparando restauración de base de datos...', 55);
         $dbBackup = $tempDir . '/database/' . ($metadata['database_file'] ?? '');
         if (file_exists($dbBackup)) {
-            $results['database'] = $this->restore_database($dbBackup);
+            $results['database'] = $this->restore_database($dbBackup, $progressCallback);
         } else {
             // Try to find any sql.gz file in database folder
             $dbDir = $tempDir . '/database';
             if (is_dir($dbDir)) {
                 foreach (scandir($dbDir) as $f) {
                     if (substr($f, -7) === '.sql.gz') {
-                        $results['database'] = $this->restore_database($dbDir . '/' . $f);
+                        $results['database'] = $this->restore_database($dbDir . '/' . $f, $progressCallback);
                         break;
                     }
                 }
             }
         }
 
+        if (!($results['database']['success'] ?? false)) {
+            $reportProgress('error', 'Error al restaurar base de datos', 95);
+        } else {
+            $reportProgress('database_done', 'Base de datos restaurada correctamente', 95);
+        }
+
         // Clean up temp dir
+        $reportProgress('cleanup', 'Limpiando archivos temporales...', 98);
         $this->delete_directory($tempDir);
 
         $results['success'] = (
@@ -540,6 +571,9 @@ class backup_manager
 
         if ($results['success']) {
             $this->messages[] = "Restauración completa realizada correctamente.";
+            $reportProgress('complete', '¡Restauración completada con éxito!', 100);
+        } else {
+            $reportProgress('error', 'La restauración no se completó correctamente', 100);
         }
 
         return $results;
@@ -549,27 +583,42 @@ class backup_manager
      * Restore only files from a backup.
      *
      * @param string $backupFile The files backup (zip) or unified backup
+     * @param callable|null $progressCallback Optional callback function($step, $message, $percent) for progress updates
      * @return array Result with success status
      */
-    public function restore_files($backupFile)
+    public function restore_files($backupFile, $progressCallback = null)
     {
         $result = array('success' => false);
+
+        // Helper to call progress callback
+        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
+        $reportProgress('files_start', 'Preparando archivos para restauración...', 25);
 
         // Get full path
         $backupPath = $this->get_backup_file_path($backupFile);
         if (!$backupPath) {
             $this->errors[] = "Archivo de backup de archivos no encontrado: " . $backupFile;
+            $reportProgress('files_error', 'Archivo de backup no encontrado', 25);
             return $result;
         }
 
         if (!extension_loaded('zip')) {
             $this->errors[] = "La extensión PHP ZIP no está instalada.";
+            $reportProgress('files_error', 'Extensión ZIP no disponible', 25);
             return $result;
         }
+
+        $reportProgress('files_extract', 'Extrayendo archivos del backup...', 28);
 
         $zip = new ZipArchive();
         if ($zip->open($backupPath) !== true) {
             $this->errors[] = "No se puede abrir el archivo ZIP: " . $backupFile;
+            $reportProgress('files_error', 'No se puede abrir el archivo ZIP', 28);
             return $result;
         }
 
@@ -578,6 +627,7 @@ class backup_manager
         if (!@mkdir($tempDir, 0755, true)) {
             $this->errors[] = "No se puede crear directorio temporal.";
             $zip->close();
+            $reportProgress('files_error', 'Error al crear directorio temporal', 28);
             return $result;
         }
 
@@ -585,41 +635,56 @@ class backup_manager
             $this->errors[] = "Error al extraer el archivo ZIP.";
             $zip->close();
             $this->delete_directory($tempDir);
+            $reportProgress('files_error', 'Error al extraer archivos', 30);
             return $result;
         }
         $zip->close();
 
+        $reportProgress('files_copy', 'Copiando archivos al sistema...', 30);
+
         // Copy files to fsRoot, excluding config.php to preserve settings
         $excludeFromRestore = array('config.php', 'config2.php');
-        $this->copy_directory($tempDir, $this->fsRoot, $excludeFromRestore);
+        $this->copy_directory_with_progress($tempDir, $this->fsRoot, $excludeFromRestore, $progressCallback, 30, 48);
+
+        $reportProgress('files_cleanup', 'Limpiando archivos temporales...', 48);
 
         // Clean up
         $this->delete_directory($tempDir);
 
         $result['success'] = true;
         $this->messages[] = "Archivos restaurados correctamente desde: " . basename($backupFile);
+        $reportProgress('files_done', 'Archivos restaurados correctamente', 50);
 
         return $result;
     }
 
     /**
      * Restore only database from a backup.
+     * First drops all tables to ensure a clean restore.
      *
      * @param string $backupFile The database backup (sql.gz)
+     * @param callable|null $progressCallback Optional callback function($step, $message, $percent) for progress updates
      * @return array Result with success status
      */
-    public function restore_database($backupFile)
+    public function restore_database($backupFile, $progressCallback = null)
     {
         $result = array('success' => false);
 
-        // Get full path
+        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
+        $reportProgress('db_start', 'Preparando restauración de base de datos...', 55);
+
         $backupPath = $this->get_backup_file_path($backupFile);
         if (!$backupPath) {
-            $this->errors[] = "Archivo de backup de base de datos no encontrado: " . $backupFile;
+            $this->errors[] = "Archivo de backup no encontrado: " . $backupFile;
+            $reportProgress('db_error', 'Archivo de backup no encontrado', 55);
             return $result;
         }
 
-        // Get DB credentials
         $dbType = defined('FS_DB_TYPE') ? FS_DB_TYPE : 'MYSQL';
         $dbHost = defined('FS_DB_HOST') ? FS_DB_HOST : 'localhost';
         $dbPort = defined('FS_DB_PORT') ? FS_DB_PORT : '3306';
@@ -628,40 +693,141 @@ class backup_manager
         $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
 
         if (strtoupper($dbType) === 'POSTGRESQL') {
-            // PostgreSQL restore
-            $command = sprintf(
-                'gunzip -c %s | PGPASSWORD=%s psql --host=%s --port=%s --username=%s %s 2>&1',
-                escapeshellarg($backupPath),
-                escapeshellarg($dbPass),
-                escapeshellarg($dbHost),
-                escapeshellarg($dbPort),
-                escapeshellarg($dbUser),
-                escapeshellarg($dbName)
-            );
-        } else {
-            // MySQL restore
-            $command = sprintf(
-                'gunzip -c %s | mysql --host=%s --port=%s --user=%s --password=%s %s 2>&1',
-                escapeshellarg($backupPath),
-                escapeshellarg($dbHost),
-                escapeshellarg($dbPort),
-                escapeshellarg($dbUser),
-                escapeshellarg($dbPass),
-                escapeshellarg($dbName)
-            );
+            return $this->restore_database_postgresql($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress, $result);
         }
+
+        // MySQL: Limpiar completamente la base de datos primero
+        $reportProgress('db_clean', 'Limpiando base de datos actual...', 60);
+
+        // Conectar a MySQL para limpiar la base de datos
+        $mysqli = new mysqli($dbHost, $dbUser, $dbPass, $dbName, $dbPort);
+        if ($mysqli->connect_error) {
+            $this->errors[] = "Error de conexión: " . $mysqli->connect_error;
+            $reportProgress('db_error', 'Error de conexión a la base de datos', 60);
+            return $result;
+        }
+
+        // Desactivar foreign key checks temporalmente
+        $mysqli->query("SET FOREIGN_KEY_CHECKS = 0");
+
+        // Obtener todas las tablas
+        $tables = array();
+        $res = $mysqli->query("SHOW TABLES");
+        if ($res) {
+            while ($row = $res->fetch_array(MYSQLI_NUM)) {
+                $tables[] = $row[0];
+            }
+            $res->free();
+        }
+
+        // Tablas a preservar (para mantener acceso a recovery)
+        $tablesToPreserve = array('fs_users', 'users', 'user');
+        
+        // Filtrar tablas a eliminar (excluir las de preservación)
+        $tablesToDrop = array();
+        foreach ($tables as $table) {
+            if (!in_array($table, $tablesToPreserve)) {
+                $tablesToDrop[] = $table;
+            }
+        }
+        
+        $totalTablesToDrop = count($tablesToDrop);
+        $preservedCount = count($tables) - $totalTablesToDrop;
+        
+        if ($totalTablesToDrop > 0) {
+            $reportProgress('db_drop', "Eliminando {$totalTablesToDrop} tablas (preservando {$preservedCount} tabla(s) de usuarios)...", 62);
+
+            foreach ($tablesToDrop as $i => $table) {
+                $mysqli->query("DROP TABLE IF EXISTS `" . $mysqli->real_escape_string($table) . "`");
+
+                if ($i % 10 === 0) {
+                    $pct = 62 + (($i / $totalTablesToDrop) * 3);
+                    $reportProgress('db_drop_progress', "Eliminando tablas... ({$i} de {$totalTablesToDrop})", intval($pct));
+                }
+            }
+        } else {
+            $reportProgress('db_drop', "No hay tablas para eliminar (solo tabla de usuarios presente)", 65);
+        }
+
+        // Reactivar foreign key checks
+        $mysqli->query("SET FOREIGN_KEY_CHECKS = 1");
+        $mysqli->close();
+
+        $reportProgress('db_import', 'Importando datos del backup...', 65);
+
+        // Ahora importar el backup limpio
+        $command = sprintf(
+            'gunzip -c %s | mysql --host=%s --port=%s --user=%s --password=%s %s 2>&1',
+            escapeshellarg($backupPath),
+            escapeshellarg($dbHost),
+            escapeshellarg($dbPort),
+            escapeshellarg($dbUser),
+            escapeshellarg($dbPass),
+            escapeshellarg($dbName)
+        );
 
         $output = array();
         $returnVar = 0;
         exec($command, $output, $returnVar);
 
         if ($returnVar !== 0) {
-            $this->errors[] = "Error al restaurar la base de datos: " . implode("\n", $output);
+            $this->errors[] = "Error al restaurar: " . implode("\n", $output);
+            $reportProgress('db_error', 'Error: ' . implode("\n", $output), 90);
+            return $result;
+        }
+
+        $reportProgress('db_verify', 'Verificando restauración...', 90);
+
+        $result['success'] = true;
+        $this->messages[] = "Base de datos restaurada correctamente";
+        $reportProgress('db_done', '¡Base de datos restaurada correctamente!', 95);
+
+        return $result;
+    }
+
+    /**
+     * Restore PostgreSQL database.
+     */
+    private function restore_database_postgresql($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress, $result)
+    {
+        $reportProgress('db_clean', 'Limpiando base de datos PostgreSQL...', 60);
+
+        // Limpiar todas las tablas en PostgreSQL
+        $command = sprintf(
+            'PGPASSWORD=%s psql --host=%s --port=%s --username=%s -d %s -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>&1',
+            escapeshellarg($dbPass),
+            escapeshellarg($dbHost),
+            escapeshellarg($dbPort),
+            escapeshellarg($dbUser),
+            escapeshellarg($dbName)
+        );
+        exec($command);
+
+        $reportProgress('db_import', 'Importando backup PostgreSQL...', 65);
+
+        $command = sprintf(
+            'gunzip -c %s | PGPASSWORD=%s psql --host=%s --port=%s --username=%s %s 2>&1',
+            escapeshellarg($backupPath),
+            escapeshellarg($dbPass),
+            escapeshellarg($dbHost),
+            escapeshellarg($dbPort),
+            escapeshellarg($dbUser),
+            escapeshellarg($dbName)
+        );
+
+        $output = array();
+        $returnVar = 0;
+        exec($command, $output, $returnVar);
+
+        if ($returnVar !== 0) {
+            $this->errors[] = "Error al restaurar PostgreSQL: " . implode("\n", $output);
+            $reportProgress('db_error', 'Error: ' . implode("\n", $output), 90);
             return $result;
         }
 
         $result['success'] = true;
-        $this->messages[] = "Base de datos restaurada correctamente desde: " . basename($backupFile);
+        $this->messages[] = "PostgreSQL restaurado correctamente";
+        $reportProgress('db_done', '¡Base de datos restaurada!', 95);
 
         return $result;
     }
@@ -693,34 +859,52 @@ class backup_manager
      *
      * @param string $packagePath
      * @param string $extractTo
+     * @param callable|null $progressCallback Optional callback for progress
      * @return bool
      */
-    private function extract_unified_package($packagePath, $extractTo)
+    private function extract_unified_package($packagePath, $extractTo, $progressCallback = null)
     {
+        // Helper to call progress callback
+        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
         if (!extension_loaded('zip')) {
             $this->errors[] = "La extensión PHP ZIP no está instalada.";
+            $reportProgress('extract_error', 'Extensión ZIP no disponible', 5);
             return false;
         }
+
+        $reportProgress('extract_open', 'Abriendo archivo de backup...', 6);
 
         $zip = new ZipArchive();
         if ($zip->open($packagePath) !== true) {
             $this->errors[] = "No se puede abrir el paquete: " . basename($packagePath);
+            $reportProgress('extract_error', 'No se puede abrir el paquete', 6);
             return false;
         }
+
+        $numFiles = $zip->numFiles;
+        $reportProgress('extract_init', "Extrayendo {$numFiles} elementos...", 8);
 
         if (!@mkdir($extractTo, 0755, true)) {
             $this->errors[] = "No se puede crear directorio de extracción.";
             $zip->close();
+            $reportProgress('extract_error', 'Error al crear directorio temporal', 8);
             return false;
         }
 
         if (!$zip->extractTo($extractTo)) {
             $this->errors[] = "Error al extraer el paquete.";
             $zip->close();
+            $reportProgress('extract_error', 'Error al extraer archivos', 15);
             return false;
         }
 
         $zip->close();
+        $reportProgress('extract_complete', 'Extracción completada', 18);
         return true;
     }
 
@@ -780,6 +964,100 @@ class backup_manager
                 @copy($item->getPathname(), $destPath);
             }
         }
+    }
+
+    /**
+     * Copy a directory recursively with progress reporting.
+     *
+     * @param string $source
+     * @param string $dest
+     * @param array $excludeFiles Files to skip
+     * @param callable|null $progressCallback Optional callback for progress
+     * @param int $startPercent Starting percentage for progress
+     * @param int $endPercent Ending percentage for progress
+     */
+    private function copy_directory_with_progress($source, $dest, $excludeFiles = array(), $progressCallback = null, $startPercent = 0, $endPercent = 100)
+    {
+        $source = rtrim($source, '/\\');
+        $dest = rtrim($dest, '/\\');
+
+        // Helper to call progress callback
+        $reportProgress = function($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
+        // First pass: count total files
+        $totalFiles = 0;
+        $countIterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        foreach ($countIterator as $item) {
+            $relativePath = substr($item->getPathname(), strlen($source) + 1);
+            if (!in_array(basename($relativePath), $excludeFiles)) {
+                $totalFiles++;
+            }
+        }
+
+        if ($totalFiles === 0) {
+            $reportProgress('copy_progress', 'No hay archivos para copiar', $startPercent);
+            return;
+        }
+
+        $reportProgress('copy_start', "Copiando {$totalFiles} archivos...", $startPercent);
+
+        // Second pass: copy files with progress
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($source, RecursiveDirectoryIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        $currentFile = 0;
+        $lastReportedPercent = $startPercent;
+
+        foreach ($iterator as $item) {
+            $relativePath = substr($item->getPathname(), strlen($source) + 1);
+            $destPath = $dest . '/' . $relativePath;
+
+            // Skip excluded files
+            if (in_array(basename($relativePath), $excludeFiles)) {
+                continue;
+            }
+
+            if ($item->isDir()) {
+                if (!is_dir($destPath)) {
+                    @mkdir($destPath, 0755, true);
+                }
+            } else {
+                $destDir = dirname($destPath);
+                if (!is_dir($destDir)) {
+                    @mkdir($destDir, 0755, true);
+                }
+                @copy($item->getPathname(), $destPath);
+
+                $currentFile++;
+
+                // Report progress every 100 files or at significant milestones
+                $percentRange = $endPercent - $startPercent;
+                $currentPercent = $startPercent + (($currentFile / $totalFiles) * $percentRange);
+
+                // Only report every 2% to avoid flooding
+                if ($currentPercent - $lastReportedPercent >= 2 || $currentFile === $totalFiles) {
+                    $reportProgress('copy_progress', "Copiando archivos... ({$currentFile} de {$totalFiles})", intval($currentPercent));
+                    $lastReportedPercent = $currentPercent;
+                }
+
+                // Prevent timeout every 500 files
+                if ($currentFile % 500 === 0) {
+                    @set_time_limit(300);
+                }
+            }
+        }
+
+        $reportProgress('copy_complete', "Archivos copiados: {$currentFile}", $endPercent);
     }
 
     /**

@@ -1,10 +1,10 @@
 <?php
 /**
  * Script de Recuperación de Emergencia - FacturaScripts
- * 
+ *
  * Este script permite restaurar copias de seguridad cuando el sistema principal no carga.
  * Utiliza el backup_manager del plugin system_updater.
- * 
+ *
  * Mantiene la sesión de usuario para seguridad o solicita login si no hay sesión.
  */
 
@@ -68,8 +68,6 @@ if (!$user && isset($_POST['nick']) && isset($_POST['password'])) {
 
     if ($row = $result->fetch_assoc()) {
         // Verificar contraseña (md5 o sha1 según versión antigua, o password_verify para nuevas)
-        // FSFramework legacy usa sha1 o md5 directo a veces, o funciones propias.
-        // Asumimos sha1 que es lo común en versiones 2017
         if (sha1($password) === $row['password'] || md5($password) === $row['password'] || password_verify($password, $row['password'])) {
             if ($row['admin']) {
                 $_SESSION['user_id'] = $row['nick'];
@@ -144,20 +142,6 @@ $backupManager = new backup_manager(FS_FOLDER);
 $message = '';
 $messageType = 'info';
 
-// Procesar Acciones
-if (isset($_GET['action'])) {
-    if ($_GET['action'] == 'restore_complete' && isset($_GET['file'])) {
-        $result = $backupManager->restore_complete($_GET['file']);
-        if ($result['success']) {
-            $message = "Sistema restaurado correctamente.";
-            $messageType = "success";
-        } else {
-            $message = "Error al restaurar: " . implode(", ", $backupManager->get_errors());
-            $messageType = "danger";
-        }
-    }
-}
-
 // Listar backups
 $backups = $backupManager->list_backups_grouped();
 ?>
@@ -226,9 +210,9 @@ $backups = $backupManager->list_backups_grouped();
                                 </td>
                                 <td>
                                     <?php if ($group['complete']): ?>
-                                        <a href="?action=restore_complete&file=<?php echo $group['complete']['name']; ?>"
-                                            class="btn btn-danger btn-sm"
-                                            onclick="return confirm('¡ADVERTENCIA! Esto sobrescribirá TODOS los archivos y la base de datos. ¿Estás seguro?');">
+                                        <a href="#"
+                                            class="btn btn-danger btn-sm restore-btn"
+                                            data-file="<?php echo htmlspecialchars($group['complete']['name']); ?>">
                                             <i class="fa fa-undo"></i> Restaurar Todo
                                         </a>
                                     <?php else: ?>
@@ -247,6 +231,180 @@ $backups = $backupManager->list_backups_grouped();
             </div>
         </div>
     </div>
+
+    <!-- Modal de Progreso de Restauración -->
+    <div class="modal fade" id="restoreProgressModal" tabindex="-1" role="dialog" data-backdrop="static" data-keyboard="false">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header bg-danger">
+                    <h4 class="modal-title">
+                        <i class="fa fa-refresh fa-spin" id="modalSpinner"></i> Restaurando Sistema
+                    </h4>
+                </div>
+                <div class="modal-body">
+                    <div class="text-center" style="margin-bottom: 20px;">
+                        <i class="fa fa-ambulance" style="font-size: 48px; color: #d9534f;"></i>
+                    </div>
+
+                    <div class="progress" style="height: 30px;">
+                        <div id="restoreProgressBar" class="progress-bar progress-bar-striped active progress-bar-danger"
+                            role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                            style="width: 0%; min-width: 2em;">
+                            0%
+                        </div>
+                    </div>
+
+                    <div id="restoreStatusMessage" class="alert alert-info text-center" style="margin-top: 15px;">
+                        <i class="fa fa-spinner fa-spin" id="statusSpinner"></i>
+                        <span id="restoreStatusText">Iniciando restauración...</span>
+                    </div>
+
+                    <div id="restoreDetails" class="well well-sm" style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background-color: #f5f5f5;">
+                        <small class="text-muted">Esperando inicio...</small>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <a href="recovery.php" id="restoreCompleteBtn" class="btn btn-success" style="display: none;">
+                        <i class="fa fa-check"></i> Finalizar
+                    </a>
+                    <button type="button" id="restoreErrorBtn" class="btn btn-danger" data-dismiss="modal" style="display: none;">
+                        <i class="fa fa-times"></i> Cerrar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.4.1/js/bootstrap.min.js"></script>
+
+    <script>
+    (function() {
+        var restoreEventSource = null;
+        var restoreLog = [];
+
+        function startRestore(file, type) {
+            restoreLog = [];
+            updateProgress(0, 'Iniciando restauración...');
+            document.getElementById('restoreDetails').innerHTML = '<small class="text-muted">Conectando al servidor...</small>';
+            document.getElementById('restoreCompleteBtn').style.display = 'none';
+            document.getElementById('restoreErrorBtn').style.display = 'none';
+            document.getElementById('modalSpinner').classList.add('fa-spin');
+            document.getElementById('statusSpinner').classList.add('fa-spin');
+
+            jQuery('#restoreProgressModal').modal('show');
+
+            var sseUrl = 'process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type);
+
+            restoreEventSource = new EventSource(sseUrl);
+
+            restoreEventSource.addEventListener('start', function(e) {
+                var data = JSON.parse(e.data);
+                addLogEntry('Iniciando: ' + data.message);
+            });
+
+            restoreEventSource.addEventListener('init', function(e) {
+                var data = JSON.parse(e.data);
+                updateProgress(data.percent, data.message);
+                addLogEntry(data.message);
+            });
+
+            restoreEventSource.addEventListener('phase', function(e) {
+                var data = JSON.parse(e.data);
+                addLogEntry('=== Fase: ' + data.message + ' ===');
+            });
+
+            restoreEventSource.addEventListener('progress', function(e) {
+                var data = JSON.parse(e.data);
+                updateProgress(data.percent, data.message);
+                if (data.step && data.step.indexOf('_progress') === -1) {
+                    addLogEntry(data.message);
+                }
+            });
+
+            restoreEventSource.addEventListener('complete', function(e) {
+                var data = JSON.parse(e.data);
+                updateProgress(100, data.message, 'success');
+                addLogEntry('✓ ' + data.message);
+                document.getElementById('restoreCompleteBtn').style.display = 'inline-block';
+                document.getElementById('modalSpinner').classList.remove('fa-spin');
+                document.getElementById('statusSpinner').classList.remove('fa-spin');
+                restoreEventSource.close();
+            });
+
+            restoreEventSource.addEventListener('error', function(e) {
+                var data = JSON.parse(e.data);
+                updateProgress(data.percent || 0, data.message, 'danger');
+                addLogEntry('✗ ERROR: ' + data.message);
+                document.getElementById('restoreErrorBtn').style.display = 'inline-block';
+                document.getElementById('modalSpinner').classList.remove('fa-spin');
+                document.getElementById('statusSpinner').classList.remove('fa-spin');
+                restoreEventSource.close();
+            });
+
+            restoreEventSource.onerror = function() {
+                updateProgress(0, 'Error de conexión con el servidor', 'danger');
+                addLogEntry('✗ Error de conexión');
+                document.getElementById('restoreErrorBtn').style.display = 'inline-block';
+                document.getElementById('modalSpinner').classList.remove('fa-spin');
+                document.getElementById('statusSpinner').classList.remove('fa-spin');
+                restoreEventSource.close();
+            };
+        }
+
+        function updateProgress(percent, message, type) {
+            var progressBar = document.getElementById('restoreProgressBar');
+            var statusMessage = document.getElementById('restoreStatusMessage');
+            var statusText = document.getElementById('restoreStatusText');
+
+            progressBar.style.width = percent + '%';
+            progressBar.setAttribute('aria-valuenow', percent);
+            progressBar.textContent = percent + '%';
+
+            statusText.textContent = message;
+
+            statusMessage.className = 'alert text-center';
+            progressBar.className = 'progress-bar progress-bar-striped active progress-bar-danger';
+
+            if (type === 'success') {
+                statusMessage.classList.add('alert-success');
+                progressBar.classList.remove('active');
+                progressBar.classList.remove('progress-bar-danger');
+                progressBar.classList.add('progress-bar-success');
+            } else if (type === 'danger') {
+                statusMessage.classList.add('alert-danger');
+            } else {
+                statusMessage.classList.add('alert-info');
+            }
+        }
+
+        function addLogEntry(message) {
+            restoreLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
+            var detailsDiv = document.getElementById('restoreDetails');
+            detailsDiv.innerHTML = restoreLog.map(function(entry) {
+                return '<div>' + entry + '</div>';
+            }).join('');
+            detailsDiv.scrollTop = detailsDiv.scrollHeight;
+        }
+
+        jQuery(document).ready(function() {
+            jQuery('.restore-btn').on('click', function(e) {
+                e.preventDefault();
+
+                var file = jQuery(this).data('file');
+
+                if (file) {
+                    if (confirm('¡ADVERTENCIA! Esto sobrescribirá TODOS los archivos y la base de datos. ¿Estás seguro?')) {
+                        startRestore(file, 'complete');
+                    }
+                } else {
+                    alert('Error: No se pudo determinar el archivo de backup');
+                }
+            });
+        });
+    })();
+    </script>
 </body>
 
 </html>

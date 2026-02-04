@@ -371,6 +371,232 @@
             </section>
         </div>
     </div>
+<!-- Modal de Progreso de Restauración -->
+<div class="modal fade" id="restoreProgressModal" tabindex="-1" role="dialog" data-backdrop="static" data-keyboard="false">
+    <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+            <div class="modal-header bg-primary">
+                <h4 class="modal-title">
+                    <i class="fa fa-refresh fa-spin"></i> Restaurando Copia de Seguridad
+                </h4>
+            </div>
+            <div class="modal-body">
+                <div class="text-center" style="margin-bottom: 20px;">
+                    <i class="fa fa-database" style="font-size: 48px; color: #3c8dbc;"></i>
+                </div>
+
+                <div class="progress" style="height: 30px;">
+                    <div id="restoreProgressBar" class="progress-bar progress-bar-striped active"
+                        role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                        style="width: 0%; min-width: 2em;">
+                        0%
+                    </div>
+                </div>
+
+                <div id="restoreStatusMessage" class="alert alert-info text-center" style="margin-top: 15px;">
+                    <i class="fa fa-spinner fa-spin"></i>
+                    <span id="restoreStatusText">Iniciando restauración...</span>
+                </div>
+
+                <div id="restoreDetails" class="well well-sm" style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background-color: #f5f5f5;">
+                    <small class="text-muted">Esperando inicio...</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <a href="index.php?page=admin_updater" id="restoreCompleteBtn" class="btn btn-success" style="display: none;">
+                    <i class="fa fa-check"></i> Aceptar
+                </a>
+                <button type="button" id="restoreErrorBtn" class="btn btn-danger" data-dismiss="modal" style="display: none;">
+                    <i class="fa fa-times"></i> Cerrar
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    var restoreEventSource = null;
+    var restoreLog = [];
+
+    function startRestore(file, type) {
+        // Reset UI
+        restoreLog = [];
+        updateProgress(0, 'Iniciando restauración...');
+        document.getElementById('restoreDetails').innerHTML = '<small class="text-muted">Conectando al servidor...</small>';
+        document.getElementById('restoreCompleteBtn').style.display = 'none';
+        document.getElementById('restoreErrorBtn').style.display = 'none';
+
+        // Show modal
+        jQuery('#restoreProgressModal').modal('show');
+
+        // Start SSE connection
+        var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type);
+
+        restoreEventSource = new EventSource(sseUrl);
+
+        restoreEventSource.addEventListener('start', function(e) {
+            var data = JSON.parse(e.data);
+            addLogEntry('Iniciando: ' + data.message);
+        });
+
+        restoreEventSource.addEventListener('init', function(e) {
+            var data = JSON.parse(e.data);
+            updateProgress(data.percent, data.message);
+            addLogEntry(data.message);
+        });
+
+        restoreEventSource.addEventListener('phase', function(e) {
+            var data = JSON.parse(e.data);
+            addLogEntry('=== Fase: ' + data.message + ' ===');
+        });
+
+        restoreEventSource.addEventListener('progress', function(e) {
+            var data = JSON.parse(e.data);
+            updateProgress(data.percent, data.message);
+            if (data.step && data.step.indexOf('_progress') === -1) {
+                addLogEntry(data.message);
+            }
+        });
+
+        restoreEventSource.addEventListener('complete', function(e) {
+            var data = JSON.parse(e.data);
+            updateProgress(100, data.message, 'success');
+            addLogEntry('✓ ' + data.message);
+            document.getElementById('restoreCompleteBtn').style.display = 'inline-block';
+            restoreEventSource.close();
+        });
+
+        restoreEventSource.addEventListener('error', function(e) {
+            var data = JSON.parse(e.data);
+            updateProgress(data.percent || 0, data.message, 'danger');
+            addLogEntry('✗ ERROR: ' + data.message);
+            document.getElementById('restoreErrorBtn').style.display = 'inline-block';
+            restoreEventSource.close();
+        });
+
+        restoreEventSource.onerror = function() {
+            updateProgress(0, 'Error de conexión con el servidor', 'danger');
+            addLogEntry('✗ Error de conexión');
+            document.getElementById('restoreErrorBtn').style.display = 'inline-block';
+            restoreEventSource.close();
+        };
+    }
+
+    function updateProgress(percent, message, type) {
+        var progressBar = document.getElementById('restoreProgressBar');
+        var statusMessage = document.getElementById('restoreStatusMessage');
+        var statusText = document.getElementById('restoreStatusText');
+
+        progressBar.style.width = percent + '%';
+        progressBar.setAttribute('aria-valuenow', percent);
+        progressBar.textContent = percent + '%';
+
+        statusText.textContent = message;
+
+        // Update alert type
+        statusMessage.className = 'alert text-center';
+        if (type === 'success') {
+            statusMessage.classList.add('alert-success');
+            progressBar.classList.remove('active');
+        } else if (type === 'danger') {
+            statusMessage.classList.add('alert-danger');
+            progressBar.classList.add('progress-bar-danger');
+        } else {
+            statusMessage.classList.add('alert-info');
+        }
+    }
+
+    function addLogEntry(message) {
+        restoreLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
+        var detailsDiv = document.getElementById('restoreDetails');
+        detailsDiv.innerHTML = restoreLog.map(function(entry) {
+            return '<div>' + entry + '</div>';
+        }).join('');
+        detailsDiv.scrollTop = detailsDiv.scrollHeight;
+    }
+
+    // Override restore link clicks
+    document.addEventListener('DOMContentLoaded', function() {
+        // Find all restore links and override them
+        var restoreLinks = document.querySelectorAll('a[href*="action=restore_complete"]');
+        restoreLinks.forEach(function(link) {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+
+                // Parse URL to get file parameter
+                var url = new URL(link.href, window.location.href);
+                var file = url.searchParams.get('file');
+
+                if (!file) {
+                    // Try to extract from the href directly
+                    var match = link.href.match(/file=([^&]+)/);
+                    if (match) {
+                        file = decodeURIComponent(match[1]);
+                    }
+                }
+
+                if (file) {
+                    if (confirm('¿Restaurar TODO? Esta acción sobrescribirá los datos actuales. ¿Estás seguro?')) {
+                        startRestore(file, 'complete');
+                    }
+                } else {
+                    alert('Error: No se pudo determinar el archivo de backup');
+                }
+            });
+        });
+
+        // Handle restore database links
+        var dbRestoreLinks = document.querySelectorAll('a[href*="action=restore_database"]');
+        dbRestoreLinks.forEach(function(link) {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+
+                var url = new URL(link.href, window.location.href);
+                var file = url.searchParams.get('file');
+
+                if (!file) {
+                    var match = link.href.match(/file=([^&]+)/);
+                    if (match) {
+                        file = decodeURIComponent(match[1]);
+                    }
+                }
+
+                if (file) {
+                    if (confirm('¿Restaurar solo la BASE DE DATOS?')) {
+                        startRestore(file, 'database');
+                    }
+                }
+            });
+        });
+
+        // Handle restore files links
+        var filesRestoreLinks = document.querySelectorAll('a[href*="action=restore_files"]');
+        filesRestoreLinks.forEach(function(link) {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+
+                var url = new URL(link.href, window.location.href);
+                var file = url.searchParams.get('file');
+
+                if (!file) {
+                    var match = link.href.match(/file=([^&]+)/);
+                    if (match) {
+                        file = decodeURIComponent(match[1]);
+                    }
+                }
+
+                if (file) {
+                    if (confirm('¿Restaurar solo los ARCHIVOS?')) {
+                        startRestore(file, 'files');
+                    }
+                }
+            });
+        });
+    });
+})();
+</script>
+
 </body>
 
 </html>
