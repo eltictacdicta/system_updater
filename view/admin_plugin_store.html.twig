@@ -1,0 +1,184 @@
+{#
+/**
+ * This file is part of system_updater plugin for FSFramework
+ * Vista de la Tienda de Plugins
+ */
+#}
+{{ include('header.html.twig') }}
+
+<div class="container-fluid" style="margin-top: 10px;">
+    <div class="row">
+        <div class="col-xs-6">
+            <div class="btn-group">
+                <a class="btn btn-sm btn-default" href="{{ fsc.url()|raw }}" title="Recargar la página">
+                    <span class="glyphicon glyphicon-refresh"></span>
+                </a>
+                <a class="btn btn-sm btn-default" href="{{ fsc.url()|raw }}&action=refresh" title="Actualizar lista de plugins">
+                    <span class="glyphicon glyphicon-download-alt"></span>
+                </a>
+            </div>
+        </div>
+        <div class="col-xs-6 text-right">
+            <h2 style="margin-top: 0px;">
+                <i class="fa fa-store"></i> Tienda de Plugins
+            </h2>
+        </div>
+    </div>
+</div>
+
+{# Mensajes #}
+{% if fsc.successMessage %}
+<div class="alert alert-success alert-dismissible" style="margin: 10px;">
+    <button type="button" class="close" data-dismiss="alert">&times;</button>
+    <i class="fa fa-check-circle"></i> {{ fsc.successMessage }}
+</div>
+{% endif %}
+
+{% if fsc.errorMessage %}
+<div class="alert alert-danger alert-dismissible" style="margin: 10px;">
+    <button type="button" class="close" data-dismiss="alert">&times;</button>
+    <i class="fa fa-exclamation-circle"></i> {{ fsc.errorMessage }}
+</div>
+{% endif %}
+
+{# Pestañas #}
+<div role="tabpanel" style="margin: 10px;">
+    <ul class="nav nav-tabs" role="tablist">
+        <li role="presentation" class="{{ fsc.activeTab == 'public' ? 'active' : '' }}">
+            <a href="{{ fsc.url()|raw }}&tab=public">
+                <i class="fa fa-globe"></i> Plugins Públicos
+            </a>
+        </li>
+        <li role="presentation" class="{{ fsc.activeTab == 'private' ? 'active' : '' }}">
+            <a href="{{ fsc.url()|raw }}&tab=private">
+                <i class="fa fa-lock"></i> Plugins Privados
+            </a>
+        </li>
+    </ul>
+
+    <div class="tab-content" style="padding: 15px; border: 1px solid #ddd; border-top: none;">
+        {% if fsc.activeTab == 'public' %}
+        {# Plugins Públicos #}
+        {% if fsc.publicPlugins|length > 0 %}
+        <div class="row">
+            {% for plugin in fsc.publicPlugins %}
+            <div class="col-md-4 col-sm-6" style="margin-bottom: 15px;">
+                <div class="panel panel-default" style="height: 100%;">
+                    <div class="panel-heading">
+                        <h4 class="panel-title">{{ plugin.nombre }}</h4>
+                    </div>
+                    <div class="panel-body">
+                        <p class="text-muted">{{ plugin.descripcion|default('Sin descripción') }}</p>
+                        <p>
+                            <small class="text-muted">
+                                Versión: {{ plugin.version|default('N/A') }}<br>
+                                Autor: {{ plugin.autor|default('Desconocido') }}
+                            </small>
+                        </p>
+                    </div>
+                    <div class="panel-footer">
+                        {% if fsc.isInstalled(plugin.nombre) %}
+                            {% if fsc.isActive(plugin.nombre) %}
+                            <span class="label label-success"><i class="fa fa-check"></i> Activo</span>
+                            {% else %}
+                            <span class="label label-default">Instalado</span>
+                            {% endif %}
+                        {% else %}
+                        <a href="{{ fsc.url()|raw }}&action=download&plugin_id={{ plugin.id }}" class="btn btn-sm btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre }}?');">
+                            <i class="fa fa-download"></i> Descargar
+                        </a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-muted">No hay plugins públicos disponibles.</p>
+        {% endif %}
+
+        {% else %}
+        {# Plugins Privados #}
+        <div class="row">
+            {# Configuración #}
+            <div class="col-md-4">
+                <div class="panel panel-warning">
+                    <div class="panel-heading">
+                        <h4 class="panel-title"><i class="fa fa-github"></i> Configuración GitHub</h4>
+                    </div>
+                    <div class="panel-body">
+                        <form method="post" action="{{ fsc.url()|raw }}&action=save_private_config">
+                            <div class="form-group">
+                                <label>Token de GitHub</label>
+                                <input type="password" name="github_token" class="form-control" value="{{ fsc.privateConfig.github_token|default('') }}" placeholder="ghp_xxxx...">
+                                <span class="help-block">Token con permisos de lectura de repositorios</span>
+                            </div>
+                            <div class="form-group">
+                                <label>URL del JSON de plugins</label>
+                                <input type="text" name="private_plugins_url" class="form-control" value="{{ fsc.privateConfig.private_plugins_url|default('') }}" placeholder="https://raw.githubusercontent.com/...">
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-block">
+                                <i class="fa fa-save"></i> Guardar
+                            </button>
+                        </form>
+
+                        {% if fsc.privateEnabled %}
+                        <hr>
+                        <a href="{{ fsc.url()|raw }}&action=test_private_connection" class="btn btn-info btn-sm btn-block">
+                            <i class="fa fa-plug"></i> Probar conexión
+                        </a>
+                        <a href="{{ fsc.url()|raw }}&action=delete_private_config" class="btn btn-danger btn-sm btn-block" style="margin-top: 5px;" onclick="return confirm('¿Eliminar configuración?');">
+                            <i class="fa fa-trash"></i> Eliminar config
+                        </a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            {# Lista de plugins privados #}
+            <div class="col-md-8">
+                <div class="panel panel-default">
+                    <div class="panel-heading">
+                        <h4 class="panel-title"><i class="fa fa-lock"></i> Plugins Privados Disponibles</h4>
+                    </div>
+                    <div class="panel-body">
+                        {% if not fsc.privateEnabled %}
+                        <div class="alert alert-info">
+                            <i class="fa fa-info-circle"></i> Configura el token de GitHub para ver plugins privados.
+                        </div>
+                        {% elseif fsc.privatePlugins|length > 0 %}
+                        <div class="row">
+                            {% for plugin in fsc.privatePlugins %}
+                            <div class="col-md-6" style="margin-bottom: 15px;">
+                                <div class="panel panel-warning" style="height: 100%;">
+                                    <div class="panel-heading">
+                                        <h5 class="panel-title">{{ plugin.nombre }}</h5>
+                                    </div>
+                                    <div class="panel-body">
+                                        <p class="text-muted">{{ plugin.descripcion|default('Sin descripción') }}</p>
+                                    </div>
+                                    <div class="panel-footer">
+                                        {% if fsc.isInstalled(plugin.nombre) %}
+                                        <span class="label label-success"><i class="fa fa-check"></i> Instalado</span>
+                                        {% else %}
+                                        <a href="{{ fsc.url()|raw }}&action=download_private&plugin_id={{ plugin.id }}" class="btn btn-sm btn-warning" onclick="return confirm('¿Descargar {{ plugin.nombre }}?');">
+                                            <i class="fa fa-download"></i> Descargar
+                                        </a>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p class="text-muted">No hay plugins privados disponibles.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{{ include('footer.html.twig') }}
