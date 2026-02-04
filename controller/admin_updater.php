@@ -426,7 +426,7 @@ class admin_updater extends fs_controller
      * Detecta si la petición es AJAX
      * @return bool
      */
-    private function isAjax()
+    public function isAjax(): bool
     {
         return (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest')
             || $this->request->query->get('ajax');
@@ -450,7 +450,7 @@ class admin_updater extends fs_controller
      */
     private function downloadBackup($file, $type = null)
     {
-        $path = $this->backupManager->getBackupPath() . DIRECTORY_SEPARATOR . basename($file);
+        $path = $this->backupManager->get_backup_path() . DIRECTORY_SEPARATOR . basename($file);
 
         if (file_exists($path)) {
             header('Content-Description: File Transfer');
