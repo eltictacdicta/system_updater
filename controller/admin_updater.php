@@ -77,6 +77,15 @@ class admin_updater extends fs_controller
         require_once __DIR__ . '/../lib/backup_manager.php';
         require_once __DIR__ . '/../lib/updater_manager.php';
         require_once 'base/fs_plugin_manager.php';
+        
+        // Verificar si es una subida chunked (Resumable.js)
+        require_once 'base/fs_secure_chunked_upload.php';
+        if (fs_secure_chunked_upload::is_chunk_request()) {
+            // Asegurar que backupManager esté disponible para el handler
+            $this->backupManager = new backup_manager();
+            $this->handleChunkUpload();
+            return;
+        }
 
         $this->backupManager = new backup_manager();
         $this->plugin_manager = new fs_plugin_manager();
@@ -468,6 +477,104 @@ class admin_updater extends fs_controller
             exit;
         } else {
             $this->new_error_msg("Archivo no encontrado: " . basename($file));
+        }
+    }
+    /**
+     * Maneja la subida de archivos por chunks (Resumable.js)
+     */
+    protected function handleChunkUpload()
+    {
+        $this->template = false;
+
+        // Asegurar que el directorio existe
+        $targetDir = $this->backupManager->get_backup_path() . '/';
+        if (!is_dir($targetDir)) {
+            @mkdir($targetDir, 0755, true);
+        }
+
+        try {
+            // Crear el uploader seguro
+            $uploader = new fs_secure_chunked_upload(
+                'system_updater',      // Nombre del plugin
+                $targetDir,            // Directorio destino
+                ['zip', 'gz'],         // Extensiones permitidas
+                2048                   // 2GB máximo para backups
+            );
+
+            // Desactivar CSRF para compatibilidad con Resumable.js
+            $uploader->disable_csrf();
+
+            // Callback cuando se completa la subida
+            $uploader->on_complete(function ($final_path, $filename, $filesize, $params, $uploaded_by) {
+                $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+                $backupType = 'unknown';
+
+                // Si es un ZIP, validar su contenido
+                if ($ext === 'zip') {
+                    $zip = new ZipArchive();
+                    if ($zip->open($final_path) !== TRUE) {
+                        @unlink($final_path);
+                        throw new Exception('El archivo no es un ZIP válido');
+                    }
+
+                    // Verificar contenido del backup
+                    $hasBackupMetadata = $zip->locateName('backup_metadata.json') !== false;
+                    $hasDatabase = false;
+                    $hasFiles = false;
+
+                    for ($i = 0; $i < $zip->numFiles; $i++) {
+                        $name = $zip->getNameIndex($i);
+                        if (strpos($name, 'database/') === 0) {
+                            $hasDatabase = true;
+                        }
+                        if (strpos($name, 'files/') === 0) {
+                            $hasFiles = true;
+                        }
+                    }
+
+                    $zip->close();
+
+                    // Determinar el tipo de backup
+                    if ($hasBackupMetadata && $hasDatabase && $hasFiles) {
+                        $backupType = 'complete';
+                    } elseif (strpos($filename, '_db') !== false || $hasDatabase) {
+                        $backupType = 'database';
+                    } elseif (strpos($filename, '_files') !== false || $hasFiles) {
+                        $backupType = 'files';
+                    } else {
+                        $backupType = 'zip';
+                    }
+                } elseif ($ext === 'gz') {
+                    $backupType = 'database';
+                }
+
+                // Log de la subida
+                error_log("Backup subido: {$filename} ({$filesize} bytes) por {$uploaded_by} - Tipo: {$backupType}");
+
+                return [
+                    'backup_type' => $backupType,
+                    'filename' => $filename,
+                    'size' => $filesize
+                ];
+            });
+
+            // Manejar la subida del chunk
+            $result = $uploader->handle_chunk();
+
+            // Enviar respuesta JSON
+            fs_secure_chunked_upload::send_json_response($result);
+
+        } catch (Exception $e) {
+            $code = $e->getCode();
+            $httpCode = ($code >= 400 && $code < 600) ? $code : 500;
+
+            http_response_code($httpCode);
+            header('Content-Type: application/json');
+            echo json_encode([
+                'success' => false,
+                'message' => $e->getMessage()
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
         }
     }
 }

@@ -906,7 +906,7 @@
 
                 // Configurar Resumable.js
                 var r = new Resumable({
-                    target: 'plugins/system_updater/process_upload.php',
+                    target: '<?php echo $fsc->url(); ?>',
                     chunkSize: 10 * 1024 * 1024, // 10MB por chunk
                     simultaneousUploads: 3,
                     testChunks: false,
