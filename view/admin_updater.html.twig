@@ -57,8 +57,11 @@
                     </a>
                 </div>
                 {% else %}
-                <div class="alert alert-success">
+                <div class="alert alert-success clearfix">
                     <i class="fa fa-check"></i> El núcleo está actualizado (v{{ fsc.plugin_manager.version }})
+                    <a href="{{ fsc.url()|raw }}&action=reinstall_core" class="btn btn-danger btn-xs pull-right" onclick="return confirm('¿Seguro que quieres forzar la reinstalación del núcleo? Se descargarán y sobrescribirán los archivos del sistema.');" style="margin-top: -2px;">
+                        <i class="fa fa-exclamation-triangle"></i> Reinstalar Core
+                    </a>
                 </div>
                 {% endif %}
 
@@ -107,10 +110,58 @@
                     <button type="button" class="btn btn-success" id="btn-create-backup">
                         <i class="fa fa-plus"></i> Crear Backup Completo
                     </button>
+                    <button type="button" class="btn btn-info" id="btn-show-upload" data-toggle="collapse" data-target="#uploadBackupPanel">
+                        <i class="fa fa-cloud-upload"></i> Subir Backup
+                    </button>
                     <span id="backup-loading" style="display:none; margin-left: 10px;">
                         <i class="fa fa-spinner fa-spin"></i> Procesando...
                     </span>
                 </p>
+
+                {# Panel de subida colapsable #}
+                <div class="collapse" id="uploadBackupPanel">
+                    <div class="panel panel-info" style="margin-top: 10px;">
+                        <div class="panel-heading">
+                            <h4 class="panel-title"><i class="fa fa-cloud-upload"></i> Subir Copia de Seguridad</h4>
+                        </div>
+                        <div class="panel-body">
+                            <div class="alert alert-info">
+                                <i class="fa fa-info-circle"></i>
+                                <strong>Subida por fragmentos:</strong> Permite subir archivos ZIP de hasta 2GB.
+                                Si la conexión se interrumpe, la subida se puede reanudar.
+                            </div>
+                            
+                            {# Zona de Drop #}
+                            <div id="backup-drop-zone" style="border: 2px dashed #3c8dbc; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; background: #f8f9fa; transition: all 0.3s;">
+                                <i class="fa fa-cloud-upload" style="font-size: 48px; color: #3c8dbc;"></i>
+                                <h4>Arrastra el archivo ZIP aquí</h4>
+                                <p class="text-muted">o haz clic para seleccionar</p>
+                                <button type="button" class="btn btn-primary" id="backup-browse-btn">
+                                    <i class="fa fa-folder-open"></i> Seleccionar Archivo
+                                </button>
+                            </div>
+                            
+                            {# Progreso de subida #}
+                            <div id="backup-upload-progress" style="display: none; margin-top: 15px;">
+                                <div class="progress" style="height: 25px;">
+                                    <div class="progress-bar progress-bar-info progress-bar-striped active" role="progressbar" 
+                                         style="width: 0%; line-height: 25px;" id="backup-progress-bar">
+                                        <span id="backup-progress-text">0%</span>
+                                    </div>
+                                </div>
+                                <p id="backup-upload-status" class="text-center text-muted" style="margin-top: 10px;"></p>
+                            </div>
+                            
+                            <div style="margin-top: 15px;">
+                                <ul class="list-inline text-muted">
+                                    <li><i class="fa fa-check text-success"></i> Formato: <strong>.zip</strong></li>
+                                    <li><i class="fa fa-check text-success"></i> Tamaño máximo: <strong>2 GB</strong></li>
+                                    <li><i class="fa fa-check text-success"></i> Subida reanudable</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
                 <div id="backups-container">
                     {% if fsc.backups|length > 0 %}
@@ -389,6 +440,165 @@ $(document).ready(function() {
             });
         }
     });
+});
+</script>
+
+<!-- Resumable.js para subida por chunks -->
+<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
+
+<script>
+$(document).ready(function() {
+    // ========================================
+    // BACKUP UPLOAD FUNCTIONALITY
+    // ========================================
+    
+    // Verificar que Resumable esté disponible
+    if (typeof Resumable === 'undefined') {
+        console.error('Resumable.js no está cargado');
+        $('#backup-upload-status').html('<span class="text-danger"><i class="fa fa-exclamation-triangle"></i> Error: Resumable.js no está disponible</span>');
+        return;
+    }
+    
+    var $dropZone = $('#backup-drop-zone');
+    var $browseButton = $('#backup-browse-btn');
+    var $progressContainer = $('#backup-upload-progress');
+    var $progressBar = $('#backup-progress-bar');
+    var $progressText = $('#backup-progress-text');
+    var $statusText = $('#backup-upload-status');
+    
+    if ($dropZone.length === 0) return;
+    
+    // Configurar Resumable.js
+    var r = new Resumable({
+        target: 'plugins/system_updater/process_upload.php',
+        chunkSize: 10 * 1024 * 1024, // 10MB por chunk
+        simultaneousUploads: 3,
+        testChunks: false,
+        throttleProgressCallbacks: 0.5,
+        fileType: ['zip'],
+        maxFiles: 1,
+        maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB máximo
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    });
+    
+    if (!r.support) {
+        alert('Tu navegador no soporta subidas de archivos grandes. Por favor, actualiza tu navegador.');
+        return;
+    }
+    
+    // Asignar el drag & drop
+    r.assignDrop($dropZone[0]);
+    r.assignBrowse($browseButton[0]);
+    
+    // Efectos visuales de drag & drop
+    $dropZone.on('dragover', function(e) {
+        e.preventDefault();
+        $(this).css({
+            'border-color': '#00a65a',
+            'background': '#e8f5e9'
+        });
+    });
+    
+    $dropZone.on('dragleave drop', function(e) {
+        $(this).css({
+            'border-color': '#3c8dbc',
+            'background': '#f8f9fa'
+        });
+    });
+    
+    // Click en la zona para abrir selector
+    $dropZone.on('click', function(e) {
+        if (!$(e.target).is('button')) {
+            $browseButton.click();
+        }
+    });
+    
+    // Evento: Archivo añadido
+    r.on('fileAdded', function(file) {
+        // Validar extensión
+        var ext = file.fileName.split('.').pop().toLowerCase();
+        if (ext !== 'zip') {
+            alert('Solo se permiten archivos .zip de backup');
+            return false;
+        }
+        
+        // Mostrar barra de progreso
+        $progressContainer.show();
+        $dropZone.hide();
+        $progressBar.css('width', '0%').removeClass('progress-bar-success progress-bar-danger').addClass('progress-bar-info active');
+        $progressText.text('0%');
+        $statusText.text('Preparando subida de: ' + file.fileName);
+        
+        // Iniciar la subida
+        r.upload();
+    });
+    
+    // Evento: Progreso de subida
+    r.on('fileProgress', function(file) {
+        var progress = Math.floor(file.progress() * 100);
+        $progressBar.css('width', progress + '%');
+        $progressText.text(progress + '%');
+        
+        if (progress < 100) {
+            var fileSize = formatBytes(file.size);
+            var uploaded = formatBytes(file.size * file.progress());
+            $statusText.text('Subiendo: ' + file.fileName + ' (' + uploaded + ' de ' + fileSize + ')');
+        }
+    });
+    
+    // Evento: Subida exitosa
+    r.on('fileSuccess', function(file, message) {
+        $progressBar.removeClass('active progress-bar-info').addClass('progress-bar-success');
+        $progressText.text('100%');
+        $statusText.html('<span class="text-success"><i class="fa fa-check-circle"></i> ¡Archivo subido correctamente!</span>');
+        
+        // Recargar la página después de 2 segundos
+        setTimeout(function() {
+            window.location.reload();
+        }, 2000);
+    });
+    
+    // Evento: Error en la subida
+    r.on('fileError', function(file, message) {
+        $progressBar.removeClass('active progress-bar-info').addClass('progress-bar-danger');
+        
+        var errorMsg = 'Error desconocido';
+        try {
+            var response = JSON.parse(message);
+            errorMsg = response.message || message;
+        } catch(e) {
+            errorMsg = message;
+        }
+        
+        $statusText.html('<span class="text-danger"><i class="fa fa-exclamation-triangle"></i> <strong>Error:</strong> ' + errorMsg + '</span>');
+        
+        // Mostrar opción de reintentar
+        setTimeout(function() {
+            if (confirm('¿Deseas reintentar la subida?')) {
+                r.upload();
+            } else {
+                // Restaurar zona de drop
+                $progressContainer.hide();
+                $dropZone.show();
+                r.files = [];
+            }
+        }, 2000);
+    });
+    
+    // Función para formatear bytes
+    function formatBytes(bytes) {
+        if (bytes >= 1073741824) {
+            return (bytes / 1073741824).toFixed(2) + ' GB';
+        } else if (bytes >= 1048576) {
+            return (bytes / 1048576).toFixed(2) + ' MB';
+        } else if (bytes >= 1024) {
+            return (bytes / 1024).toFixed(2) + ' KB';
+        } else {
+            return bytes + ' bytes';
+        }
+    }
 });
 </script>
 

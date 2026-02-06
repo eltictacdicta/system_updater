@@ -12,12 +12,12 @@
  *
  * @author Javier Trujillo
  * @license LGPL-3.0-or-later
- * @version 2.1.0
+ * @version 2.3.0
  */
 class backup_manager
 {
     const BACKUP_DIR = 'backups';
-    const VERSION = '2.1.0';
+    const VERSION = '2.3.0';
 
     /**
      * @var string
@@ -166,17 +166,52 @@ class backup_manager
      */
     public function create_backup($customName = '', $includePlugins = true)
     {
+        return $this->create_backup_with_progress($customName, $includePlugins, null);
+    }
+
+    /**
+     * Create a complete backup (database + files) with progress reporting.
+     *
+     * @param string $customName Optional custom name for the backup.
+     * @param bool $includePlugins Whether to include all plugins (default: true).
+     * @param callable|null $progressCallback Callback function($step, $message, $percent) for progress.
+     * @return array Results with 'database', 'files', and 'complete' keys.
+     */
+    public function create_backup_with_progress($customName = '', $includePlugins = true, $progressCallback = null)
+    {
+        // Helper to call progress callback
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
         $timestamp = date('Y-m-d_H-i-s');
         $baseName = $customName ? $customName : 'backup_' . $timestamp;
+
+        $reportProgress('init', 'Obteniendo información del sistema...', 5);
 
         // Get version info
         $versionInfo = $this->get_version_info();
 
+        $reportProgress('database_start', 'Iniciando copia de base de datos...', 10);
+
         // Create database backup first
-        $dbResult = $this->create_database_backup($baseName . '_db');
+        $dbResult = $this->create_database_backup_with_progress($baseName . '_db', $progressCallback);
+
+        if (!$dbResult['success']) {
+            $reportProgress('error', 'Error en la copia de base de datos', 0);
+            return array(
+                'database' => $dbResult,
+                'files' => array('success' => false),
+                'complete' => array('success' => false, 'backup_name' => $baseName)
+            );
+        }
+
+        $reportProgress('files_start', 'Iniciando copia de archivos...', 50);
 
         // Create files backup (including plugins)
-        $filesResult = $this->create_files_backup($baseName . '_files', $includePlugins);
+        $filesResult = $this->create_files_backup_with_progress($baseName . '_files', $includePlugins, $progressCallback);
 
         $results = array(
             'database' => $dbResult,
@@ -185,6 +220,8 @@ class backup_manager
         );
 
         if ($dbResult['success'] && $filesResult['success']) {
+            $reportProgress('unify', 'Creando paquete unificado...', 90);
+
             // Create a unified backup package (ZIP containing both backups + metadata)
             $unifiedResult = $this->create_unified_package($baseName, $dbResult, $filesResult, $versionInfo);
 
@@ -201,6 +238,7 @@ class backup_manager
             if ($unifiedResult['success']) {
                 $this->save_metadata($results['complete']);
                 $this->messages[] = "Copia de seguridad unificada creada: " . $unifiedResult['file'];
+                $reportProgress('cleanup', 'Limpiando archivos antiguos...', 95);
             }
         } else {
             $results['complete'] = array('success' => false, 'backup_name' => $baseName);
@@ -208,6 +246,8 @@ class backup_manager
 
         // Clean old backups (keep last 5 unified backups)
         $this->clean_old_backups(5);
+
+        $reportProgress('complete', '¡Copia de seguridad completada!', 100);
 
         return $results;
     }
@@ -280,6 +320,36 @@ class backup_manager
     }
 
     /**
+     * Check if shell functions are available on this server.
+     * Many shared hosting providers disable these for security.
+     *
+     * NOTE: We always return false to use PHP native methods for consistency
+     * between development and production environments, and to avoid issues
+     * with servers that have shell functions disabled.
+     *
+     * @return bool
+     */
+    private function shell_functions_available()
+    {
+        // Always use PHP native methods for consistency across all environments
+        return false;
+
+        /* Original detection code (kept for reference):
+        $disabled = explode(',', ini_get('disable_functions'));
+        $disabled = array_map('trim', $disabled);
+
+        // Check the essential functions we need
+        $required = array('escapeshellarg', 'exec');
+        foreach ($required as $func) {
+            if (in_array($func, $disabled) || !function_exists($func)) {
+                return false;
+            }
+        }
+        return true;
+        */
+    }
+
+    /**
      * Create a database backup.
      *
      * @param string $customName
@@ -298,6 +368,16 @@ class backup_manager
         $dbUser = defined('FS_DB_USER') ? FS_DB_USER : 'root';
         $dbPass = defined('FS_DB_PASS') ? FS_DB_PASS : '';
         $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
+
+        // Check if shell functions are available
+        if (!$this->shell_functions_available()) {
+            // Use PHP-native backup method
+            if (strtoupper($dbType) === 'POSTGRESQL') {
+                $this->errors[] = "El backup nativo de PostgreSQL no está soportado en servidores con funciones shell deshabilitadas.";
+                return array('success' => false, 'file' => null, 'error' => 'PostgreSQL native backup not supported');
+            }
+            return $this->create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
+        }
 
         if (strtoupper($dbType) === 'POSTGRESQL') {
             // PostgreSQL backup
@@ -333,6 +413,355 @@ class backup_manager
         }
 
         $this->messages[] = "Copia de base de datos creada: " . $fileName;
+        return array(
+            'success' => true,
+            'file' => $fileName,
+            'path' => $filePath,
+            'size' => filesize($filePath),
+            'size_formatted' => $this->format_bytes(filesize($filePath)),
+        );
+    }
+
+    /**
+     * Create a database backup using PHP-native functions (no shell commands).
+     * This is a fallback for servers with disabled shell functions.
+     *
+     * @param string $filePath Full path to the output file
+     * @param string $fileName Name of the output file
+     * @param string $dbHost Database host
+     * @param string $dbPort Database port
+     * @param string $dbUser Database username
+     * @param string $dbPass Database password
+     * @param string $dbName Database name
+     * @return array
+     */
+    private function create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName)
+    {
+        // Connect to database
+        $mysqli = new mysqli($dbHost, $dbUser, $dbPass, $dbName, (int) $dbPort);
+        if ($mysqli->connect_error) {
+            $this->errors[] = "Error de conexión a la base de datos: " . $mysqli->connect_error;
+            return array('success' => false, 'file' => null, 'error' => $mysqli->connect_error);
+        }
+
+        $mysqli->set_charset('utf8mb4');
+
+        // Open gzip file for writing
+        $gzFile = gzopen($filePath, 'wb9');
+        if (!$gzFile) {
+            $this->errors[] = "No se puede crear el archivo de backup comprimido.";
+            $mysqli->close();
+            return array('success' => false, 'file' => null, 'error' => 'Cannot create gzip file');
+        }
+
+        // Write header
+        $header = "-- FSFramework Database Backup\n";
+        $header .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
+        $header .= "-- Database: " . $dbName . "\n";
+        $header .= "-- PHP Native Backup (shell functions disabled)\n";
+        $header .= "-- --------------------------------------------------------\n\n";
+        $header .= "SET SQL_MODE = \"NO_AUTO_VALUE_ON_ZERO\";\n";
+        $header .= "SET AUTOCOMMIT = 0;\n";
+        $header .= "START TRANSACTION;\n";
+        $header .= "SET time_zone = \"+00:00\";\n";
+        $header .= "SET FOREIGN_KEY_CHECKS = 0;\n\n";
+        $header .= "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n";
+        $header .= "/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;\n";
+        $header .= "/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;\n";
+        $header .= "/*!40101 SET NAMES utf8mb4 */;\n\n";
+        gzwrite($gzFile, $header);
+
+        // Get all tables
+        $tables = array();
+        $result = $mysqli->query("SHOW TABLES");
+        if (!$result) {
+            $this->errors[] = "Error al obtener lista de tablas: " . $mysqli->error;
+            gzclose($gzFile);
+            $mysqli->close();
+            @unlink($filePath);
+            return array('success' => false, 'file' => null, 'error' => $mysqli->error);
+        }
+
+        while ($row = $result->fetch_array(MYSQLI_NUM)) {
+            $tables[] = $row[0];
+        }
+        $result->free();
+
+        // Process each table
+        $tableCount = count($tables);
+        foreach ($tables as $i => $table) {
+            // Prevent timeout on large databases
+            if ($i % 10 === 0) {
+                @set_time_limit(300);
+            }
+
+            // Get CREATE TABLE statement
+            $result = $mysqli->query("SHOW CREATE TABLE `" . $mysqli->real_escape_string($table) . "`");
+            if ($result) {
+                $row = $result->fetch_array(MYSQLI_NUM);
+                gzwrite($gzFile, "\n-- --------------------------------------------------------\n");
+                gzwrite($gzFile, "-- Table structure for table `{$table}`\n");
+                gzwrite($gzFile, "-- --------------------------------------------------------\n\n");
+                gzwrite($gzFile, "DROP TABLE IF EXISTS `{$table}`;\n");
+                gzwrite($gzFile, $row[1] . ";\n\n");
+                $result->free();
+            }
+
+            // Get table data
+            $result = $mysqli->query("SELECT * FROM `" . $mysqli->real_escape_string($table) . "`", MYSQLI_USE_RESULT);
+            if ($result) {
+                $columnCount = $result->field_count;
+                $hasData = false;
+                $rowBuffer = array();
+                $bufferSize = 0;
+                $maxBufferSize = 1024 * 1024; // 1MB buffer
+
+                while ($row = $result->fetch_array(MYSQLI_NUM)) {
+                    if (!$hasData) {
+                        gzwrite($gzFile, "-- Dumping data for table `{$table}`\n\n");
+                        $hasData = true;
+                    }
+
+                    $values = array();
+                    for ($j = 0; $j < $columnCount; $j++) {
+                        if ($row[$j] === null) {
+                            $values[] = 'NULL';
+                        } else {
+                            $values[] = "'" . $mysqli->real_escape_string($row[$j]) . "'";
+                        }
+                    }
+
+                    $insertLine = "INSERT INTO `{$table}` VALUES (" . implode(', ', $values) . ");\n";
+                    $rowBuffer[] = $insertLine;
+                    $bufferSize += strlen($insertLine);
+
+                    // Flush buffer when it gets large enough
+                    if ($bufferSize >= $maxBufferSize) {
+                        gzwrite($gzFile, implode('', $rowBuffer));
+                        $rowBuffer = array();
+                        $bufferSize = 0;
+                    }
+                }
+
+                // Flush remaining buffer
+                if (!empty($rowBuffer)) {
+                    gzwrite($gzFile, implode('', $rowBuffer));
+                }
+
+                if ($hasData) {
+                    gzwrite($gzFile, "\n");
+                }
+
+                $result->free();
+            }
+        }
+
+        // Write footer
+        $footer = "\nSET FOREIGN_KEY_CHECKS = 1;\n";
+        $footer .= "COMMIT;\n\n";
+        $footer .= "/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;\n";
+        $footer .= "/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;\n";
+        $footer .= "/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;\n";
+        gzwrite($gzFile, $footer);
+
+        gzclose($gzFile);
+        $mysqli->close();
+
+        if (!file_exists($filePath) || filesize($filePath) === 0) {
+            $this->errors[] = "Error: El archivo de backup está vacío.";
+            return array('success' => false, 'file' => null, 'error' => 'Backup file is empty');
+        }
+
+        $this->messages[] = "Copia de base de datos creada (modo nativo): " . $fileName . " ({$tableCount} tablas)";
+        return array(
+            'success' => true,
+            'file' => $fileName,
+            'path' => $filePath,
+            'size' => filesize($filePath),
+            'size_formatted' => $this->format_bytes(filesize($filePath)),
+        );
+    }
+
+    /**
+     * Create a database backup with progress reporting.
+     *
+     * @param string $customName
+     * @param callable|null $progressCallback
+     * @return array
+     */
+    public function create_database_backup_with_progress($customName = '', $progressCallback = null)
+    {
+        // Helper to call progress callback
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
+        $timestamp = date('Y-m-d_H-i-s');
+        $fileName = ($customName ? $customName : 'db_backup_' . $timestamp) . '.sql.gz';
+        $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
+
+        // Get DB credentials
+        $dbType = defined('FS_DB_TYPE') ? FS_DB_TYPE : 'MYSQL';
+        $dbHost = defined('FS_DB_HOST') ? FS_DB_HOST : 'localhost';
+        $dbPort = defined('FS_DB_PORT') ? FS_DB_PORT : '3306';
+        $dbUser = defined('FS_DB_USER') ? FS_DB_USER : 'root';
+        $dbPass = defined('FS_DB_PASS') ? FS_DB_PASS : '';
+        $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
+
+        if (strtoupper($dbType) === 'POSTGRESQL') {
+            $this->errors[] = "El backup nativo de PostgreSQL no está soportado.";
+            return array('success' => false, 'file' => null, 'error' => 'PostgreSQL not supported');
+        }
+
+        $reportProgress('db_connect', 'Conectando a la base de datos...', 12);
+
+        // Connect to database
+        $mysqli = new mysqli($dbHost, $dbUser, $dbPass, $dbName, (int) $dbPort);
+        if ($mysqli->connect_error) {
+            $this->errors[] = "Error de conexión a la base de datos: " . $mysqli->connect_error;
+            return array('success' => false, 'file' => null, 'error' => $mysqli->connect_error);
+        }
+
+        $mysqli->set_charset('utf8mb4');
+
+        // Open gzip file for writing
+        $gzFile = gzopen($filePath, 'wb9');
+        if (!$gzFile) {
+            $this->errors[] = "No se puede crear el archivo de backup comprimido.";
+            $mysqli->close();
+            return array('success' => false, 'file' => null, 'error' => 'Cannot create gzip file');
+        }
+
+        $reportProgress('db_header', 'Escribiendo encabezado...', 14);
+
+        // Write header
+        $header = "-- FSFramework Database Backup\n";
+        $header .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
+        $header .= "-- Database: " . $dbName . "\n";
+        $header .= "-- PHP Native Backup with Progress\n";
+        $header .= "-- --------------------------------------------------------\n\n";
+        $header .= "SET SQL_MODE = \"NO_AUTO_VALUE_ON_ZERO\";\n";
+        $header .= "SET AUTOCOMMIT = 0;\n";
+        $header .= "START TRANSACTION;\n";
+        $header .= "SET time_zone = \"+00:00\";\n";
+        $header .= "SET FOREIGN_KEY_CHECKS = 0;\n\n";
+        $header .= "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n";
+        $header .= "/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;\n";
+        $header .= "/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;\n";
+        $header .= "/*!40101 SET NAMES utf8mb4 */;\n\n";
+        gzwrite($gzFile, $header);
+
+        // Get all tables
+        $tables = array();
+        $result = $mysqli->query("SHOW TABLES");
+        if (!$result) {
+            $this->errors[] = "Error al obtener lista de tablas: " . $mysqli->error;
+            gzclose($gzFile);
+            $mysqli->close();
+            @unlink($filePath);
+            return array('success' => false, 'file' => null, 'error' => $mysqli->error);
+        }
+
+        while ($row = $result->fetch_array(MYSQLI_NUM)) {
+            $tables[] = $row[0];
+        }
+        $result->free();
+
+        $tableCount = count($tables);
+        $reportProgress('db_tables', "Encontradas {$tableCount} tablas para respaldar...", 15);
+
+        // Process each table (progress from 15% to 45%)
+        foreach ($tables as $i => $table) {
+            $tableProgress = 15 + (($i / max(1, $tableCount)) * 30);
+            $reportProgress('db_table', "Tabla {$table} (" . ($i + 1) . "/{$tableCount})...", intval($tableProgress));
+
+            // Prevent timeout
+            @set_time_limit(300);
+
+            // Get CREATE TABLE statement
+            $result = $mysqli->query("SHOW CREATE TABLE `" . $mysqli->real_escape_string($table) . "`");
+            if ($result) {
+                $row = $result->fetch_array(MYSQLI_NUM);
+                gzwrite($gzFile, "\n-- --------------------------------------------------------\n");
+                gzwrite($gzFile, "-- Table structure for table `{$table}`\n");
+                gzwrite($gzFile, "-- --------------------------------------------------------\n\n");
+                gzwrite($gzFile, "DROP TABLE IF EXISTS `{$table}`;\n");
+                gzwrite($gzFile, $row[1] . ";\n\n");
+                $result->free();
+            }
+
+            // Get table data
+            $result = $mysqli->query("SELECT * FROM `" . $mysqli->real_escape_string($table) . "`", MYSQLI_USE_RESULT);
+            if ($result) {
+                $columnCount = $result->field_count;
+                $hasData = false;
+                $rowBuffer = array();
+                $bufferSize = 0;
+                $maxBufferSize = 1024 * 1024; // 1MB buffer
+
+                while ($row = $result->fetch_array(MYSQLI_NUM)) {
+                    if (!$hasData) {
+                        gzwrite($gzFile, "-- Dumping data for table `{$table}`\n\n");
+                        $hasData = true;
+                    }
+
+                    $values = array();
+                    for ($j = 0; $j < $columnCount; $j++) {
+                        if ($row[$j] === null) {
+                            $values[] = 'NULL';
+                        } else {
+                            $values[] = "'" . $mysqli->real_escape_string($row[$j]) . "'";
+                        }
+                    }
+
+                    $insertLine = "INSERT INTO `{$table}` VALUES (" . implode(', ', $values) . ");\n";
+                    $rowBuffer[] = $insertLine;
+                    $bufferSize += strlen($insertLine);
+
+                    // Flush buffer when it gets large enough
+                    if ($bufferSize >= $maxBufferSize) {
+                        gzwrite($gzFile, implode('', $rowBuffer));
+                        $rowBuffer = array();
+                        $bufferSize = 0;
+                    }
+                }
+
+                // Flush remaining buffer
+                if (!empty($rowBuffer)) {
+                    gzwrite($gzFile, implode('', $rowBuffer));
+                }
+
+                if ($hasData) {
+                    gzwrite($gzFile, "\n");
+                }
+
+                $result->free();
+            }
+        }
+
+        $reportProgress('db_footer', 'Finalizando backup de base de datos...', 47);
+
+        // Write footer
+        $footer = "\nSET FOREIGN_KEY_CHECKS = 1;\n";
+        $footer .= "COMMIT;\n\n";
+        $footer .= "/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;\n";
+        $footer .= "/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;\n";
+        $footer .= "/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;\n";
+        gzwrite($gzFile, $footer);
+
+        gzclose($gzFile);
+        $mysqli->close();
+
+        if (!file_exists($filePath) || filesize($filePath) === 0) {
+            $this->errors[] = "Error: El archivo de backup está vacío.";
+            return array('success' => false, 'file' => null, 'error' => 'Backup file is empty');
+        }
+
+        $reportProgress('db_complete', 'Backup de base de datos completado', 48);
+
+        $this->messages[] = "Copia de base de datos creada: " . $fileName . " ({$tableCount} tablas)";
         return array(
             'success' => true,
             'file' => $fileName,
@@ -403,6 +832,143 @@ class backup_manager
             'size_formatted' => $this->format_bytes(filesize($filePath)),
             'file_count' => $fileCount,
         );
+    }
+
+    /**
+     * Create a files backup with progress reporting.
+     *
+     * @param string $customName
+     * @param bool $includePlugins Whether to include plugins folder
+     * @param callable|null $progressCallback
+     * @return array
+     */
+    public function create_files_backup_with_progress($customName = '', $includePlugins = true, $progressCallback = null)
+    {
+        // Helper to call progress callback
+        $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, $step, $message, $percent);
+            }
+        };
+
+        if (!extension_loaded('zip')) {
+            $this->errors[] = "La extensión PHP ZIP no está instalada.";
+            return array('success' => false, 'file' => null, 'error' => 'ZIP extension not loaded');
+        }
+
+        $timestamp = date('Y-m-d_H-i-s');
+        $fileName = ($customName ? $customName : 'files_backup_' . $timestamp) . '.zip';
+        $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
+
+        $reportProgress('files_init', 'Preparando backup de archivos...', 52);
+
+        $zip = new ZipArchive();
+        $result = $zip->open($filePath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+
+        if ($result !== true) {
+            $this->errors[] = "No se puede crear el archivo ZIP: código de error " . $result;
+            return array('success' => false, 'file' => null, 'error' => 'ZipArchive open failed');
+        }
+
+        // If not including plugins, add to exclusions temporarily
+        if (!$includePlugins) {
+            $this->excludedDirs[] = 'plugins';
+        }
+
+        $reportProgress('files_scan', 'Escaneando archivos...', 54);
+
+        // Count files first for progress reporting
+        $allFiles = $this->get_files_to_backup();
+        $totalFiles = count($allFiles);
+
+        $reportProgress('files_count', "Encontrados {$totalFiles} archivos para respaldar...", 55);
+
+        // Add files with progress (progress from 55% to 88%)
+        $fileCount = 0;
+        foreach ($allFiles as $i => $fileInfo) {
+            $filePath = $fileInfo['path'];
+            $relPath = $fileInfo['rel_path'];
+
+            $zip->addFile($filePath, $relPath);
+            $fileCount++;
+
+            // Report progress every 100 files
+            if ($fileCount % 100 === 0 || $fileCount === $totalFiles) {
+                $filesProgress = 55 + (($fileCount / max(1, $totalFiles)) * 33);
+                $reportProgress('files_progress', "Archivos procesados: {$fileCount}/{$totalFiles}", intval($filesProgress));
+                @set_time_limit(300);
+            }
+        }
+
+        // Remove temporary exclusion
+        if (!$includePlugins) {
+            $key = array_search('plugins', $this->excludedDirs);
+            if ($key !== false) {
+                unset($this->excludedDirs[$key]);
+            }
+        }
+
+        $reportProgress('files_close', 'Finalizando archivo ZIP...', 88);
+
+        if (!$zip->close()) {
+            $this->errors[] = "Error al cerrar el archivo ZIP.";
+            return array('success' => false, 'file' => null, 'error' => 'ZipArchive close failed');
+        }
+
+        if ($fileCount === 0) {
+            $this->errors[] = "No se añadieron archivos al backup.";
+            @unlink($filePath);
+            return array('success' => false, 'file' => null, 'error' => 'No files added');
+        }
+
+        $reportProgress('files_complete', 'Backup de archivos completado', 89);
+
+        $this->messages[] = "Copia de archivos creada: " . $fileName . " (" . $fileCount . " archivos)";
+        return array(
+            'success' => true,
+            'file' => $fileName,
+            'path' => $this->backupPath . DIRECTORY_SEPARATOR . $fileName,
+            'size' => filesize($this->backupPath . DIRECTORY_SEPARATOR . $fileName),
+            'size_formatted' => $this->format_bytes(filesize($this->backupPath . DIRECTORY_SEPARATOR . $fileName)),
+            'file_count' => $fileCount,
+        );
+    }
+
+    /**
+     * Get list of files to backup (for progress calculation).
+     *
+     * @return array Array of ['path' => fullPath, 'rel_path' => relativePath]
+     */
+    private function get_files_to_backup()
+    {
+        $files = array();
+        $sourceDir = rtrim($this->fsRoot, DIRECTORY_SEPARATOR);
+
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($sourceDir, RecursiveDirectoryIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        foreach ($iterator as $file) {
+            if (!$file->isFile() || !$file->isReadable()) {
+                continue;
+            }
+
+            $filePath = $file->getRealPath();
+            $relPath = substr($filePath, strlen($this->fsRoot) + 1);
+
+            // Check exclusions
+            if ($this->should_exclude_file($relPath)) {
+                continue;
+            }
+
+            $files[] = array(
+                'path' => $filePath,
+                'rel_path' => $relPath,
+            );
+        }
+
+        return $files;
     }
 
     /**
@@ -643,8 +1209,8 @@ class backup_manager
 
         $reportProgress('files_copy', 'Copiando archivos al sistema...', 30);
 
-        // Copy files to fsRoot, excluding config.php to preserve settings
-        $excludeFromRestore = array('config.php', 'config2.php');
+        // Copy files to fsRoot, excluding config.php to preserve server-specific settings
+        $excludeFromRestore = array('config.php');
         $this->copy_directory_with_progress($tempDir, $this->fsRoot, $excludeFromRestore, $progressCallback, 30, 48);
 
         $reportProgress('files_cleanup', 'Limpiando archivos temporales...', 48);
@@ -694,6 +1260,11 @@ class backup_manager
         $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
 
         if (strtoupper($dbType) === 'POSTGRESQL') {
+            if (!$this->shell_functions_available()) {
+                $this->errors[] = "La restauración de PostgreSQL no está soportada en servidores con funciones shell deshabilitadas.";
+                $reportProgress('db_error', 'PostgreSQL no soportado sin funciones shell', 55);
+                return $result;
+            }
             return $this->restore_database_postgresql($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress, $result);
         }
 
@@ -756,25 +1327,34 @@ class backup_manager
 
         $reportProgress('db_import', 'Importando datos del backup...', 65);
 
-        // Ahora importar el backup limpio
-        $command = sprintf(
-            'gunzip -c %s | mysql --host=%s --port=%s --user=%s --password=%s %s 2>&1',
-            escapeshellarg($backupPath),
-            escapeshellarg($dbHost),
-            escapeshellarg($dbPort),
-            escapeshellarg($dbUser),
-            escapeshellarg($dbPass),
-            escapeshellarg($dbName)
-        );
+        // Check if shell functions are available
+        if ($this->shell_functions_available()) {
+            // Use shell command for faster restore
+            $command = sprintf(
+                'gunzip -c %s | mysql --host=%s --port=%s --user=%s --password=%s %s 2>&1',
+                escapeshellarg($backupPath),
+                escapeshellarg($dbHost),
+                escapeshellarg($dbPort),
+                escapeshellarg($dbUser),
+                escapeshellarg($dbPass),
+                escapeshellarg($dbName)
+            );
 
-        $output = array();
-        $returnVar = 0;
-        exec($command, $output, $returnVar);
+            $output = array();
+            $returnVar = 0;
+            exec($command, $output, $returnVar);
 
-        if ($returnVar !== 0) {
-            $this->errors[] = "Error al restaurar: " . implode("\n", $output);
-            $reportProgress('db_error', 'Error: ' . implode("\n", $output), 90);
-            return $result;
+            if ($returnVar !== 0) {
+                $this->errors[] = "Error al restaurar: " . implode("\n", $output);
+                $reportProgress('db_error', 'Error: ' . implode("\n", $output), 90);
+                return $result;
+            }
+        } else {
+            // Use PHP-native restore method
+            $restoreResult = $this->restore_database_native($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress);
+            if (!$restoreResult['success']) {
+                return $restoreResult;
+            }
         }
 
         $reportProgress('db_verify', 'Verificando restauración...', 90);
@@ -782,6 +1362,121 @@ class backup_manager
         $result['success'] = true;
         $this->messages[] = "Base de datos restaurada correctamente";
         $reportProgress('db_done', '¡Base de datos restaurada correctamente!', 95);
+
+        return $result;
+    }
+
+    /**
+     * Restore database using PHP-native functions (no shell commands).
+     * This is a fallback for servers with disabled shell functions.
+     *
+     * @param string $backupPath Path to the backup file (.sql.gz)
+     * @param string $dbHost Database host
+     * @param string $dbPort Database port
+     * @param string $dbUser Database username
+     * @param string $dbPass Database password
+     * @param string $dbName Database name
+     * @param callable $reportProgress Progress callback
+     * @return array
+     */
+    private function restore_database_native($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress)
+    {
+        $result = array('success' => false);
+
+        // Connect to database
+        $mysqli = new mysqli($dbHost, $dbUser, $dbPass, $dbName, (int) $dbPort);
+        if ($mysqli->connect_error) {
+            $this->errors[] = "Error de conexión a la base de datos: " . $mysqli->connect_error;
+            $reportProgress('db_error', 'Error de conexión', 70);
+            return $result;
+        }
+
+        $mysqli->set_charset('utf8mb4');
+        $mysqli->query("SET FOREIGN_KEY_CHECKS = 0");
+        $mysqli->query("SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO'");
+
+        // Open gzip file for reading
+        $gzFile = gzopen($backupPath, 'rb');
+        if (!$gzFile) {
+            $this->errors[] = "No se puede abrir el archivo de backup.";
+            $mysqli->close();
+            $reportProgress('db_error', 'No se puede abrir el backup', 70);
+            return $result;
+        }
+
+        $currentStatement = '';
+        $lineCount = 0;
+        $statementCount = 0;
+        $delimiter = ';';
+
+        $reportProgress('db_import_native', 'Importando SQL (modo nativo PHP)...', 70);
+
+        while (!gzeof($gzFile)) {
+            $line = gzgets($gzFile, 65536);
+            if ($line === false) {
+                break;
+            }
+
+            $lineCount++;
+            $trimmedLine = trim($line);
+
+            // Skip empty lines and comments
+            if ($trimmedLine === '' || strpos($trimmedLine, '--') === 0 || strpos($trimmedLine, '/*') === 0) {
+                continue;
+            }
+
+            // Handle DELIMITER statements
+            if (preg_match('/^DELIMITER\s+(.+)$/i', $trimmedLine, $matches)) {
+                $delimiter = trim($matches[1]);
+                continue;
+            }
+
+            $currentStatement .= $line;
+
+            // Check if statement is complete
+            if (substr(rtrim($currentStatement), -strlen($delimiter)) === $delimiter) {
+                // Remove delimiter from end
+                $sql = substr(rtrim($currentStatement), 0, -strlen($delimiter));
+                $currentStatement = '';
+
+                if (trim($sql) !== '') {
+                    if (!$mysqli->query($sql)) {
+                        // Log error but continue with other statements
+                        $this->errors[] = "Error SQL (línea ~{$lineCount}): " . $mysqli->error;
+                    }
+                    $statementCount++;
+
+                    // Report progress every 100 statements
+                    if ($statementCount % 100 === 0) {
+                        $pct = min(85, 70 + ($statementCount / 100));
+                        $reportProgress('db_import_progress', "Importando... ({$statementCount} sentencias)", intval($pct));
+                        @set_time_limit(300);
+                    }
+                }
+            }
+        }
+
+        // Process any remaining statement
+        if (trim($currentStatement) !== '') {
+            $sql = trim($currentStatement);
+            if (substr($sql, -1) === ';') {
+                $sql = substr($sql, 0, -1);
+            }
+            if ($sql !== '') {
+                $mysqli->query($sql);
+                $statementCount++;
+            }
+        }
+
+        gzclose($gzFile);
+
+        $mysqli->query("SET FOREIGN_KEY_CHECKS = 1");
+        $mysqli->close();
+
+        $reportProgress('db_import_done', "Importación completada ({$statementCount} sentencias)", 88);
+
+        $result['success'] = true;
+        $this->messages[] = "Base de datos restaurada (modo nativo): {$statementCount} sentencias ejecutadas";
 
         return $result;
     }

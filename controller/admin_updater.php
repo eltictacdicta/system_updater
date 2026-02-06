@@ -211,6 +211,10 @@ class admin_updater extends fs_controller
                 $this->updateCore();
                 break;
 
+            case 'reinstall_core':
+                $this->updateCore();
+                break;
+
             case 'update_plugin':
                 $pluginName = $this->request->query->get('plugin');
                 if ($pluginName) {
@@ -251,12 +255,12 @@ class admin_updater extends fs_controller
 
         // Verificar actualización del núcleo
         try {
-            $remoteVersion = @file_get_contents('https://raw.githubusercontent.com/eltictacdicta/fs-framework/refs/heads/master/VERSION');
+            $remoteVersion = @file_get_contents('https://raw.githubusercontent.com/eltictacdicta/fs-framework/master/VERSION');
             if ($remoteVersion && $remoteVersion !== 'ERROR') {
                 $remoteVersion = trim($remoteVersion);
                 $localVersion = $this->plugin_manager->version;
 
-                if (floatval($remoteVersion) > floatval($localVersion)) {
+                if (version_compare($remoteVersion, $localVersion, '>')) {
                     $updates['core'] = true;
                     $updates['core_new_version'] = $remoteVersion;
                 }
@@ -274,7 +278,7 @@ class admin_updater extends fs_controller
             try {
                 $remoteIni = @parse_ini_string(@file_get_contents($plugin['version_url']));
                 if ($remoteIni && isset($remoteIni['version'])) {
-                    if (intval($remoteIni['version']) > intval($plugin['version'])) {
+                    if (version_compare($remoteIni['version'], $plugin['version'], '>')) {
                         $updates['plugins'][] = [
                             'name' => $plugin['name'],
                             'current_version' => $plugin['version'],
