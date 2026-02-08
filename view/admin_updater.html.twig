@@ -1,0 +1,672 @@
+{#
+/**
+ * This file is part of system_updater plugin for FSFramework
+ * Vista del Actualizador del Sistema
+ */
+#}
+{{ include('header.html.twig') }}
+
+<div class="container-fluid" style="margin-top: 10px;">
+    <div class="row">
+        <div class="col-xs-6">
+            <div class="btn-group">
+                <a class="btn btn-sm btn-default" href="{{ fsc.url()|raw }}" title="Recargar la página">
+                    <span class="glyphicon glyphicon-refresh"></span>
+                </a>
+            </div>
+        </div>
+        <div class="col-xs-6 text-right">
+            <h2 style="margin-top: 0px;">
+                <i class="fa fa-sync-alt"></i> Actualizador del Sistema
+            </h2>
+        </div>
+    </div>
+</div>
+
+{# Mensajes #}
+{% if fsc.successMessage %}
+<div class="alert alert-success alert-dismissible" style="margin: 10px;">
+    <button type="button" class="close" data-dismiss="alert">&times;</button>
+    <i class="fa fa-check-circle"></i> {{ fsc.successMessage }}
+</div>
+{% endif %}
+
+{% if fsc.errorMessage %}
+<div class="alert alert-danger alert-dismissible" style="margin: 10px;">
+    <button type="button" class="close" data-dismiss="alert">&times;</button>
+    <i class="fa fa-exclamation-circle"></i> {{ fsc.errorMessage }}
+</div>
+{% endif %}
+
+<div class="row" style="margin: 10px;">
+    {# Panel de Actualizaciones #}
+    <div class="col-md-6">
+        <div class="panel panel-primary">
+            <div class="panel-heading">
+                <h3 class="panel-title"><i class="fa fa-download"></i> Actualizaciones Disponibles</h3>
+            </div>
+            <div class="panel-body">
+                {# Actualización del Núcleo #}
+                {% if fsc.updates.core %}
+                <div class="alert alert-warning">
+                    <strong><i class="fa fa-cube"></i> Nueva versión del núcleo disponible</strong>
+                    <p>Versión actual: {{ fsc.plugin_manager.version }}<br>
+                    Nueva versión: {{ fsc.updates.core_new_version }}</p>
+                    <a href="{{ fsc.url()|raw }}&action=update_core" class="btn btn-warning btn-sm" onclick="return confirm('¿Crear backup y actualizar el núcleo?');">
+                        <i class="fa fa-sync"></i> Actualizar Núcleo
+                    </a>
+                </div>
+                {% else %}
+                <div class="alert alert-success clearfix">
+                    <i class="fa fa-check"></i> El núcleo está actualizado (v{{ fsc.plugin_manager.version }})
+                    <a href="{{ fsc.url()|raw }}&action=reinstall_core" class="btn btn-danger btn-xs pull-right" onclick="return confirm('¿Seguro que quieres forzar la reinstalación del núcleo? Se descargarán y sobrescribirán los archivos del sistema.');" style="margin-top: -2px;">
+                        <i class="fa fa-exclamation-triangle"></i> Reinstalar Core
+                    </a>
+                </div>
+                {% endif %}
+
+                {# Actualizaciones de Plugins #}
+                {% if fsc.updates.plugins|length > 0 %}
+                <h5><i class="fa fa-puzzle-piece"></i> Plugins con actualizaciones:</h5>
+                <table class="table table-sm table-striped">
+                    <thead>
+                        <tr>
+                            <th>Plugin</th>
+                            <th>Actual</th>
+                            <th>Nueva</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for plugin in fsc.updates.plugins %}
+                        <tr>
+                            <td>{{ plugin.name }}</td>
+                            <td>{{ plugin.current_version }}</td>
+                            <td><span class="label label-info">{{ plugin.new_version }}</span></td>
+                            <td>
+                                <a href="{{ fsc.url()|raw }}&action=update_plugin&plugin={{ plugin.name }}" class="btn btn-xs btn-primary" onclick="return confirm('¿Actualizar {{ plugin.name }}?');">
+                                    <i class="fa fa-sync"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="text-muted"><i class="fa fa-check"></i> Todos los plugins están actualizados.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    {# Panel de Backups #}
+    <div class="col-md-6">
+        <div class="panel panel-success">
+            <div class="panel-heading">
+                <h3 class="panel-title"><i class="fa fa-database"></i> Copias de Seguridad</h3>
+            </div>
+            <div class="panel-body">
+                <p>
+                    <button type="button" class="btn btn-success" id="btn-create-backup">
+                        <i class="fa fa-plus"></i> Crear Backup Completo
+                    </button>
+                    <button type="button" class="btn btn-info" id="btn-show-upload" data-toggle="collapse" data-target="#uploadBackupPanel">
+                        <i class="fa fa-cloud-upload"></i> Subir Backup
+                    </button>
+                    <span id="backup-loading" style="display:none; margin-left: 10px;">
+                        <i class="fa fa-spinner fa-spin"></i> Procesando...
+                    </span>
+                </p>
+
+                {# Panel de subida colapsable #}
+                <div class="collapse" id="uploadBackupPanel">
+                    <div class="panel panel-info" style="margin-top: 10px;">
+                        <div class="panel-heading">
+                            <h4 class="panel-title"><i class="fa fa-cloud-upload"></i> Subir Copia de Seguridad</h4>
+                        </div>
+                        <div class="panel-body">
+                            <div class="alert alert-info">
+                                <i class="fa fa-info-circle"></i>
+                                <strong>Subida por fragmentos:</strong> Permite subir archivos ZIP de hasta 2GB.
+                                Si la conexión se interrumpe, la subida se puede reanudar.
+                            </div>
+                            
+                            {# Zona de Drop #}
+                            <div id="backup-drop-zone" style="border: 2px dashed #3c8dbc; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; background: #f8f9fa; transition: all 0.3s;">
+                                <i class="fa fa-cloud-upload" style="font-size: 48px; color: #3c8dbc;"></i>
+                                <h4>Arrastra el archivo ZIP aquí</h4>
+                                <p class="text-muted">o haz clic para seleccionar</p>
+                                <button type="button" class="btn btn-primary" id="backup-browse-btn">
+                                    <i class="fa fa-folder-open"></i> Seleccionar Archivo
+                                </button>
+                            </div>
+                            
+                            {# Progreso de subida #}
+                            <div id="backup-upload-progress" style="display: none; margin-top: 15px;">
+                                <div class="progress" style="height: 25px;">
+                                    <div class="progress-bar progress-bar-info progress-bar-striped active" role="progressbar" 
+                                         style="width: 0%; line-height: 25px;" id="backup-progress-bar">
+                                        <span id="backup-progress-text">0%</span>
+                                    </div>
+                                </div>
+                                <p id="backup-upload-status" class="text-center text-muted" style="margin-top: 10px;"></p>
+                            </div>
+                            
+                            <div style="margin-top: 15px;">
+                                <ul class="list-inline text-muted">
+                                    <li><i class="fa fa-check text-success"></i> Formato: <strong>.zip</strong></li>
+                                    <li><i class="fa fa-check text-success"></i> Tamaño máximo: <strong>2 GB</strong></li>
+                                    <li><i class="fa fa-check text-success"></i> Subida reanudable</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="backups-container">
+                    {% if fsc.backups|length > 0 %}
+                    <table class="table table-sm table-hover">
+                        <thead>
+                            <tr>
+                                <th>Nombre</th>
+                                <th>Fecha</th>
+                                <th>Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for group in fsc.backups %}
+                            <tr>
+                                <td>
+                                    <strong>{{ group.base_name }}</strong>
+                                    <br><small class="text-muted">
+                                        {% if group.complete %}
+                                            <span class="label label-primary" title="{{ group.complete.size_formatted }}">Completo ({{ group.complete.size_formatted }})</span>
+                                        {% endif %}
+                                        {% if group.files %}
+                                            <span class="label label-info" title="{{ group.files.size_formatted }}">Archivos ({{ group.files.size_formatted }})</span>
+                                        {% endif %}
+                                        {% if group.database %}
+                                            <span class="label label-warning" title="{{ group.database.size_formatted }}">BD ({{ group.database.size_formatted }})</span>
+                                        {% endif %}
+                                    </small>
+                                </td>
+                                <td>{{ group.date|date('d/m/Y H:i') }}</td>
+                                <td>
+                                    <div class="btn-group btn-group-xs">
+                                        {% if group.complete %}
+                                        <div class="btn-group btn-group-xs">
+                                            <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown">
+                                                <i class="fa fa-download"></i> <span class="caret"></span>
+                                            </button>
+                                            <ul class="dropdown-menu pull-right">
+                                                <li><a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.complete.name }}" target="_blank">Descargar Completo</a></li>
+                                                {% if group.files %}<li><a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.files.name }}" target="_blank">Descargar Archivos</a></li>{% endif %}
+                                                {% if group.database %}<li><a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.database.name }}" target="_blank">Descargar BD</a></li>{% endif %}
+                                            </ul>
+                                        </div>
+                                        <button type="button" class="btn btn-warning btn-restore" data-action="restore_complete" data-file="{{ group.complete.name }}" title="Restaurar todo">
+                                            <i class="fa fa-undo"></i>
+                                        </button>
+                                        {% endif %}
+                                        
+                                        {% if not group.complete %}
+                                            {% if group.files %}
+                                            <a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.files.name }}" class="btn btn-default" title="Descargar Archivos" target="_blank">
+                                                <i class="fa fa-download"></i>
+                                            </a>
+                                            <button type="button" class="btn btn-default btn-restore" data-action="restore_files" data-file="{{ group.files.name }}" title="Restaurar Archivos">
+                                                <i class="fa fa-folder"></i>
+                                            </button>
+                                            {% endif %}
+                                            {% if group.database %}
+                                            <a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.database.name }}" class="btn btn-default" title="Descargar BD" target="_blank">
+                                                <i class="fa fa-database"></i>
+                                            </a>
+                                            <button type="button" class="btn btn-default btn-restore" data-action="restore_database" data-file="{{ group.database.name }}" title="Restaurar BD">
+                                                <i class="fa fa-database"></i>
+                                            </button>
+                                            {% endif %}
+                                        {% endif %}
+
+                                        <button type="button" class="btn btn-danger btn-delete" data-base="{{ group.base_name }}" title="Eliminar">
+                                            <i class="fa fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% else %}
+                    <p class="text-muted">No hay copias de seguridad.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script type="text/javascript">
+$(document).ready(function() {
+    var restoreEventSource = null;
+    var restoreLog = [];
+
+    function showLoading() {
+        $('#backup-loading').show();
+    }
+
+    function hideLoading() {
+        $('#backup-loading').hide();
+    }
+
+    // Crear Backup
+    $('#btn-create-backup').click(function(e) {
+        e.preventDefault();
+        if(confirm('¿Crear copia de seguridad completa?')) {
+            showLoading();
+            $(this).prop('disabled', true);
+            $.ajax({
+                url: '{{ fsc.url()|raw }}&action=create_backup&ajax=1',
+                type: 'GET',
+                dataType: 'json',
+                success: function(response) {
+                    if(response.success) {
+                        alert(response.message);
+                        location.reload();
+                    } else {
+                        alert(response.message);
+                        hideLoading();
+                        $('#btn-create-backup').prop('disabled', false);
+                    }
+                },
+                error: function() {
+                    alert('Error de conexión');
+                    hideLoading();
+                    $('#btn-create-backup').prop('disabled', false);
+                }
+            });
+        }
+    });
+
+    // Restaurar con SSE (Server-Sent Events)
+    function startRestore(file, type) {
+        restoreLog = [];
+        updateProgress(0, 'Iniciando restauración...');
+        $('#restoreDetails').html('<small class="text-muted">Conectando al servidor...</small>');
+        $('#restoreCompleteBtn').hide();
+        $('#restoreErrorBtn').hide();
+        
+        // Show modal
+        $('#restoreProgressModal').modal('show');
+        
+        // Start SSE connection
+        var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type);
+        
+        restoreEventSource = new EventSource(sseUrl);
+        
+        restoreEventSource.addEventListener('start', function(e) {
+            var data = JSON.parse(e.data);
+            addLogEntry('Iniciando: ' + data.message);
+        });
+        
+        restoreEventSource.addEventListener('init', function(e) {
+            var data = JSON.parse(e.data);
+            updateProgress(data.percent, data.message);
+            addLogEntry(data.message);
+        });
+        
+        restoreEventSource.addEventListener('phase', function(e) {
+            var data = JSON.parse(e.data);
+            addLogEntry('=== Fase: ' + data.message + ' ===');
+        });
+        
+        restoreEventSource.addEventListener('progress', function(e) {
+            var data = JSON.parse(e.data);
+            updateProgress(data.percent, data.message);
+            if (data.step && data.step.indexOf('_progress') === -1) {
+                addLogEntry(data.message);
+            }
+        });
+        
+        restoreEventSource.addEventListener('complete', function(e) {
+            var data = JSON.parse(e.data);
+            updateProgress(100, data.message, 'success');
+            addLogEntry('✓ ' + data.message);
+            $('#restoreCompleteBtn').show();
+            restoreEventSource.close();
+        });
+        
+        restoreEventSource.addEventListener('error', function(e) {
+            try {
+                var data = JSON.parse(e.data);
+                updateProgress(data.percent || 0, data.message, 'danger');
+                addLogEntry('✗ ERROR: ' + data.message);
+            } catch(err) {
+                updateProgress(0, 'Error de conexión con el servidor', 'danger');
+                addLogEntry('✗ Error de conexión');
+            }
+            $('#restoreErrorBtn').show();
+            restoreEventSource.close();
+        });
+        
+        restoreEventSource.onerror = function() {
+            updateProgress(0, 'Error de conexión con el servidor', 'danger');
+            addLogEntry('✗ Error de conexión');
+            $('#restoreErrorBtn').show();
+            restoreEventSource.close();
+        };
+    }
+    
+    function updateProgress(percent, message, type) {
+        var $progressBar = $('#restoreProgressBar');
+        var $statusMessage = $('#restoreStatusMessage');
+        var $statusText = $('#restoreStatusText');
+        
+        $progressBar.css('width', percent + '%');
+        $progressBar.attr('aria-valuenow', percent);
+        $progressBar.text(Math.round(percent) + '%');
+        
+        $statusText.text(message);
+        
+        // Update alert type
+        $statusMessage.removeClass('alert-info alert-success alert-danger');
+        if (type === 'success') {
+            $statusMessage.addClass('alert-success');
+            $progressBar.removeClass('active progress-bar-striped');
+        } else if (type === 'danger') {
+            $statusMessage.addClass('alert-danger');
+            $progressBar.addClass('progress-bar-danger');
+        } else {
+            $statusMessage.addClass('alert-info');
+        }
+    }
+    
+    function addLogEntry(message) {
+        restoreLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
+        var $detailsDiv = $('#restoreDetails');
+        $detailsDiv.html(restoreLog.map(function(entry) {
+            return '<div>' + entry + '</div>';
+        }).join(''));
+        $detailsDiv.scrollTop($detailsDiv[0].scrollHeight);
+    }
+
+    // Restaurar - usando botones con data attributes
+    $('.btn-restore').click(function(e) {
+        e.preventDefault();
+        var action = $(this).data('action');
+        var file = $(this).data('file');
+        var msg = '¿Está seguro de querer restaurar esta copia?';
+        var type = 'complete';
+        
+        if(action == 'restore_complete') {
+            msg = '¿Restaurar sistema COMPLETO? Esto sobrescribirá archivos y base de datos.';
+            type = 'complete';
+        } else if(action == 'restore_files') {
+            msg = '¿Restaurar solo los ARCHIVOS?';
+            type = 'files';
+        } else if(action == 'restore_database') {
+            msg = '¿Restaurar solo la BASE DE DATOS?';
+            type = 'database';
+        }
+        
+        if(confirm(msg)) {
+            startRestore(file, type);
+        }
+    });
+
+    // Eliminar
+    $('.btn-delete').click(function(e) {
+        e.preventDefault();
+        var baseName = $(this).data('base');
+        
+        if(confirm('¿Eliminar este grupo de copias de seguridad?')) {
+            showLoading();
+            $.ajax({
+                url: '{{ fsc.url()|raw }}&action=delete_backup_group&base_name=' + encodeURIComponent(baseName) + '&ajax=1',
+                type: 'GET',
+                dataType: 'json',
+                success: function(response) {
+                    if(response.success) {
+                        location.reload();
+                    } else {
+                        alert(response.message);
+                        hideLoading();
+                    }
+                },
+                error: function() {
+                    alert('Error de conexión');
+                    hideLoading();
+                }
+            });
+        }
+    });
+});
+</script>
+
+<!-- Resumable.js para subida por chunks -->
+<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
+
+<script>
+$(document).ready(function() {
+    // ========================================
+    // BACKUP UPLOAD FUNCTIONALITY
+    // ========================================
+    
+    // Verificar que Resumable esté disponible
+    if (typeof Resumable === 'undefined') {
+        console.error('Resumable.js no está cargado');
+        $('#backup-upload-status').html('<span class="text-danger"><i class="fa fa-exclamation-triangle"></i> Error: Resumable.js no está disponible</span>');
+        return;
+    }
+    
+    var $dropZone = $('#backup-drop-zone');
+    var $browseButton = $('#backup-browse-btn');
+    var $progressContainer = $('#backup-upload-progress');
+    var $progressBar = $('#backup-progress-bar');
+    var $progressText = $('#backup-progress-text');
+    var $statusText = $('#backup-upload-status');
+    
+    if ($dropZone.length === 0) return;
+    
+    // Configurar Resumable.js
+    var r = new Resumable({
+        target: '{{ fsc.url()|raw }}',
+        chunkSize: 10 * 1024 * 1024, // 10MB por chunk
+        simultaneousUploads: 3,
+        testChunks: false,
+        throttleProgressCallbacks: 0.5,
+        fileType: ['zip'],
+        maxFiles: 1,
+        maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB máximo
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    });
+    
+    if (!r.support) {
+        alert('Tu navegador no soporta subidas de archivos grandes. Por favor, actualiza tu navegador.');
+        return;
+    }
+    
+    // Asignar el drag & drop
+    r.assignDrop($dropZone[0]);
+    r.assignBrowse($browseButton[0]);
+    
+    // Efectos visuales de drag & drop
+    $dropZone.on('dragover', function(e) {
+        e.preventDefault();
+        $(this).css({
+            'border-color': '#00a65a',
+            'background': '#e8f5e9'
+        });
+    });
+    
+    $dropZone.on('dragleave drop', function(e) {
+        $(this).css({
+            'border-color': '#3c8dbc',
+            'background': '#f8f9fa'
+        });
+    });
+    
+    // Click en la zona para abrir selector
+    $dropZone.on('click', function(e) {
+        if (!$(e.target).is('button')) {
+            $browseButton.click();
+        }
+    });
+    
+    // Evento: Archivo añadido
+    r.on('fileAdded', function(file) {
+        // Validar extensión
+        var ext = file.fileName.split('.').pop().toLowerCase();
+        if (ext !== 'zip') {
+            alert('Solo se permiten archivos .zip de backup');
+            return false;
+        }
+        
+        // Mostrar barra de progreso
+        $progressContainer.show();
+        $dropZone.hide();
+        $progressBar.css('width', '0%').removeClass('progress-bar-success progress-bar-danger').addClass('progress-bar-info active');
+        $progressText.text('0%');
+        $statusText.text('Preparando subida de: ' + file.fileName);
+        
+        // Iniciar la subida
+        r.upload();
+    });
+    
+    // Evento: Progreso de subida
+    r.on('fileProgress', function(file) {
+        var progress = Math.floor(file.progress() * 100);
+        $progressBar.css('width', progress + '%');
+        $progressText.text(progress + '%');
+        
+        if (progress < 100) {
+            var fileSize = formatBytes(file.size);
+            var uploaded = formatBytes(file.size * file.progress());
+            $statusText.text('Subiendo: ' + file.fileName + ' (' + uploaded + ' de ' + fileSize + ')');
+        }
+    });
+    
+    // Evento: Subida exitosa
+    r.on('fileSuccess', function(file, message) {
+        $progressBar.removeClass('active progress-bar-info').addClass('progress-bar-success');
+        $progressText.text('100%');
+        $statusText.html('<span class="text-success"><i class="fa fa-check-circle"></i> ¡Archivo subido correctamente!</span>');
+        
+        // Recargar la página después de 2 segundos
+        setTimeout(function() {
+            window.location.reload();
+        }, 2000);
+    });
+    
+    // Evento: Error en la subida
+    r.on('fileError', function(file, message) {
+        $progressBar.removeClass('active progress-bar-info').addClass('progress-bar-danger');
+        
+        var errorMsg = 'Error desconocido';
+        try {
+            var response = JSON.parse(message);
+            errorMsg = response.message || message;
+        } catch(e) {
+            errorMsg = message;
+        }
+        
+        $statusText.html('<span class="text-danger"><i class="fa fa-exclamation-triangle"></i> <strong>Error:</strong> ' + errorMsg + '</span>');
+        
+        // Mostrar opción de reintentar
+        setTimeout(function() {
+            if (confirm('¿Deseas reintentar la subida?')) {
+                r.upload();
+            } else {
+                // Restaurar zona de drop
+                $progressContainer.hide();
+                $dropZone.show();
+                r.files = [];
+            }
+        }, 2000);
+    });
+    
+    // Función para formatear bytes
+    function formatBytes(bytes) {
+        if (bytes >= 1073741824) {
+            return (bytes / 1073741824).toFixed(2) + ' GB';
+        } else if (bytes >= 1048576) {
+            return (bytes / 1048576).toFixed(2) + ' MB';
+        } else if (bytes >= 1024) {
+            return (bytes / 1024).toFixed(2) + ' KB';
+        } else {
+            return bytes + ' bytes';
+        }
+    }
+});
+</script>
+
+<!-- Modal de Progreso de Restauración -->
+<div class="modal fade" id="restoreProgressModal" tabindex="-1" role="dialog" data-backdrop="static" data-keyboard="false">
+    <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+            <div class="modal-header" style="background: #337ab7; color: white;">
+                <h4 class="modal-title">
+                    <i class="fa fa-refresh fa-spin"></i> Restaurando Copia de Seguridad
+                </h4>
+            </div>
+            <div class="modal-body">
+                <div class="text-center" style="margin-bottom: 20px;">
+                    <i class="fa fa-database" style="font-size: 48px; color: #337ab7;"></i>
+                </div>
+                
+                <div class="progress" style="height: 30px;">
+                    <div id="restoreProgressBar" class="progress-bar progress-bar-striped active"
+                        role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                        style="width: 0%; min-width: 2em; line-height: 30px;">
+                        0%
+                    </div>
+                </div>
+                
+                <div id="restoreStatusMessage" class="alert alert-info text-center" style="margin-top: 15px;">
+                    <i class="fa fa-spinner fa-spin"></i>
+                    <span id="restoreStatusText">Iniciando restauración...</span>
+                </div>
+                
+                <div id="restoreDetails" class="well well-sm" style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background-color: #f5f5f5;">
+                    <small class="text-muted">Esperando inicio...</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <a href="index.php?page=admin_updater" id="restoreCompleteBtn" class="btn btn-success" style="display: none;">
+                    <i class="fa fa-check"></i> Aceptar
+                </a>
+                <button type="button" id="restoreErrorBtn" class="btn btn-danger" data-dismiss="modal" style="display: none;">
+                    <i class="fa fa-times"></i> Cerrar
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# Información del Sistema #}
+<div class="row" style="margin: 10px;">
+    <div class="col-12">
+        <div class="panel panel-default">
+            <div class="panel-heading">
+                <h3 class="panel-title"><i class="fa fa-info-circle"></i> Información del Sistema</h3>
+            </div>
+            <div class="panel-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <strong>Versión FSFramework:</strong> {{ fsc.plugin_manager.version }}
+                    </div>
+                    <div class="col-md-4">
+                        <strong>Directorio de Backups:</strong> {{ fsc.getBackupPath() }}
+                    </div>
+                    <div class="col-md-4">
+                        <strong>Plugin Actualizador:</strong> {{ fsc.updaterInfo.version|default('1.0.0') }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{ include('footer.html.twig') }}
