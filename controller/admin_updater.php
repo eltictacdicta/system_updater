@@ -285,7 +285,7 @@ class admin_updater extends fs_controller
     {
         // Crear backup previo
         $backupResult = $this->backup_manager->create_pre_update_backup('core');
-        if (!$backupResult['success']) {
+        if (!isset($backupResult['complete']['success']) || !$backupResult['complete']['success']) {
             $this->errorMessage = 'Error al crear backup previo: ' . implode(', ', $this->backup_manager->get_errors());
             $this->new_error_msg($this->errorMessage);
             return;
