@@ -378,10 +378,22 @@ class admin_updater extends fs_controller
         $result = $this->backup_manager->create_backup();
 
         if (isset($result['complete']) && $result['complete']['success']) {
-            $this->successMessage = 'Copia de seguridad creada correctamente.';
+            $msg = 'Copia de seguridad creada correctamente.';
+            if ($this->isAjax()) {
+                header('Content-Type: application/json');
+                echo json_encode(['success' => true, 'message' => $msg]);
+                exit;
+            }
+            $this->successMessage = $msg;
             $this->new_message($this->successMessage);
         } else {
-            $this->errorMessage = 'Error al crear la copia de seguridad: ' . implode(', ', $this->backup_manager->get_errors());
+            $msg = 'Error al crear la copia de seguridad: ' . implode(', ', $this->backup_manager->get_errors());
+            if ($this->isAjax()) {
+                header('Content-Type: application/json');
+                echo json_encode(['success' => false, 'message' => $msg]);
+                exit;
+            }
+            $this->errorMessage = $msg;
             $this->new_error_msg($this->errorMessage);
         }
     }
@@ -454,10 +466,22 @@ class admin_updater extends fs_controller
         $result = $this->backup_manager->delete_backup_group($baseName);
 
         if ($result['success']) {
-            $this->successMessage = 'Grupo de copias de seguridad eliminado correctamente.';
+            $msg = 'Grupo de copias de seguridad eliminado correctamente.';
+            if ($this->isAjax()) {
+                header('Content-Type: application/json');
+                echo json_encode(['success' => true, 'message' => $msg]);
+                exit;
+            }
+            $this->successMessage = $msg;
             $this->new_message($this->successMessage);
         } else {
-            $this->errorMessage = 'Error al eliminar las copias de seguridad: ' . implode(', ', $result['errors'] ?? []);
+            $msg = 'Error al eliminar las copias de seguridad: ' . implode(', ', $result['errors'] ?? []);
+            if ($this->isAjax()) {
+                header('Content-Type: application/json');
+                echo json_encode(['success' => false, 'message' => $msg]);
+                exit;
+            }
+            $this->errorMessage = $msg;
             $this->new_error_msg($this->errorMessage);
         }
     }
