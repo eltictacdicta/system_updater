@@ -86,6 +86,27 @@ class plugin_downloader
             if (is_array($this->download_list)) {
                 foreach ($this->download_list as $key => $value) {
                     $this->download_list[$key]['instalado'] = file_exists($this->fsRoot . '/plugins/' . $value['nombre']);
+
+                    // Mapear autor desde creador o nick
+                    if (!isset($this->download_list[$key]['autor'])) {
+                        $this->download_list[$key]['autor'] = isset($value['creador']) ? $value['creador'] : (isset($value['nick']) ? $value['nick'] : 'Desconocido');
+                    }
+
+                    // Intentar obtener versión y descripción del repo si no están en el JSON o son N/A
+                    if (!isset($this->download_list[$key]['version']) || $this->download_list[$key]['version'] == 'N/A' || !isset($this->download_list[$key]['descripcion'])) {
+                        $remote_data = $this->get_remote_plugin_ini($value);
+                        if ($remote_data) {
+                            if ((!isset($this->download_list[$key]['version']) || $this->download_list[$key]['version'] == 'N/A') && isset($remote_data['version'])) {
+                                $this->download_list[$key]['version'] = $remote_data['version'];
+                            }
+                            if ((!isset($this->download_list[$key]['descripcion']) || empty($this->download_list[$key]['descripcion'])) && isset($remote_data['description'])) {
+                                $this->download_list[$key]['descripcion'] = $remote_data['description'];
+                            }
+                            if (isset($remote_data['require'])) {
+                                $this->download_list[$key]['require'] = $remote_data['require'];
+                            }
+                        }
+                    }
                 }
 
                 if ($this->cache) {
@@ -313,6 +334,20 @@ class plugin_downloader
                 } else {
                     $this->private_download_list[$key]['id'] = 'priv_' . $this->private_download_list[$key]['id'];
                 }
+
+                // Obtener datos del fsframework.ini del repositorio remoto
+                $remote_ini_data = $this->get_remote_plugin_ini($value, $config['github_token']);
+                if ($remote_ini_data) {
+                    if (isset($remote_ini_data['version'])) {
+                        $this->private_download_list[$key]['version'] = $remote_ini_data['version'];
+                    }
+                    if (isset($remote_ini_data['description'])) {
+                        $this->private_download_list[$key]['descripcion'] = $remote_ini_data['description'];
+                    }
+                    if (isset($remote_ini_data['require'])) {
+                        $this->private_download_list[$key]['require'] = $remote_ini_data['require'];
+                    }
+                }
             }
 
             if ($this->cache) {
@@ -474,6 +509,69 @@ class plugin_downloader
         }
         $this->download_list = null;
         $this->private_download_list = null;
+    }
+
+    /**
+     * Obtiene los datos del fsframework.ini de un repositorio remoto.
+     * @param array $plugin_data Datos del plugin del JSON
+     * @param string $token Token de GitHub (opcional)
+     * @return array|false Array con los datos del ini o false si falla
+     */
+    private function get_remote_plugin_ini($plugin_data, $token = null)
+    {
+        if (!isset($plugin_data['link']) || empty($plugin_data['link'])) {
+            return false;
+        }
+
+        // Extraer usuario y repo del link
+        $parsed = parse_url(trim($plugin_data['link']));
+        if (!isset($parsed['path'])) {
+            return false;
+        }
+
+        $path_parts = explode('/', trim($parsed['path'], '/'));
+        if (count($path_parts) < 2) {
+            return false;
+        }
+
+        $user = $path_parts[0];
+        $repo = $path_parts[1];
+        $branch = isset($plugin_data['branch']) ? $plugin_data['branch'] : 'master';
+        $ini_files = ['fsframework.ini', 'facturascripts.ini'];
+
+        foreach ($ini_files as $ini_file) {
+            $content = false;
+            
+            if ($token) {
+                // Usar API de GitHub para repos privados
+                $api_url = "https://api.github.com/repos/{$user}/{$repo}/contents/{$ini_file}?ref={$branch}";
+                $content = @fs_file_get_contents_github_api($api_url, $token, 5);
+            } else {
+                // Usar raw content para repos públicos (evita rate limits de la API)
+                $raw_url = "https://raw.githubusercontent.com/{$user}/{$repo}/{$branch}/{$ini_file}";
+                $content = @fs_file_get_contents($raw_url, 5);
+            }
+
+            if ($content && $content != 'ERROR') {
+                $ini_data = @parse_ini_string($content, true);
+                if ($ini_data && is_array($ini_data)) {
+                    if (isset($ini_data['plugin']) && is_array($ini_data['plugin'])) {
+                        return $ini_data['plugin'];
+                    }
+                    if (isset($ini_data['version']) || isset($ini_data['description']) || isset($ini_data['name'])) {
+                        return $ini_data;
+                    }
+                    foreach ($ini_data as $section => $values) {
+                        if (is_array($values) && (isset($values['version']) || isset($values['description']))) {
+                            return $values;
+                        }
+                    }
+                    return $ini_data;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**
