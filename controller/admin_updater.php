@@ -231,7 +231,7 @@ class admin_updater extends fs_controller
 
                 $remoteVersion = $remote['version'] ?? null;
 
-                if ($localVersion !== null && $remoteVersion !== null && (float) $remoteVersion > (float) $localVersion) {
+                if ($localVersion !== null && $remoteVersion !== null && $this->isRemoteVersionNewer((string) $remoteVersion, (string) $localVersion)) {
                     $updates['plugins'][] = [
                         'name' => $pluginName,
                         'description' => $remote['descripcion'] ?? '',
@@ -271,11 +271,31 @@ class admin_updater extends fs_controller
         $remoteVersion = trim($remoteVersion);
         $localVersion = $this->plugin_manager->version;
 
-        if (!empty($remoteVersion) && (float) $remoteVersion > (float) $localVersion) {
+        if (!empty($remoteVersion) && $this->isRemoteVersionNewer($remoteVersion, (string) $localVersion)) {
             return $remoteVersion;
         }
 
         return false;
+    }
+
+    /**
+     * Determina si la versión remota es más nueva que la local.
+     *
+     * @param string $remoteVersion
+     * @param string $localVersion
+     *
+     * @return bool
+     */
+    private function isRemoteVersionNewer($remoteVersion, $localVersion)
+    {
+        $remote = trim((string) $remoteVersion);
+        $local = trim((string) $localVersion);
+
+        if ($remote === '' || $local === '') {
+            return false;
+        }
+
+        return version_compare($remote, $local, '>');
     }
 
     /**
