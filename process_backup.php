@@ -42,10 +42,6 @@ function send_sse($event, $data)
     @flush();
 }
 
-// Iniciar sesión para mantener estado
-session_name('fsSess');
-session_start();
-
 define('FS_FOLDER', dirname(dirname(__DIR__)));
 
 // Cargar configuración
@@ -56,6 +52,13 @@ if (file_exists(FS_FOLDER . '/config.php')) {
     exit;
 }
 
+// Iniciar sesión para mantener estado
+// Usar el nombre de sesión configurado o el por defecto de PHP (PHPSESSID)
+if (defined('FS_SESSION_NAME')) {
+    session_name(FS_SESSION_NAME);
+}
+session_start();
+
 // Cargar Backup Manager
 if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
     require_once __DIR__ . '/lib/backup_manager.php';
@@ -64,8 +67,17 @@ if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
     exit;
 }
 
-// Verificar autenticación
-if (!isset($_SESSION['user_id'])) {
+// Verificar autenticación (compatibilidad con Symfony Session y Legacy)
+$is_logged = false;
+if (isset($_SESSION['user_id'])) {
+    $is_logged = true;
+} elseif (isset($_SESSION['user_nick'])) {
+    $is_logged = true;
+} elseif (isset($_SESSION['_sf2_attributes']['user_nick'])) {
+    $is_logged = true;
+}
+
+if (!$is_logged) {
     send_sse('error', ['message' => 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.', 'percent' => 0]);
     exit;
 }

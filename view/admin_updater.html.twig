@@ -250,6 +250,10 @@
 $(document).ready(function() {
     var restoreEventSource = null;
     var restoreLog = [];
+    var restoreFinished = false;
+    var backupEventSource = null;
+    var backupLog = [];
+    var backupFinished = false;
 
     function showLoading() {
         $('#backup-loading').show();
@@ -259,38 +263,133 @@ $(document).ready(function() {
         $('#backup-loading').hide();
     }
 
-    // Crear Backup
+    // Crear Backup con SSE (Server-Sent Events)
+    function startBackup() {
+        backupLog = [];
+        backupFinished = false;
+        updateBackupProgress(0, 'Iniciando copia de seguridad...');
+        $('#backupDetails').html('<small class="text-muted">Conectando al servidor...</small>');
+        $('#backupCompleteBtn').hide();
+        $('#backupErrorBtn').hide();
+        $('#btn-create-backup').prop('disabled', true);
+
+        $('#backupProgressModal').modal('show');
+
+        var sseUrl = 'plugins/system_updater/process_backup.php?action=start';
+        backupEventSource = new EventSource(sseUrl);
+
+        backupEventSource.addEventListener('start', function(e) {
+            var data = JSON.parse(e.data);
+            addBackupLogEntry('Iniciando: ' + data.message);
+        });
+
+        backupEventSource.addEventListener('init', function(e) {
+            var data = JSON.parse(e.data);
+            updateBackupProgress(data.percent, data.message);
+            addBackupLogEntry(data.message);
+        });
+
+        backupEventSource.addEventListener('phase', function(e) {
+            var data = JSON.parse(e.data);
+            addBackupLogEntry('=== Fase: ' + data.message + ' ===');
+        });
+
+        backupEventSource.addEventListener('progress', function(e) {
+            var data = JSON.parse(e.data);
+            updateBackupProgress(data.percent, data.message);
+            if (data.step && data.step.indexOf('_progress') === -1 && data.step.indexOf('db_table') === -1) {
+                addBackupLogEntry(data.message);
+            }
+        });
+
+        backupEventSource.addEventListener('complete', function(e) {
+            var data = JSON.parse(e.data);
+            backupFinished = true;
+            updateBackupProgress(100, data.message, 'success');
+            addBackupLogEntry('✓ ' + data.message);
+            if (data.backup_name) {
+                addBackupLogEntry('Backup: ' + data.backup_name);
+            }
+            $('#backupCompleteBtn').show();
+            $('#btn-create-backup').prop('disabled', false);
+            hideLoading();
+            backupEventSource.close();
+        });
+
+        backupEventSource.addEventListener('error', function(e) {
+            backupFinished = true;
+            try {
+                var data = JSON.parse(e.data);
+                updateBackupProgress(data.percent || 0, data.message, 'danger');
+                addBackupLogEntry('✗ ERROR: ' + data.message);
+            } catch (err) {
+                updateBackupProgress(0, 'Error de conexión con el servidor', 'danger');
+                addBackupLogEntry('✗ Error de conexión');
+            }
+            $('#backupErrorBtn').show();
+            $('#btn-create-backup').prop('disabled', false);
+            hideLoading();
+            backupEventSource.close();
+        });
+
+        backupEventSource.onerror = function() {
+            if (backupFinished) {
+                return;
+            }
+            backupFinished = true;
+            updateBackupProgress(0, 'Error de conexión con el servidor', 'danger');
+            addBackupLogEntry('✗ Error de conexión');
+            $('#backupErrorBtn').show();
+            $('#btn-create-backup').prop('disabled', false);
+            hideLoading();
+            backupEventSource.close();
+        };
+    }
+
+    function updateBackupProgress(percent, message, type) {
+        var $progressBar = $('#backupProgressBar');
+        var $statusMessage = $('#backupStatusMessage');
+        var $statusText = $('#backupStatusText');
+
+        $progressBar.css('width', percent + '%');
+        $progressBar.attr('aria-valuenow', percent);
+        $progressBar.text(Math.round(percent) + '%');
+
+        $statusText.text(message);
+
+        $statusMessage.removeClass('alert-info alert-success alert-danger');
+        if (type === 'success') {
+            $statusMessage.addClass('alert-success');
+            $progressBar.removeClass('active progress-bar-striped');
+        } else if (type === 'danger') {
+            $statusMessage.addClass('alert-danger');
+            $progressBar.removeClass('progress-bar-success').addClass('progress-bar-danger');
+        } else {
+            $statusMessage.addClass('alert-info');
+        }
+    }
+
+    function addBackupLogEntry(message) {
+        backupLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
+        var $detailsDiv = $('#backupDetails');
+        $detailsDiv.html(backupLog.map(function(entry) {
+            return '<div>' + entry + '</div>';
+        }).join(''));
+        $detailsDiv.scrollTop($detailsDiv[0].scrollHeight);
+    }
+
     $('#btn-create-backup').click(function(e) {
         e.preventDefault();
-        if(confirm('¿Crear copia de seguridad completa?')) {
+        if (confirm('¿Crear copia de seguridad completa?')) {
             showLoading();
-            $(this).prop('disabled', true);
-            $.ajax({
-                url: '{{ fsc.url()|raw }}&action=create_backup&ajax=1',
-                type: 'GET',
-                dataType: 'json',
-                success: function(response) {
-                    if(response.success) {
-                        alert(response.message);
-                        location.reload();
-                    } else {
-                        alert(response.message);
-                        hideLoading();
-                        $('#btn-create-backup').prop('disabled', false);
-                    }
-                },
-                error: function() {
-                    alert('Error de conexión');
-                    hideLoading();
-                    $('#btn-create-backup').prop('disabled', false);
-                }
-            });
+            startBackup();
         }
     });
 
     // Restaurar con SSE (Server-Sent Events)
     function startRestore(file, type) {
         restoreLog = [];
+        restoreFinished = false;
         updateProgress(0, 'Iniciando restauración...');
         $('#restoreDetails').html('<small class="text-muted">Conectando al servidor...</small>');
         $('#restoreCompleteBtn').hide();
@@ -330,6 +429,7 @@ $(document).ready(function() {
         
         restoreEventSource.addEventListener('complete', function(e) {
             var data = JSON.parse(e.data);
+            restoreFinished = true;
             updateProgress(100, data.message, 'success');
             addLogEntry('✓ ' + data.message);
             $('#restoreCompleteBtn').show();
@@ -337,6 +437,7 @@ $(document).ready(function() {
         });
         
         restoreEventSource.addEventListener('error', function(e) {
+            restoreFinished = true;
             try {
                 var data = JSON.parse(e.data);
                 updateProgress(data.percent || 0, data.message, 'danger');
@@ -350,6 +451,10 @@ $(document).ready(function() {
         });
         
         restoreEventSource.onerror = function() {
+            if (restoreFinished) {
+                return;
+            }
+            restoreFinished = true;
             updateProgress(0, 'Error de conexión con el servidor', 'danger');
             addLogEntry('✗ Error de conexión');
             $('#restoreErrorBtn').show();
@@ -638,6 +743,49 @@ $(document).ready(function() {
                     <i class="fa fa-check"></i> Aceptar
                 </a>
                 <button type="button" id="restoreErrorBtn" class="btn btn-danger" data-dismiss="modal" style="display: none;">
+                    <i class="fa fa-times"></i> Cerrar
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal de Progreso de Backup -->
+<div class="modal fade" id="backupProgressModal" tabindex="-1" role="dialog" data-backdrop="static" data-keyboard="false">
+    <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+            <div class="modal-header" style="background: #00a65a; color: white;">
+                <h4 class="modal-title">
+                    <i class="fa fa-database fa-spin"></i> Creando Copia de Seguridad
+                </h4>
+            </div>
+            <div class="modal-body">
+                <div class="text-center" style="margin-bottom: 20px;">
+                    <i class="fa fa-archive" style="font-size: 48px; color: #00a65a;"></i>
+                </div>
+
+                <div class="progress" style="height: 30px;">
+                    <div id="backupProgressBar" class="progress-bar progress-bar-success progress-bar-striped active"
+                        role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                        style="width: 0%; min-width: 2em; line-height: 30px;">
+                        0%
+                    </div>
+                </div>
+
+                <div id="backupStatusMessage" class="alert alert-info text-center" style="margin-top: 15px;">
+                    <i class="fa fa-spinner fa-spin"></i>
+                    <span id="backupStatusText">Iniciando copia de seguridad...</span>
+                </div>
+
+                <div id="backupDetails" class="well well-sm" style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background-color: #f5f5f5;">
+                    <small class="text-muted">Esperando inicio...</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <a href="index.php?page=admin_updater" id="backupCompleteBtn" class="btn btn-success" style="display: none;">
+                    <i class="fa fa-check"></i> Aceptar
+                </a>
+                <button type="button" id="backupErrorBtn" class="btn btn-danger" data-dismiss="modal" style="display: none;">
                     <i class="fa fa-times"></i> Cerrar
                 </button>
             </div>
