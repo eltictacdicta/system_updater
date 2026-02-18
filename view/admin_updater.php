@@ -20,6 +20,7 @@
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
     <title>Actualizador - FSFramework</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <?php echo \FSFramework\Security\CsrfManager::metaTag(); ?>
     <!-- Bootstrap CSS -->
     <link rel="stylesheet" href="view/css/bootstrap.min.css" />
     <!-- Font Awesome -->
@@ -901,6 +902,8 @@
                 var progressBar = document.getElementById('backup-progress-bar');
                 var progressText = document.getElementById('backup-progress-text');
                 var statusText = document.getElementById('backup-upload-status');
+                var csrfMeta = document.querySelector('meta[name="csrf-token"]');
+                var csrfToken = csrfMeta ? csrfMeta.getAttribute('content') : '';
 
                 if (!dropZone) return;
 
@@ -915,7 +918,11 @@
                     maxFiles: 1,
                     maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB máximo
                     headers: {
-                        'X-Requested-With': 'XMLHttpRequest'
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'X-CSRF-TOKEN': csrfToken
+                    },
+                    query: {
+                        '_csrf_token': csrfToken
                     }
                 });
 

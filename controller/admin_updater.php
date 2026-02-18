@@ -536,19 +536,21 @@ class admin_updater extends fs_controller
         if (file_exists(FS_FOLDER . '/base/fs_secure_chunked_upload.php')) {
             require_once FS_FOLDER . '/base/fs_secure_chunked_upload.php';
 
-            $uploader = new fs_secure_chunked_upload([
-                'upload_dir' => $this->backup_manager->get_backup_path() . DIRECTORY_SEPARATOR,
-                'allowed_extensions' => ['zip'],
-                'max_file_size' => 2 * 1024 * 1024 * 1024, // 2GB
-            ]);
+            $uploader = new fs_secure_chunked_upload(
+                $this->backup_manager->get_backup_path() . DIRECTORY_SEPARATOR,
+                ['zip'],
+                2048,
+                'admin_updater',
+                (isset($this->user) && isset($this->user->nick)) ? $this->user->nick : 'system'
+            );
 
-            $uploader->onComplete(function ($filename, $filepath) {
-                // Archivo subido completamente, mover a directorio de backups
+            $uploader->on_complete(function ($finalPath, $filename, $filesize, $params, $user) {
                 $this->successMessage = 'Archivo de backup subido correctamente: ' . $filename;
                 $this->new_message($this->successMessage);
             });
 
-            $uploader->handleRequest();
+            $result = $uploader->handle_chunk();
+            fs_secure_chunked_upload::send_json_response($result);
             exit;
         }
 
