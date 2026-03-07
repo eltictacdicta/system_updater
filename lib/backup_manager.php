@@ -17,7 +17,7 @@
 class backup_manager
 {
     const BACKUP_DIR = 'backups';
-    const VERSION = '2.3.0';
+    const VERSION = '2.3.1';
 
     /**
      * @var string
@@ -125,6 +125,7 @@ class backup_manager
     {
         $versionFile = $this->fsRoot . '/VERSION';
         $version = file_exists($versionFile) ? trim(file_get_contents($versionFile)) : 'unknown';
+        $databaseType = $this->get_database_type();
 
         // Get list of installed plugins with versions
         $plugins = array();
@@ -151,10 +152,168 @@ class backup_manager
             'framework_version' => $version,
             'php_version' => PHP_VERSION,
             'backup_manager_version' => self::VERSION,
+            'database_type' => $databaseType,
+            'database_port' => $this->get_database_port($databaseType),
             'plugins' => $plugins,
             'created_at' => date('Y-m-d H:i:s'),
             'timestamp' => time(),
         );
+    }
+
+    /**
+     * Normaliza el tipo de base de datos a un valor consistente.
+     *
+     * @param string $dbType
+     * @return string
+     */
+    private function normalize_database_type($dbType)
+    {
+        $normalized = strtoupper(trim((string) $dbType));
+
+        if (in_array($normalized, array('POSTGRES', 'POSTGRESQL', 'PGSQL'), true)) {
+            return 'POSTGRESQL';
+        }
+
+        if (in_array($normalized, array('MYSQL', 'MARIADB'), true)) {
+            return 'MYSQL';
+        }
+
+        return $normalized ?: 'MYSQL';
+    }
+
+    /**
+     * Devuelve el tipo de base de datos actual.
+     *
+     * @return string
+     */
+    private function get_database_type()
+    {
+        return $this->normalize_database_type(defined('FS_DB_TYPE') ? FS_DB_TYPE : 'MYSQL');
+    }
+
+    /**
+     * Devuelve el puerto por defecto según el motor.
+     *
+     * @param string|null $dbType
+     * @return string
+     */
+    private function get_database_port($dbType = null)
+    {
+        $normalized = $this->normalize_database_type($dbType ?: $this->get_database_type());
+
+        if (defined('FS_DB_PORT') && FS_DB_PORT !== '') {
+            return (string) FS_DB_PORT;
+        }
+
+        return $normalized === 'POSTGRESQL' ? '5432' : '3306';
+    }
+
+    /**
+     * Indica si un backup es compatible con el motor actual.
+     *
+     * @param string $backupDbType
+     * @param string $currentDbType
+     * @return bool
+     */
+    private function is_database_restore_compatible($backupDbType, $currentDbType)
+    {
+        if ($backupDbType === null || trim((string) $backupDbType) === '') {
+            return true;
+        }
+
+        $backupDbType = $this->normalize_database_type($backupDbType);
+        $currentDbType = $this->normalize_database_type($currentDbType);
+
+        return empty($backupDbType) || $backupDbType === 'UNKNOWN' || $backupDbType === $currentDbType;
+    }
+
+    /**
+     * Obtiene el motor de base de datos indicado en los metadatos del backup.
+     *
+     * @param array $metadata
+     * @return string
+     */
+    private function get_backup_database_type_from_metadata($metadata)
+    {
+        $candidates = array(
+            $metadata['source_database']['type'] ?? null,
+            $metadata['database_type'] ?? null,
+            $metadata['version_info']['database_type'] ?? null,
+            $metadata['version_info']['database']['type'] ?? null,
+        );
+
+        foreach ($candidates as $candidate) {
+            if (!empty($candidate)) {
+                return $this->normalize_database_type($candidate);
+            }
+        }
+
+        return 'UNKNOWN';
+    }
+
+    /**
+     * Intenta detectar el motor de base de datos a partir del contenido del dump.
+     *
+     * @param string $backupPath
+     * @return string
+     */
+    private function detect_database_backup_type($backupPath)
+    {
+        if (!is_file($backupPath) || substr($backupPath, -7) !== '.sql.gz') {
+            return 'UNKNOWN';
+        }
+
+        $gzFile = @gzopen($backupPath, 'rb');
+        if (!$gzFile) {
+            return 'UNKNOWN';
+        }
+
+        $sample = '';
+        $lineCount = 0;
+        while (!gzeof($gzFile) && strlen($sample) < 65536 && $lineCount < 200) {
+            $line = gzgets($gzFile, 4096);
+            if ($line === false) {
+                break;
+            }
+
+            $sample .= $line;
+            $lineCount++;
+        }
+
+        gzclose($gzFile);
+
+        if (preg_match('/Source-Database-Type:\s*(MYSQL|MARIADB|POSTGRES|POSTGRESQL|PGSQL)/i', $sample, $matches)) {
+            return $this->normalize_database_type($matches[1]);
+        }
+
+        if (preg_match('/\b(ENGINE=|AUTO_INCREMENT|LOCK TABLES|UNLOCK TABLES|SET SQL_MODE|FOREIGN_KEY_CHECKS|\/\*!\d+)/i', $sample)
+            || strpos($sample, '`') !== false) {
+            return 'MYSQL';
+        }
+
+        if (preg_match('/\b(SET search_path|CREATE SCHEMA|DROP SCHEMA|ALTER TABLE ONLY|OWNER TO|COPY\s+[^\n]+\s+FROM stdin|SELECT pg_catalog\.setval)/i', $sample)) {
+            return 'POSTGRESQL';
+        }
+
+        return 'UNKNOWN';
+    }
+
+    /**
+     * Comprueba si existe un comando del sistema disponible.
+     *
+     * @param string $command
+     * @return bool
+     */
+    private function shell_command_available($command)
+    {
+        if (!$this->shell_functions_available()) {
+            return false;
+        }
+
+        $output = array();
+        $returnVar = 0;
+        exec('command -v ' . escapeshellarg($command) . ' 2>/dev/null', $output, $returnVar);
+        return $returnVar === 0 && !empty($output);
     }
 
     /**
@@ -293,6 +452,11 @@ class backup_manager
         $metadata = array(
             'backup_name' => $baseName,
             'backup_type' => 'complete',
+            'database_type' => $versionInfo['database_type'] ?? $this->get_database_type(),
+            'source_database' => array(
+                'type' => $versionInfo['database_type'] ?? $this->get_database_type(),
+                'port' => $versionInfo['database_port'] ?? $this->get_database_port(),
+            ),
             'version_info' => $versionInfo,
             'database_file' => $dbResult['file'],
             'files_file' => $filesResult['file'],
@@ -323,18 +487,10 @@ class backup_manager
      * Check if shell functions are available on this server.
      * Many shared hosting providers disable these for security.
      *
-     * NOTE: We always return false to use PHP native methods for consistency
-     * between development and production environments, and to avoid issues
-     * with servers that have shell functions disabled.
-     *
      * @return bool
      */
     private function shell_functions_available()
     {
-        // Always use PHP native methods for consistency across all environments
-        return false;
-
-        /* Original detection code (kept for reference):
         $disabled = explode(',', ini_get('disable_functions'));
         $disabled = array_map('trim', $disabled);
 
@@ -346,7 +502,6 @@ class backup_manager
             }
         }
         return true;
-        */
     }
 
     /**
@@ -362,9 +517,9 @@ class backup_manager
         $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
 
         // Get DB credentials - compatible with older and newer versions
-        $dbType = defined('FS_DB_TYPE') ? FS_DB_TYPE : 'MYSQL';
+        $dbType = $this->get_database_type();
         $dbHost = defined('FS_DB_HOST') ? FS_DB_HOST : 'localhost';
-        $dbPort = defined('FS_DB_PORT') ? FS_DB_PORT : '3306';
+        $dbPort = $this->get_database_port($dbType);
         $dbUser = defined('FS_DB_USER') ? FS_DB_USER : 'root';
         $dbPass = defined('FS_DB_PASS') ? FS_DB_PASS : '';
         $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
@@ -372,14 +527,19 @@ class backup_manager
         // Check if shell functions are available
         if (!$this->shell_functions_available()) {
             // Use PHP-native backup method
-            if (strtoupper($dbType) === 'POSTGRESQL') {
+            if ($dbType === 'POSTGRESQL') {
                 $this->errors[] = "El backup nativo de PostgreSQL no está soportado en servidores con funciones shell deshabilitadas.";
                 return array('success' => false, 'file' => null, 'error' => 'PostgreSQL native backup not supported');
             }
             return $this->create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
         }
 
-        if (strtoupper($dbType) === 'POSTGRESQL') {
+        if ($dbType === 'POSTGRESQL') {
+            if (!$this->shell_command_available('pg_dump') || !$this->shell_command_available('gzip')) {
+                $this->errors[] = "No se encontraron los comandos pg_dump/gzip necesarios para exportar PostgreSQL.";
+                return array('success' => false, 'file' => null, 'error' => 'pg_dump or gzip not available');
+            }
+
             // PostgreSQL backup
             $command = sprintf(
                 'PGPASSWORD=%s pg_dump --host=%s --port=%s --username=%s %s 2>&1 | gzip > %s',
@@ -391,6 +551,10 @@ class backup_manager
                 escapeshellarg($filePath)
             );
         } else {
+            if (!$this->shell_command_available('mysqldump') || !$this->shell_command_available('gzip')) {
+                return $this->create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
+            }
+
             // MySQL backup
             $command = sprintf(
                 'mysqldump --single-transaction --routines --triggers --host=%s --port=%s --user=%s --password=%s %s 2>&1 | gzip > %s',
@@ -458,6 +622,7 @@ class backup_manager
         $header = "-- FSFramework Database Backup\n";
         $header .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
         $header .= "-- Database: " . $dbName . "\n";
+        $header .= "-- Source-Database-Type: MYSQL\n";
         $header .= "-- PHP Native Backup (shell functions disabled)\n";
         $header .= "-- --------------------------------------------------------\n\n";
         $header .= "SET SQL_MODE = \"NO_AUTO_VALUE_ON_ZERO\";\n";
@@ -603,16 +768,24 @@ class backup_manager
         $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
 
         // Get DB credentials
-        $dbType = defined('FS_DB_TYPE') ? FS_DB_TYPE : 'MYSQL';
+        $dbType = $this->get_database_type();
         $dbHost = defined('FS_DB_HOST') ? FS_DB_HOST : 'localhost';
-        $dbPort = defined('FS_DB_PORT') ? FS_DB_PORT : '3306';
+        $dbPort = $this->get_database_port($dbType);
         $dbUser = defined('FS_DB_USER') ? FS_DB_USER : 'root';
         $dbPass = defined('FS_DB_PASS') ? FS_DB_PASS : '';
         $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
 
-        if (strtoupper($dbType) === 'POSTGRESQL') {
-            $this->errors[] = "El backup nativo de PostgreSQL no está soportado.";
-            return array('success' => false, 'file' => null, 'error' => 'PostgreSQL not supported');
+        if ($dbType === 'POSTGRESQL') {
+            $reportProgress('db_export', 'Exportando base de datos PostgreSQL...', 18);
+
+            $result = $this->create_database_backup($customName);
+            if (!($result['success'] ?? false)) {
+                $reportProgress('db_error', 'No se pudo exportar PostgreSQL', 18);
+                return $result;
+            }
+
+            $reportProgress('db_complete', 'Backup de PostgreSQL completado', 48);
+            return $result;
         }
 
         $reportProgress('db_connect', 'Conectando a la base de datos...', 12);
@@ -640,6 +813,7 @@ class backup_manager
         $header = "-- FSFramework Database Backup\n";
         $header .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
         $header .= "-- Database: " . $dbName . "\n";
+        $header .= "-- Source-Database-Type: MYSQL\n";
         $header .= "-- PHP Native Backup with Progress\n";
         $header .= "-- --------------------------------------------------------\n\n";
         $header .= "SET SQL_MODE = \"NO_AUTO_VALUE_ON_ZERO\";\n";
@@ -1078,6 +1252,32 @@ class backup_manager
 
         // Find the database and files backups inside
         $metadata = $this->read_package_metadata($tempDir);
+        $dbBackup = $tempDir . '/database/' . ($metadata['database_file'] ?? '');
+        if (!file_exists($dbBackup)) {
+            $dbBackup = false;
+            $dbDir = $tempDir . '/database';
+            if (is_dir($dbDir)) {
+                foreach (scandir($dbDir) as $f) {
+                    if (substr($f, -7) === '.sql.gz') {
+                        $dbBackup = $dbDir . '/' . $f;
+                        break;
+                    }
+                }
+            }
+        }
+
+        $backupDbType = $this->get_backup_database_type_from_metadata($metadata);
+        if ($backupDbType === 'UNKNOWN' && $dbBackup) {
+            $backupDbType = $this->detect_database_backup_type($dbBackup);
+        }
+
+        $currentDbType = $this->get_database_type();
+        if (!$this->is_database_restore_compatible($backupDbType, $currentDbType)) {
+            $this->errors[] = 'El backup fue generado para ' . $backupDbType . ' y la instalación actual usa ' . $currentDbType . '. La restauración de base de datos entre motores distintos no es compatible.';
+            $this->delete_directory($tempDir);
+            $reportProgress('error', 'Backup incompatible con el motor actual', 20);
+            return $results;
+        }
 
         // Restore files first
         $reportProgress('files', 'Preparando restauración de archivos...', 25);
@@ -1105,8 +1305,7 @@ class backup_manager
 
         // Then restore database
         $reportProgress('database', 'Preparando restauración de base de datos...', 55);
-        $dbBackup = $tempDir . '/database/' . ($metadata['database_file'] ?? '');
-        if (file_exists($dbBackup)) {
+        if ($dbBackup && file_exists($dbBackup)) {
             $results['database'] = $this->restore_database($dbBackup, $progressCallback);
         } else {
             // Try to find any sql.gz file in database folder
@@ -1252,14 +1451,21 @@ class backup_manager
             return $result;
         }
 
-        $dbType = defined('FS_DB_TYPE') ? FS_DB_TYPE : 'MYSQL';
         $dbHost = defined('FS_DB_HOST') ? FS_DB_HOST : 'localhost';
-        $dbPort = defined('FS_DB_PORT') ? FS_DB_PORT : '3306';
+        $dbType = $this->get_database_type();
+        $dbPort = $this->get_database_port($dbType);
         $dbUser = defined('FS_DB_USER') ? FS_DB_USER : 'root';
         $dbPass = defined('FS_DB_PASS') ? FS_DB_PASS : '';
         $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
 
-        if (strtoupper($dbType) === 'POSTGRESQL') {
+        $backupDbType = $this->detect_database_backup_type($backupPath);
+        if (!$this->is_database_restore_compatible($backupDbType, $dbType)) {
+            $this->errors[] = 'El backup de base de datos fue generado para ' . $backupDbType . ' y la instalación actual usa ' . $dbType . '. La importación/exportación entre MySQL y PostgreSQL no es compatible de forma directa.';
+            $reportProgress('db_error', 'Backup incompatible con el motor actual', 55);
+            return $result;
+        }
+
+        if ($dbType === 'POSTGRESQL') {
             if (!$this->shell_functions_available()) {
                 $this->errors[] = "La restauración de PostgreSQL no está soportada en servidores con funciones shell deshabilitadas.";
                 $reportProgress('db_error', 'PostgreSQL no soportado sin funciones shell', 55);
@@ -1537,6 +1743,12 @@ class backup_manager
      */
     private function restore_database_postgresql($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress, $result)
     {
+        if (!$this->shell_command_available('psql') || !$this->shell_command_available('gunzip')) {
+            $this->errors[] = 'No se encontraron los comandos psql/gunzip necesarios para restaurar PostgreSQL.';
+            $reportProgress('db_error', 'psql o gunzip no disponibles', 60);
+            return $result;
+        }
+
         $reportProgress('db_clean', 'Limpiando base de datos PostgreSQL...', 60);
 
         // Limpiar todas las tablas en PostgreSQL
@@ -1548,12 +1760,21 @@ class backup_manager
             escapeshellarg($dbUser),
             escapeshellarg($dbName)
         );
-        exec($command);
+
+        $cleanOutput = array();
+        $cleanReturnVar = 0;
+        exec($command, $cleanOutput, $cleanReturnVar);
+
+        if ($cleanReturnVar !== 0) {
+            $this->errors[] = 'Error al limpiar PostgreSQL antes de restaurar: ' . implode("\n", $cleanOutput);
+            $reportProgress('db_error', 'Error limpiando la base de datos PostgreSQL', 60);
+            return $result;
+        }
 
         $reportProgress('db_import', 'Importando backup PostgreSQL...', 65);
 
         $command = sprintf(
-            'gunzip -c %s | PGPASSWORD=%s psql --host=%s --port=%s --username=%s %s 2>&1',
+            'gunzip -c %s | PGPASSWORD=%s psql --host=%s --port=%s --username=%s -d %s 2>&1',
             escapeshellarg($backupPath),
             escapeshellarg($dbPass),
             escapeshellarg($dbHost),
