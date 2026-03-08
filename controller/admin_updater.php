@@ -260,15 +260,12 @@ class admin_updater extends fs_controller
      */
     private function checkCoreUpdate()
     {
-        // Intentar obtener la versión remota desde GitHub
-        $remoteVersionUrl = 'https://raw.githubusercontent.com/eltictacdicta/fs-framework/master/VERSION';
-        $remoteVersion = @file_get_contents($remoteVersionUrl);
+        $remoteVersion = $this->fetchRemoteCoreVersion();
 
-        if ($remoteVersion === false) {
+        if ($remoteVersion === '') {
             return false;
         }
 
-        $remoteVersion = trim($remoteVersion);
         $localVersion = $this->plugin_manager->version;
 
         if (!empty($remoteVersion) && $this->isRemoteVersionNewer($remoteVersion, (string) $localVersion)) {
@@ -288,14 +285,93 @@ class admin_updater extends fs_controller
      */
     private function isRemoteVersionNewer($remoteVersion, $localVersion)
     {
-        $remote = trim((string) $remoteVersion);
-        $local = trim((string) $localVersion);
+        $remote = $this->normalizeVersion($remoteVersion);
+        $local = $this->normalizeVersion($localVersion);
 
         if ($remote === '' || $local === '') {
             return false;
         }
 
         return version_compare($remote, $local, '>');
+    }
+
+    /**
+     * Obtiene la versión remota del núcleo desde GitHub usando varios endpoints.
+     *
+     * @return string
+     */
+    private function fetchRemoteCoreVersion()
+    {
+        $urls = [
+            'https://raw.githubusercontent.com/eltictacdicta/fs-framework/master/VERSION',
+            'https://raw.githubusercontent.com/eltictacdicta/fs-framework/refs/heads/master/VERSION',
+            'https://raw.githubusercontent.com/eltictacdicta/fs-framework/main/VERSION',
+            'https://raw.githubusercontent.com/eltictacdicta/fs-framework/refs/heads/main/VERSION',
+            'https://api.github.com/repos/eltictacdicta/fs-framework/contents/VERSION?ref=master',
+            'https://api.github.com/repos/eltictacdicta/fs-framework/contents/VERSION?ref=main',
+        ];
+
+        foreach ($urls as $url) {
+            $payload = @fs_file_get_contents($url, 15);
+            $version = $this->extractVersionFromRemotePayload($payload);
+            if ($version !== '') {
+                return $version;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Extrae una versión válida desde la respuesta remota.
+     *
+     * @param string|false $payload
+     *
+     * @return string
+     */
+    private function extractVersionFromRemotePayload($payload)
+    {
+        if ($payload === false || $payload === 'ERROR' || $payload === null) {
+            return '';
+        }
+
+        $content = trim((string) $payload);
+        if ($content === '') {
+            return '';
+        }
+
+        if ($content[0] === '{') {
+            $json = json_decode($content, true);
+            if (json_last_error() === JSON_ERROR_NONE && isset($json['content'])) {
+                $decoded = base64_decode((string) $json['content'], true);
+                if ($decoded !== false) {
+                    $content = trim($decoded);
+                }
+            }
+        }
+
+        return $this->normalizeVersion($content);
+    }
+
+    /**
+     * Normaliza una versión para compararla con version_compare().
+     *
+     * @param string $version
+     *
+     * @return string
+     */
+    private function normalizeVersion($version)
+    {
+        $version = trim((string) $version);
+        if ($version === '') {
+            return '';
+        }
+
+        if (preg_match('/v?(\d+(?:\.\d+)+)/i', $version, $matches)) {
+            return $matches[1];
+        }
+
+        return '';
     }
 
     /**
