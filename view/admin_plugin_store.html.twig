@@ -6,6 +6,32 @@
 #}
 {{ include('header.html.twig') }}
 
+<script type="text/javascript">
+    function descargar_plugin_publico_inestable(pluginId, pluginName) {
+        bootbox.confirm({
+            message: 'Este plugin está marcado como inestable. Significa que <b>no se recomienda su uso</b>, que todavía está en desarrollo y puede contener errores. ¿Estás seguro de que quieres descargar <b>' + pluginName + '</b>?',
+            title: '<b>Atención</b>',
+            callback: function (result) {
+                if (result) {
+                    window.location.href = '{{ fsc.url()|raw }}&tab=public&action=download&plugin_id=' + pluginId;
+                }
+            }
+        });
+    }
+
+    function descargar_plugin_privado_inestable(pluginId, pluginName) {
+        bootbox.confirm({
+            message: 'Este plugin privado está marcado como inestable. Puede contener errores o cambios no finalizados. ¿Deseas descargar <b>' + pluginName + '</b>?',
+            title: '<b>Atención</b>',
+            callback: function (result) {
+                if (result) {
+                    window.location.href = '{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id=' + pluginId;
+                }
+            }
+        });
+    }
+</script>
+
 <div class="container-fluid" style="margin-top: 10px;">
     <div class="row">
         <div class="col-xs-6">
@@ -60,38 +86,91 @@
         {% if fsc.activeTab == 'public' %}
         {# Plugins Públicos #}
         {% if fsc.publicPlugins|length > 0 %}
-        <div class="row">
-            {% for plugin in fsc.publicPlugins %}
-            <div class="col-md-4 col-sm-6" style="margin-bottom: 15px;">
-                <div class="panel panel-default" style="height: 100%;">
-                    <div class="panel-heading">
-                        <h4 class="panel-title">{{ plugin.nombre }}</h4>
-                    </div>
-                    <div class="panel-body">
-                        <p class="text-muted">{{ plugin.descripcion|default('Sin descripción') }}</p>
-                        <p>
-                            <small class="text-muted">
-                                Versión: {{ plugin.version|default('N/A') }}<br>
-                                Autor: {{ plugin.autor|default('Desconocido') }}
-                            </small>
-                        </p>
-                    </div>
-                    <div class="panel-footer">
-                        {% if fsc.isInstalled(plugin.nombre) %}
-                            {% if fsc.isActive(plugin.nombre) %}
-                            <span class="label label-success"><i class="fa fa-check"></i> Activo</span>
-                            {% else %}
-                            <span class="label label-default">Instalado</span>
-                            {% endif %}
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th class="text-left">Plugin</th>
+                        <th class="text-left">Descripción</th>
+                    </tr>
+                </thead>
+                {% for plugin in fsc.publicPlugins %}
+                {% set tr_class = '' %}
+                {% if plugin.instalado or fsc.isInstalled(plugin.nombre) %}
+                    {% set tr_class = ' class="warning"' %}
+                {% elseif plugin.tipo == 'oculto' %}
+                    {% set tr_class = ' class="hidden"' %}
+                {% elseif plugin.estable is defined and not plugin.estable %}
+                    {% set tr_class = ' class="danger"' %}
+                {% elseif plugin.tipo == 'gratis' or plugin.tipo == 'regalo' %}
+                    {% set tr_class = ' class="success"' %}
+                {% endif %}
+                <tr{{ tr_class|raw }}>
+                    <td class="text-center">
+                        {% if plugin.imagen is defined and plugin.imagen %}
+                        <a href="{{ plugin.link|default('https://github.com/eltictacdicta/fs-framework/plugin/' ~ plugin.nombre) }}" target="_blank" class="thumbnail">
+                            <img src="{{ plugin.imagen }}" alt="{{ plugin.nombre }}" width="80"/>
+                        </a>
                         {% else %}
-                        <a href="{{ fsc.url()|raw }}&action=download&plugin_id={{ plugin.id }}" class="btn btn-sm btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre }}?');">
-                            <i class="fa fa-download"></i> Descargar
+                        <a href="{{ plugin.link|default('https://github.com/eltictacdicta/fs-framework/plugin/' ~ plugin.nombre) }}" target="_blank" class="btn btn-block btn-default">
+                            <i class="fa fa-plug fa-3x" aria-hidden="true"></i>
                         </a>
                         {% endif %}
-                    </div>
-                </div>
-            </div>
-            {% endfor %}
+                    </td>
+                    <td>
+                        {{ plugin.nombre }}
+                        {% if plugin.version is defined and plugin.version %}
+                        &nbsp; <span class="label label-info">v{{ plugin.version }}</span>
+                        {% endif %}
+                        {% if plugin.autor is defined and plugin.autor %}
+                        <br/>
+                        <small class="text-muted"><i class="fa fa-user"></i>&nbsp;{{ plugin.autor }}</small>
+                        {% elseif plugin.creador is defined and plugin.creador %}
+                        <br/>
+                        <small class="text-muted"><i class="fa fa-user"></i>&nbsp;{{ plugin.creador }}</small>
+                        {% endif %}
+                        <br/><br/>
+                        {% if plugin.instalado or fsc.isInstalled(plugin.nombre) %}
+                            {% if fsc.isActive(plugin.nombre) %}
+                            <a href="{{ fsc.url()|raw }}&tab=public" class="btn btn-xs btn-success">
+                                <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Activo
+                            </a>
+                            {% else %}
+                            <a href="{{ fsc.url()|raw }}&tab=public" class="btn btn-xs btn-default">
+                                <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Instalado
+                            </a>
+                            {% endif %}
+                        {% elseif plugin.tipo == 'pago' or plugin.tipo == 'externo' %}
+                        <a href="{{ plugin.link|default('https://github.com/eltictacdicta/fs-framework/plugin/' ~ plugin.nombre) }}" target="_blank" class="btn btn-xs btn-info">
+                            <span class="glyphicon glyphicon-shopping-cart" aria-hidden="true"></span>&nbsp; Comprar
+                        </a>
+                        {% elseif plugin.tipo == 'regalo' %}
+                        <a href="{{ plugin.link|default('https://github.com/eltictacdicta/fs-framework/plugin/' ~ plugin.nombre) }}" target="_blank" class="btn btn-xs btn-info">
+                            <span class="glyphicon glyphicon-gift" aria-hidden="true"></span>&nbsp; Obtener
+                        </a>
+                        {% elseif plugin.estable is defined and not plugin.estable %}
+                        <a href="#" class="btn btn-xs btn-primary" onclick="descargar_plugin_publico_inestable('{{ plugin.id }}', '{{ plugin.nombre|e('js') }}'); return false;">
+                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                        </a>
+                        {% else %}
+                        <a href="{{ fsc.url()|raw }}&tab=public&action=download&plugin_id={{ plugin.id }}" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
+                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                        </a>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {{ plugin.descripcion|default('Sin descripción disponible')|nl2br }}<br/>
+                        {% if plugin.ultima_modificacion is defined and plugin.ultima_modificacion %}
+                        Última modificación: {{ plugin.ultima_modificacion }}
+                        {% endif %}
+                        {% if plugin.estable is defined and not plugin.estable %}
+                        <span class="label label-danger" title="inestable: no lo instales a menos que sepas lo que haces">inestable</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
         </div>
         {% else %}
         <p class="text-muted">No hay plugins públicos disponibles.</p>
@@ -178,28 +257,79 @@
                             <i class="fa fa-info-circle"></i> Configura el token de GitHub para ver plugins privados.
                         </div>
                         {% elseif fsc.privatePlugins|length > 0 %}
-                        <div class="row">
-                            {% for plugin in fsc.privatePlugins %}
-                            <div class="col-md-6" style="margin-bottom: 15px;">
-                                <div class="panel panel-warning" style="height: 100%;">
-                                    <div class="panel-heading">
-                                        <h5 class="panel-title">{{ plugin.nombre }}</h5>
-                                    </div>
-                                    <div class="panel-body">
-                                        <p class="text-muted">{{ plugin.descripcion|default('Sin descripción') }}</p>
-                                    </div>
-                                    <div class="panel-footer">
-                                        {% if fsc.isInstalled(plugin.nombre) %}
-                                        <span class="label label-success"><i class="fa fa-check"></i> Instalado</span>
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th></th>
+                                        <th class="text-left">Plugin</th>
+                                        <th class="text-left">Descripción</th>
+                                    </tr>
+                                </thead>
+                                {% for plugin in fsc.privatePlugins %}
+                                {% set tr_class = '' %}
+                                {% if plugin.instalado or fsc.isInstalled(plugin.nombre) %}
+                                    {% set tr_class = ' class="warning"' %}
+                                {% elseif plugin.estable is defined and not plugin.estable %}
+                                    {% set tr_class = ' class="danger"' %}
+                                {% else %}
+                                    {% set tr_class = ' class="info"' %}
+                                {% endif %}
+                                <tr{{ tr_class|raw }}>
+                                    <td class="text-center">
+                                        {% if plugin.imagen is defined and plugin.imagen %}
+                                        <a href="{{ plugin.link|default('#') }}" target="_blank" class="thumbnail">
+                                            <img src="{{ plugin.imagen }}" alt="{{ plugin.nombre }}" width="80"/>
+                                        </a>
                                         {% else %}
-                                        <a href="{{ fsc.url()|raw }}&action=download_private&plugin_id={{ plugin.id }}" class="btn btn-sm btn-warning" onclick="return confirm('¿Descargar {{ plugin.nombre }}?');">
-                                            <i class="fa fa-download"></i> Descargar
+                                        <a href="{{ plugin.link|default('#') }}" target="_blank" class="btn btn-block btn-default">
+                                            <i class="fa fa-lock fa-3x" aria-hidden="true"></i>
                                         </a>
                                         {% endif %}
-                                    </div>
-                                </div>
-                            </div>
-                            {% endfor %}
+                                    </td>
+                                    <td>
+                                        {{ plugin.nombre }}
+                                        {% if plugin.version is defined and plugin.version %}
+                                        &nbsp; <span class="label label-info">v{{ plugin.version }}</span>
+                                        {% endif %}
+                                        {% if plugin.autor is defined and plugin.autor %}
+                                        <br/>
+                                        <small class="text-muted"><i class="fa fa-user"></i>&nbsp;{{ plugin.autor }}</small>
+                                        {% endif %}
+                                        <br/><br/>
+                                        {% if plugin.instalado or fsc.isInstalled(plugin.nombre) %}
+                                            {% if fsc.isActive(plugin.nombre) %}
+                                            <a href="{{ fsc.url()|raw }}&tab=private" class="btn btn-xs btn-success">
+                                                <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Activo
+                                            </a>
+                                            {% else %}
+                                            <a href="{{ fsc.url()|raw }}&tab=private" class="btn btn-xs btn-default">
+                                                <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Instalado
+                                            </a>
+                                            {% endif %}
+                                        {% elseif plugin.estable is defined and not plugin.estable %}
+                                        <a href="#" class="btn btn-xs btn-warning" onclick="descargar_plugin_privado_inestable('{{ plugin.id }}', '{{ plugin.nombre|e('js') }}'); return false;">
+                                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                                        </a>
+                                        {% else %}
+                                        <a href="{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id={{ plugin.id }}" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
+                                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                                        </a>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {{ plugin.descripcion|default('Sin descripción disponible')|nl2br }}<br/>
+                                        {% if plugin.ultima_modificacion is defined and plugin.ultima_modificacion %}
+                                        Última modificación: {{ plugin.ultima_modificacion }}
+                                        {% endif %}
+                                        {% if plugin.estable is defined and not plugin.estable %}
+                                        <span class="label label-danger" title="inestable: no lo instales a menos que sepas lo que haces">inestable</span>
+                                        {% endif %}
+                                        <span class="label label-warning">privado</span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </table>
                         </div>
                         {% else %}
                         <p class="text-muted">No hay plugins privados disponibles.</p>
