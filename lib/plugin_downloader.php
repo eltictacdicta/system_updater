@@ -139,6 +139,9 @@ class plugin_downloader
                             if (isset($remote_data['require'])) {
                                 $this->download_list[$key]['require'] = $remote_data['require'];
                             }
+                            if (isset($remote_data['repository_url'])) {
+                                $this->download_list[$key]['repository_url'] = $remote_data['repository_url'];
+                            }
                         }
                     }
                 }
@@ -194,12 +197,12 @@ class plugin_downloader
             @unlink($zipPath);
 
             // Renombrar si es necesario
+            $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
             foreach (scandir($this->fsRoot . '/plugins') as $f) {
                 if ($f === '.' || $f === '..')
                     continue;
                 if (is_dir($this->fsRoot . '/plugins/' . $f) && !in_array($f, $pluginsList)) {
                     // Eliminar existente si hay que sobrescribir
-                    $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
                     if (file_exists($targetPath)) {
                         $this->delTree($targetPath);
                     }
@@ -207,6 +210,8 @@ class plugin_downloader
                     break;
                 }
             }
+
+            $this->bootstrapPluginGitMetadata($targetPath, $item);
 
             $this->messages[] = 'Plugin añadido correctamente.';
             return true;
@@ -381,6 +386,9 @@ class plugin_downloader
                     if (isset($remote_ini_data['require'])) {
                         $this->private_download_list[$key]['require'] = $remote_ini_data['require'];
                     }
+                    if (isset($remote_ini_data['repository_url'])) {
+                        $this->private_download_list[$key]['repository_url'] = $remote_ini_data['repository_url'];
+                    }
                 }
             }
 
@@ -453,11 +461,11 @@ class plugin_downloader
             @unlink($zipPath);
 
             // Renombrar si es necesario
+            $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
             foreach (scandir($this->fsRoot . '/plugins') as $f) {
                 if ($f === '.' || $f === '..')
                     continue;
                 if (is_dir($this->fsRoot . '/plugins/' . $f) && !in_array($f, $pluginsList)) {
-                    $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
                     if (file_exists($targetPath)) {
                         $this->delTree($targetPath);
                     }
@@ -465,6 +473,8 @@ class plugin_downloader
                     break;
                 }
             }
+
+            $this->bootstrapPluginGitMetadata($targetPath, $item);
 
             $this->messages[] = 'Plugin privado añadido correctamente.';
             return true;
@@ -606,6 +616,133 @@ class plugin_downloader
         }
 
         return false;
+    }
+
+    /**
+     * Intenta añadir metadatos Git al plugin descargado para futuras actualizaciones rápidas.
+     *
+     * @param string $targetPath
+     * @param array $pluginData
+     *
+     * @return void
+     */
+    private function bootstrapPluginGitMetadata($targetPath, array $pluginData)
+    {
+        if (!is_dir($targetPath) || is_dir($targetPath . '/.git') || !$this->isGitAvailable()) {
+            return;
+        }
+
+        $repository = $this->resolveRepositoryInfo($pluginData);
+        if (empty($repository['url'])) {
+            return;
+        }
+
+        $tempBase = $this->fsRoot . '/tmp/system_updater_git_bootstrap';
+        $tempClone = $tempBase . '/' . basename($targetPath) . '_' . uniqid('', true);
+
+        if (!is_dir($tempBase) && !@mkdir($tempBase, 0755, true)) {
+            return;
+        }
+
+        $command = 'git clone --depth 1 --branch ' . escapeshellarg($repository['branch'])
+            . ' ' . escapeshellarg($repository['url'])
+            . ' ' . escapeshellarg($tempClone)
+            . ' 2>&1';
+
+        $output = [];
+        $returnVar = 1;
+        @exec($command, $output, $returnVar);
+
+        if ($returnVar === 0 && is_dir($tempClone . '/.git')) {
+            $this->copyTree($tempClone . '/.git', $targetPath . '/.git');
+            $this->messages[] = 'Se añadieron los metadatos Git al plugin ' . basename($targetPath) . '.';
+        }
+
+        if (is_dir($tempClone)) {
+            $this->delTree($tempClone);
+        }
+    }
+
+    /**
+     * Resuelve la URL y rama del repositorio del plugin.
+     *
+     * @param array $pluginData
+     *
+     * @return array
+     */
+    private function resolveRepositoryInfo(array $pluginData)
+    {
+        $branch = isset($pluginData['branch']) && !empty($pluginData['branch']) ? $pluginData['branch'] : 'master';
+        $url = '';
+
+        if (!empty($pluginData['repository_url'])) {
+            $url = trim($pluginData['repository_url']);
+        } elseif (!empty($pluginData['link'])) {
+            $url = trim($pluginData['link']);
+        } elseif (!empty($pluginData['zip_link'])) {
+            $zipLink = trim($pluginData['zip_link']);
+            if (preg_match('#^https?://github\.com/([^/]+)/([^/]+)/archive/(?:refs/heads/)?([^/]+)\.zip$#i', $zipLink, $matches)) {
+                $url = 'https://github.com/' . $matches[1] . '/' . $matches[2] . '.git';
+                $branch = $matches[3];
+            } elseif (preg_match('#^https?://codeload\.github\.com/([^/]+)/([^/]+)/zip/([^/]+)$#i', $zipLink, $matches)) {
+                $url = 'https://github.com/' . $matches[1] . '/' . $matches[2] . '.git';
+                $branch = $matches[3];
+            }
+        }
+
+        if ($url !== '' && substr($url, -4) !== '.git') {
+            $url .= '.git';
+        }
+
+        return [
+            'url' => $url,
+            'branch' => $branch,
+        ];
+    }
+
+    /**
+     * Comprueba si Git está disponible.
+     *
+     * @return bool
+     */
+    private function isGitAvailable()
+    {
+        $output = [];
+        $returnVar = 1;
+        @exec('git --version 2>&1', $output, $returnVar);
+        return $returnVar === 0;
+    }
+
+    /**
+     * Copia recursivamente un árbol de directorios.
+     *
+     * @param string $source
+     * @param string $destination
+     *
+     * @return void
+     */
+    private function copyTree($source, $destination)
+    {
+        if (is_file($source)) {
+            $parent = dirname($destination);
+            if (!is_dir($parent)) {
+                @mkdir($parent, 0755, true);
+            }
+            @copy($source, $destination);
+            return;
+        }
+
+        if (!is_dir($source)) {
+            return;
+        }
+
+        if (!is_dir($destination)) {
+            @mkdir($destination, 0755, true);
+        }
+
+        foreach (array_diff(scandir($source), ['.', '..']) as $item) {
+            $this->copyTree($source . '/' . $item, $destination . '/' . $item);
+        }
     }
 
     /**

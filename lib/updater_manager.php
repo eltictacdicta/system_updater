@@ -12,6 +12,8 @@ class updater_manager
     const PLUGIN_NAME = 'system_updater';
     const MANIFEST_FILE = 'tmp/system_updater_self_update.json';
     const STAGING_DIR = 'tmp/system_updater_self_update';
+    const DEFAULT_REPOSITORY_URL = 'https://github.com/eltictacdicta/system_updater.git';
+    const DEFAULT_REPOSITORY_BRANCHES = ['master', 'main'];
 
     /**
      * @var string Ruta raíz del framework
@@ -172,6 +174,46 @@ class updater_manager
         ];
 
         return array_values(array_unique(array_filter($urls)));
+    }
+
+    /**
+     * Obtiene la URL del repositorio Git.
+     *
+     * @return string
+     */
+    private function getRepositoryUrl()
+    {
+        $url = (string) $this->getConfigValue('repository_url', self::DEFAULT_REPOSITORY_URL);
+        $url = trim($url);
+
+        if ($url === '') {
+            return self::DEFAULT_REPOSITORY_URL;
+        }
+
+        if (substr($url, -4) !== '.git') {
+            $url .= '.git';
+        }
+
+        return $url;
+    }
+
+    /**
+     * Obtiene ramas candidatas del repositorio Git.
+     *
+     * @return array
+     */
+    private function getRepositoryBranches()
+    {
+        $branches = [];
+
+        foreach (['branch', 'default_branch', 'repository_branch'] as $key) {
+            $value = trim((string) $this->getConfigValue($key, ''));
+            if ($value !== '') {
+                $branches[] = $value;
+            }
+        }
+
+        return array_values(array_unique(array_merge($branches, self::DEFAULT_REPOSITORY_BRANCHES)));
     }
 
     /**
@@ -509,32 +551,10 @@ class updater_manager
                 return false;
             }
 
-            $downloadUrl = $this->downloadUpdatePackage($updateInfo['update_zip_urls'], $packagePath);
-            if ($downloadUrl === false || !file_exists($packagePath)) {
+            $downloadUrl = $this->prepareSelfUpdatePayload($updateInfo, $extractPath, $packagePath, $payloadPath);
+            if ($downloadUrl === false) {
                 $this->removeTree($stagingRoot);
-                $this->errors[] = 'No se pudo descargar el paquete de actualización del actualizador.';
                 return false;
-            }
-
-            if (!class_exists('fs_file_manager') || !fs_file_manager::extract_zip_safe($packagePath, $extractPath)) {
-                $this->removeTree($stagingRoot);
-                $this->errors[] = 'No se pudo extraer el paquete descargado del actualizador.';
-                return false;
-            }
-
-            $sourcePath = $this->findExtractedPluginPath($extractPath);
-            if ($sourcePath === false) {
-                $this->removeTree($stagingRoot);
-                $this->errors[] = 'El paquete descargado no contiene una versión válida de system_updater.';
-                return false;
-            }
-
-            if (!@rename($sourcePath, $payloadPath)) {
-                if (!fs_file_manager::recurse_copy($sourcePath, $payloadPath)) {
-                    $this->removeTree($stagingRoot);
-                    $this->errors[] = 'No se pudo preparar la carpeta de despliegue del actualizador.';
-                    return false;
-                }
             }
 
             $manifest = [
@@ -561,6 +581,176 @@ class updater_manager
         } catch (\Exception $e) {
             $this->errors[] = 'Error durante la actualización: ' . $e->getMessage();
             return false;
+        }
+    }
+
+    /**
+     * Prepara el payload de autoactualización usando Git cuando es posible.
+     *
+     * @param array $updateInfo
+     * @param string $extractPath
+     * @param string $packagePath
+     * @param string $payloadPath
+     *
+     * @return string|false
+     */
+    private function prepareSelfUpdatePayload(array $updateInfo, $extractPath, $packagePath, $payloadPath)
+    {
+        if ($this->isGitAvailable()) {
+            $repositoryUrl = !empty($updateInfo['repository_url']) ? rtrim((string) $updateInfo['repository_url'], '/') : $this->getRepositoryUrl();
+            if ($repositoryUrl !== '' && substr($repositoryUrl, -4) !== '.git') {
+                $repositoryUrl .= '.git';
+            }
+
+            foreach ($this->getRepositoryBranches() as $branch) {
+                if ($this->cloneGitRepository($repositoryUrl, $branch, $payloadPath) && $this->isValidPluginFolder($payloadPath)) {
+                    $this->messages[] = 'Actualización del actualizador preparada usando Git.';
+                    return $repositoryUrl . '#' . $branch;
+                }
+            }
+        }
+
+        $downloadUrl = $this->downloadUpdatePackage($updateInfo['update_zip_urls'], $packagePath);
+        if ($downloadUrl === false || !file_exists($packagePath)) {
+            $this->errors[] = 'No se pudo descargar el paquete de actualización del actualizador.';
+            return false;
+        }
+
+        if (!class_exists('fs_file_manager') || !fs_file_manager::extract_zip_safe($packagePath, $extractPath)) {
+            $this->errors[] = 'No se pudo extraer el paquete descargado del actualizador.';
+            return false;
+        }
+
+        $sourcePath = $this->findExtractedPluginPath($extractPath);
+        if ($sourcePath === false) {
+            $this->errors[] = 'El paquete descargado no contiene una versión válida de system_updater.';
+            return false;
+        }
+
+        if (!@rename($sourcePath, $payloadPath) && !fs_file_manager::recurse_copy($sourcePath, $payloadPath)) {
+            $this->errors[] = 'No se pudo preparar la carpeta de despliegue del actualizador.';
+            return false;
+        }
+
+        $this->bootstrapGitMetadata($payloadPath);
+        return $downloadUrl;
+    }
+
+    /**
+     * Comprueba si Git está disponible.
+     *
+     * @return bool
+     */
+    private function isGitAvailable()
+    {
+        $output = [];
+        $returnVar = 1;
+        @exec('git --version 2>&1', $output, $returnVar);
+
+        return $returnVar === 0;
+    }
+
+    /**
+     * Clona un repositorio Git en modo shallow.
+     *
+     * @param string $repositoryUrl
+     * @param string $branch
+     * @param string $destination
+     *
+     * @return bool
+     */
+    private function cloneGitRepository($repositoryUrl, $branch, $destination)
+    {
+        if (is_dir($destination)) {
+            $this->removeTree($destination);
+        }
+
+        $parentDir = dirname($destination);
+        if (!is_dir($parentDir) && !@mkdir($parentDir, 0755, true)) {
+            return false;
+        }
+
+        $command = 'git clone --depth 1 --branch ' . escapeshellarg($branch)
+            . ' ' . escapeshellarg($repositoryUrl)
+            . ' ' . escapeshellarg($destination)
+            . ' 2>&1';
+
+        $output = [];
+        $returnVar = 1;
+        @exec($command, $output, $returnVar);
+
+        return $returnVar === 0 && is_dir($destination);
+    }
+
+    /**
+     * Añade la carpeta .git al payload cuando la descarga se hace vía ZIP.
+     *
+     * @param string $payloadPath
+     *
+     * @return void
+     */
+    private function bootstrapGitMetadata($payloadPath)
+    {
+        if (!is_dir($payloadPath) || is_dir($payloadPath . DIRECTORY_SEPARATOR . '.git') || !$this->isGitAvailable()) {
+            return;
+        }
+
+        $tempClone = dirname($payloadPath) . DIRECTORY_SEPARATOR . 'git_bootstrap';
+        $repositoryUrl = $this->getRepositoryUrl();
+
+        foreach ($this->getRepositoryBranches() as $branch) {
+            if ($this->cloneGitRepository($repositoryUrl, $branch, $tempClone) && is_dir($tempClone . DIRECTORY_SEPARATOR . '.git')) {
+                $this->copyTree($tempClone . DIRECTORY_SEPARATOR . '.git', $payloadPath . DIRECTORY_SEPARATOR . '.git');
+                $this->removeTree($tempClone);
+                $this->messages[] = 'Se añadieron los metadatos Git al payload de system_updater.';
+                return;
+            }
+        }
+
+        if (is_dir($tempClone)) {
+            $this->removeTree($tempClone);
+        }
+    }
+
+    /**
+     * Copia recursivamente un árbol de directorios.
+     *
+     * @param string $source
+     * @param string $destination
+     *
+     * @return void
+     */
+    private function copyTree($source, $destination)
+    {
+        if (is_file($source)) {
+            $parentDir = dirname($destination);
+            if (!is_dir($parentDir)) {
+                @mkdir($parentDir, 0755, true);
+            }
+
+            @copy($source, $destination);
+            return;
+        }
+
+        if (!is_dir($source)) {
+            return;
+        }
+
+        if (!is_dir($destination)) {
+            @mkdir($destination, 0755, true);
+        }
+
+        $items = @scandir($source);
+        if (!is_array($items)) {
+            return;
+        }
+
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+
+            $this->copyTree($source . DIRECTORY_SEPARATOR . $item, $destination . DIRECTORY_SEPARATOR . $item);
         }
     }
 
