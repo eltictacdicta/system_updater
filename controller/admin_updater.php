@@ -92,6 +92,13 @@ class admin_updater extends fs_controller
             $this->successMessage = 'Copia de seguridad creada correctamente.';
         } elseif ($success === '1') {
             $this->successMessage = 'Restauración completada correctamente.';
+        } elseif ($success === 'updater-self-update') {
+            $this->successMessage = 'El plugin system_updater se actualizó correctamente.';
+        }
+
+        $error = $this->getQueryParam('error');
+        if ($error === 'updater-self-update') {
+            $this->errorMessage = 'No se pudo completar la actualización del plugin system_updater. Se mantuvo la versión anterior.';
         }
 
         // Procesar acciones
@@ -118,6 +125,10 @@ class admin_updater extends fs_controller
         }
 
         switch ($action) {
+            case 'prepare_updater_update':
+                $this->actionPrepareUpdaterUpdate();
+                break;
+
             case 'update_core':
                 $this->actionUpdateCore();
                 break;
@@ -197,6 +208,8 @@ class admin_updater extends fs_controller
     private function checkUpdates()
     {
         $updates = [
+            'updater' => false,
+            'updater_pending' => $this->updater_mgr->get_pending_self_update(),
             'core' => false,
             'core_new_version' => '',
             'plugins' => [],
@@ -205,7 +218,7 @@ class admin_updater extends fs_controller
         // Comprobar actualización del actualizador
         $updaterUpdate = $this->updater_mgr->check_for_updates();
         if ($updaterUpdate && isset($updaterUpdate['available']) && $updaterUpdate['available']) {
-            // El actualizador tiene una actualización
+            $updates['updater'] = $updaterUpdate;
         }
 
         // Comprobar actualizaciones de plugins instalados
@@ -464,6 +477,32 @@ class admin_updater extends fs_controller
 
         $this->errorMessage = "No se pudo encontrar la actualización para $pluginName.";
         $this->new_error_msg($this->errorMessage);
+    }
+
+    /**
+     * Acción: Preparar la autoactualización del plugin y delegar el swap en updater.php.
+     */
+    private function actionPrepareUpdaterUpdate()
+    {
+        $pending = $this->updater_mgr->get_pending_self_update();
+        if ($pending && !empty($pending['finalize_url'])) {
+            header('Location: ' . $pending['finalize_url']);
+            exit;
+        }
+
+        $result = $this->updater_mgr->prepare_self_update();
+        if (!$result || empty($result['finalize_url'])) {
+            $errors = $this->updater_mgr->get_errors();
+            $this->errorMessage = 'No se pudo preparar la actualización del actualizador.';
+            if (!empty($errors)) {
+                $this->errorMessage .= ' ' . implode(' ', $errors);
+            }
+            $this->new_error_msg($this->errorMessage);
+            return;
+        }
+
+        header('Location: ' . $result['finalize_url']);
+        exit;
     }
 
     /**

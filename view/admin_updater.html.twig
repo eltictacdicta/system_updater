@@ -46,6 +46,33 @@
                 <h3 class="panel-title"><i class="fa fa-download"></i> Actualizaciones Disponibles</h3>
             </div>
             <div class="panel-body">
+                {# Actualización del propio actualizador #}
+                {% if fsc.updates.updater %}
+                <div class="alert alert-danger">
+                    <strong><i class="fa fa-wrench"></i> Nueva versión del actualizador disponible</strong>
+                    <p>Versión actual: {{ fsc.updaterInfo.version }}<br>
+                    Nueva versión: {{ fsc.updates.updater.new_version }}</p>
+                    <p class="small" style="margin-bottom: 10px;">
+                        La actualización se preparará primero y el reemplazo final se realizará desde el cargador externo para evitar sobrescribir el plugin mientras se está ejecutando.
+                    </p>
+                    <a href="{{ fsc.url()|raw }}&action=prepare_updater_update" class="btn btn-danger btn-sm" onclick="return confirm('¿Preparar y aplicar la actualización del plugin system_updater? El intercambio final se hará desde updater.php para mantener la estabilidad.');">
+                        <i class="fa fa-sync"></i> Actualizar Actualizador
+                    </a>
+                </div>
+                {% elseif fsc.updates.updater_pending %}
+                <div class="alert alert-warning">
+                    <strong><i class="fa fa-clock"></i> Hay una actualización del actualizador pendiente de aplicar</strong>
+                    <p>Versión preparada: {{ fsc.updates.updater_pending.new_version }}</p>
+                    <a href="{{ fsc.updates.updater_pending.finalize_url }}" class="btn btn-warning btn-sm">
+                        <i class="fa fa-play"></i> Finalizar Actualización
+                    </a>
+                </div>
+                {% else %}
+                <div class="alert alert-success">
+                    <i class="fa fa-check"></i> El plugin actualizador está actualizado (v{{ fsc.updaterInfo.version }})
+                </div>
+                {% endif %}
+
                 {# Actualización del Núcleo #}
                 {% if fsc.updates.core %}
                 <div class="alert alert-warning">
