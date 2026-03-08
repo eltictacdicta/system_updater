@@ -13,6 +13,12 @@
 class plugin_downloader
 {
     /**
+     * TTL corto para la lista pública de plugins.
+     * Evita que nuevas altas en el repositorio tarden demasiado en mostrarse.
+     */
+    private const PUBLIC_DOWNLOAD_CACHE_TTL = 180;
+
+    /**
      * @var array Lista de plugins públicos
      */
     private $download_list;
@@ -74,13 +80,41 @@ class plugin_downloader
         // Buscar en cache
         if ($this->cache) {
             $this->download_list = $this->cache->get('download_list');
-            if ($this->download_list) {
+            if ($this->download_list && is_array($this->download_list)) {
+                $hasCompleteCache = true;
+
+                foreach ($this->download_list as $key => $value) {
+                    $this->download_list[$key]['instalado'] = file_exists($this->fsRoot . '/plugins/' . $value['nombre']);
+
+                    if (!isset($this->download_list[$key]['autor'])) {
+                        $this->download_list[$key]['autor'] = isset($value['creador']) ? $value['creador'] : (isset($value['nick']) ? $value['nick'] : 'Desconocido');
+                    }
+
+                    if (empty($this->download_list[$key]['version']) || empty($this->download_list[$key]['descripcion'])) {
+                        $hasCompleteCache = false;
+                    }
+                }
+
+                if ($hasCompleteCache) {
+                    return $this->download_list;
+                }
+
+                $this->cache->delete('download_list');
+                $this->download_list = null;
+            }
+
+            if (is_array($this->download_list) && empty($this->download_list)) {
                 return $this->download_list;
             }
         }
 
         // Descargar lista de plugins de la comunidad
-        $json = @file_get_contents('https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json');
+        if (function_exists('fs_file_get_contents')) {
+            $json = @fs_file_get_contents('https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json', 10);
+        } else {
+            $json = @file_get_contents('https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json');
+        }
+
         if ($json && $json !== 'ERROR') {
             $this->download_list = json_decode($json, true);
             if (is_array($this->download_list)) {
@@ -110,7 +144,7 @@ class plugin_downloader
                 }
 
                 if ($this->cache) {
-                    $this->cache->set('download_list', $this->download_list);
+                    $this->cache->set('download_list', $this->download_list, self::PUBLIC_DOWNLOAD_CACHE_TTL);
                 }
                 return $this->download_list;
             }
