@@ -86,6 +86,7 @@ class admin_updater extends fs_controller
     {
         // Cargar dependencias
         require_once __DIR__ . '/../lib/backup_manager.php';
+        require_once __DIR__ . '/../lib/core_updater.php';
         require_once __DIR__ . '/../lib/updater_manager.php';
         require_once 'base/fs_plugin_manager.php';
 
@@ -102,6 +103,8 @@ class admin_updater extends fs_controller
             $this->successMessage = 'Copia de seguridad creada correctamente.';
         } elseif ($success === '1') {
             $this->successMessage = 'Restauración completada correctamente.';
+        } elseif ($success === 'core-updated') {
+            $this->successMessage = 'Núcleo actualizado correctamente.';
         } elseif ($success === 'updater-self-update') {
             $this->successMessage = 'El plugin system_updater se actualizó correctamente.';
         }
@@ -402,195 +405,40 @@ class admin_updater extends fs_controller
      */
     private function actionUpdateCore()
     {
-        // Crear backup previo
-        $backupResult = $this->backup_manager->create_pre_update_backup('core');
-        if (!isset($backupResult['complete']['success']) || !$backupResult['complete']['success']) {
-            $this->errorMessage = 'Error al crear backup previo: ' . implode(', ', $this->backup_manager->get_errors());
-            $this->new_error_msg($this->errorMessage);
-            return;
-        }
+        $createBackup = $this->getQueryParam('create_backup', $this->getPostParam('create_backup', '1')) !== '0';
+        $coreUpdater = new core_updater(FS_FOLDER);
+        $result = $coreUpdater->update_core($createBackup);
 
-        $extractPath = FS_FOLDER . '/tmp/core_update';
+        if (!empty($result['success'])) {
+            $this->plugin_manager = new fs_plugin_manager();
+            $this->successMessage = $result['message'];
 
-        if (is_dir($extractPath)) {
-            $this->deleteDirectoryRecursive($extractPath);
-        }
-
-        $usedGitClone = false;
-        $gitMetadataInstalled = false;
-        $sourceDir = $this->prepareCoreSource($extractPath, $usedGitClone);
-
-        if (!$sourceDir || !is_dir($sourceDir)) {
-            $this->errorMessage = 'Error al descargar la actualización del núcleo.';
-            $this->new_error_msg($this->errorMessage);
-            return;
-        }
-
-        if ($sourceDir) {
-            // Copiar archivos del core (excluyendo plugins, config, backups)
-            $excludeFiles = ['config.php', 'plugins', 'backups', 'tmp'];
-            if (file_exists(FS_FOLDER . '/.git')) {
-                $excludeFiles[] = '.git';
-            } else {
-                $gitMetadataInstalled = file_exists($sourceDir . '/.git');
-            }
-
-            $this->copyDirectorySelective($sourceDir, FS_FOLDER, $excludeFiles);
-            $this->successMessage = 'Núcleo actualizado correctamente.';
-
-            if ($gitMetadataInstalled) {
-                $this->successMessage .= ' Se ha descargado también el repositorio Git del núcleo.';
-            } elseif ($usedGitClone) {
-                $this->successMessage .= ' Se ha utilizado Git para preparar la actualización.';
+            if ($this->isAjax()) {
+                header('Content-Type: application/json');
+                echo json_encode([
+                    'success' => true,
+                    'message' => $this->successMessage,
+                    'installed_version' => $result['installed_version'] ?? '',
+                ]);
+                exit;
             }
 
             $this->new_message($this->successMessage);
-        } else {
-            $this->errorMessage = 'No se encontró la carpeta extraída.';
-            $this->new_error_msg($this->errorMessage);
+            return;
         }
 
-        // Limpiar
-        if (is_dir($extractPath)) {
-            $this->deleteDirectoryRecursive($extractPath);
-        }
-    }
+        $errors = $result['errors'] ?? $coreUpdater->get_errors();
+        $this->errorMessage = !empty($errors)
+            ? implode(', ', $errors)
+            : 'Error al actualizar el núcleo.';
 
-    /**
-     * Prepara el código fuente del núcleo usando Git cuando está disponible.
-     * Si Git no está disponible, usa el ZIP de GitHub como fallback.
-     *
-     * @param string $extractPath
-     * @param bool $usedGitClone
-     *
-     * @return string|false
-     */
-    private function prepareCoreSource($extractPath, &$usedGitClone)
-    {
-        $usedGitClone = false;
-
-        if (!is_dir($extractPath) && !@mkdir($extractPath, 0755, true)) {
-            return false;
+        if ($this->isAjax()) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => $this->errorMessage]);
+            exit;
         }
 
-        if ($this->isGitAvailable()) {
-            $clonePath = $extractPath . '/fs-framework';
-
-            foreach (self::CORE_REPOSITORY_BRANCHES as $branch) {
-                if ($this->cloneGitRepository(self::CORE_REPOSITORY_URL, $branch, $clonePath)) {
-                    $usedGitClone = true;
-                    return $clonePath;
-                }
-            }
-        }
-
-        return $this->downloadCoreZipSource($extractPath);
-    }
-
-    /**
-     * Descarga el núcleo como ZIP y devuelve la carpeta extraída.
-     *
-     * @param string $extractPath
-     *
-     * @return string|false
-     */
-    private function downloadCoreZipSource($extractPath)
-    {
-        require_once 'base/fs_file_manager.php';
-
-        $zipUrls = [
-            'https://github.com/eltictacdicta/fs-framework/archive/refs/heads/master.zip',
-            'https://github.com/eltictacdicta/fs-framework/archive/refs/heads/main.zip',
-            'https://github.com/eltictacdicta/fs-framework/archive/master.zip',
-            'https://github.com/eltictacdicta/fs-framework/archive/main.zip',
-        ];
-
-        $downloadPath = FS_FOLDER . '/download_core.zip';
-
-        foreach ($zipUrls as $zipUrl) {
-            if (@fs_file_download($zipUrl, $downloadPath) && fs_file_manager::extract_zip_safe($downloadPath, $extractPath)) {
-                @unlink($downloadPath);
-                return $this->findFirstDirectory($extractPath);
-            }
-
-            @unlink($downloadPath);
-        }
-
-        return false;
-    }
-
-    /**
-     * Comprueba si Git está disponible en el sistema.
-     *
-     * @return bool
-     */
-    private function isGitAvailable()
-    {
-        $output = [];
-        $returnVar = 1;
-        @exec('git --version 2>&1', $output, $returnVar);
-
-        return $returnVar === 0;
-    }
-
-    /**
-     * Clona un repositorio Git en modo shallow.
-     *
-     * @param string $repositoryUrl
-     * @param string $branch
-     * @param string $destination
-     *
-     * @return bool
-     */
-    private function cloneGitRepository($repositoryUrl, $branch, $destination)
-    {
-        if (is_dir($destination)) {
-            $this->deleteDirectoryRecursive($destination);
-        }
-
-        $parentDir = dirname($destination);
-        if (!is_dir($parentDir) && !@mkdir($parentDir, 0755, true)) {
-            return false;
-        }
-
-        $command = 'git clone --depth 1 --branch ' . escapeshellarg($branch)
-            . ' ' . escapeshellarg($repositoryUrl)
-            . ' ' . escapeshellarg($destination)
-            . ' 2>&1';
-
-        $output = [];
-        $returnVar = 1;
-        @exec($command, $output, $returnVar);
-
-        return $returnVar === 0 && is_dir($destination);
-    }
-
-    /**
-     * Devuelve la primera carpeta encontrada dentro de una ruta.
-     *
-     * @param string $path
-     *
-     * @return string|false
-     */
-    private function findFirstDirectory($path)
-    {
-        $entries = @scandir($path);
-        if (!is_array($entries)) {
-            return false;
-        }
-
-        foreach ($entries as $entry) {
-            if ($entry === '.' || $entry === '..') {
-                continue;
-            }
-
-            $candidate = $path . '/' . $entry;
-            if (is_dir($candidate)) {
-                return $candidate;
-            }
-        }
-
-        return false;
+        $this->new_error_msg($this->errorMessage);
     }
 
     /**
@@ -924,45 +772,6 @@ class admin_updater extends fs_controller
     public function getBackupPath()
     {
         return $this->backup_manager->get_backup_path();
-    }
-
-    /**
-     * Copia selectiva de directorio excluyendo ciertos archivos/directorios
-     * 
-     * @param string $source
-     * @param string $dest
-     * @param array $exclude
-     */
-    private function copyDirectorySelective($source, $dest, $exclude = [])
-    {
-        $dir = opendir($source);
-        if (!$dir) {
-            return;
-        }
-
-        while (($file = readdir($dir)) !== false) {
-            if ($file === '.' || $file === '..') {
-                continue;
-            }
-
-            if (in_array($file, $exclude)) {
-                continue;
-            }
-
-            $srcPath = $source . '/' . $file;
-            $destPath = $dest . '/' . $file;
-
-            if (is_dir($srcPath)) {
-                if (!is_dir($destPath)) {
-                    @mkdir($destPath, 0755, true);
-                }
-                $this->copyDirectorySelective($srcPath, $destPath, []);
-            } else {
-                @copy($srcPath, $destPath);
-            }
-        }
-
-        closedir($dir);
     }
 
     /**
