@@ -84,6 +84,7 @@ class plugin_downloader
                 $hasCompleteCache = true;
 
                 foreach ($this->download_list as $key => $value) {
+                    $this->download_list[$key] = $this->normalizeDownloadItem($value, $key);
                     $this->download_list[$key]['instalado'] = file_exists($this->fsRoot . '/plugins/' . $value['nombre']);
 
                     if (!isset($this->download_list[$key]['autor'])) {
@@ -119,6 +120,7 @@ class plugin_downloader
             $this->download_list = json_decode($json, true);
             if (is_array($this->download_list)) {
                 foreach ($this->download_list as $key => $value) {
+                    $this->download_list[$key] = $this->normalizeDownloadItem($value, $key);
                     $this->download_list[$key]['instalado'] = file_exists($this->fsRoot . '/plugins/' . $value['nombre']);
 
                     // Mapear autor desde creador o nick
@@ -174,8 +176,10 @@ class plugin_downloader
 
             // Descargar ZIP
             $zipPath = $this->fsRoot . '/download.zip';
-            $content = @file_get_contents($item['zip_link']);
-            if (!$content || !@file_put_contents($zipPath, $content)) {
+            $downloaded = function_exists('fs_file_download')
+                ? @fs_file_download($item['zip_link'], $zipPath, 60)
+                : (($content = @file_get_contents($this->normalizeUrl($item['zip_link']))) && @file_put_contents($zipPath, $content));
+            if (!$downloaded) {
                 $this->errors[] = 'Error al descargar. Tendrás que descargarlo manualmente desde '
                     . '<a href="' . $item['zip_link'] . '" target="_blank">aquí</a>.';
                 return false;
@@ -270,8 +274,8 @@ class plugin_downloader
         $fs_var = new fs_var();
 
         $this->private_config = [
-            'github_token' => $github_token,
-            'private_plugins_url' => $private_plugins_url,
+            'github_token' => trim((string) $github_token),
+            'private_plugins_url' => $this->normalizeUrl($private_plugins_url),
             'enabled' => !empty($github_token) && !empty($private_plugins_url)
         ];
 
@@ -344,15 +348,14 @@ class plugin_downloader
 
         $config = $this->get_private_config();
 
-        // Descargar lista usando autenticación
-        $context = stream_context_create([
-            'http' => [
-                'header' => "Authorization: token " . $config['github_token'] . "\r\n" .
-                    "User-Agent: FSFramework-Updater\r\n"
-            ]
-        ]);
-
-        $json = @file_get_contents($config['private_plugins_url'], false, $context);
+        $json = function_exists('fs_file_get_contents_auth')
+            ? @fs_file_get_contents_auth($config['private_plugins_url'], $config['github_token'], 15)
+            : @file_get_contents($this->normalizeUrl($config['private_plugins_url']), false, stream_context_create([
+                'http' => [
+                    'header' => "Authorization: token " . $config['github_token'] . "\r\n" .
+                        "User-Agent: FSFramework-Updater\r\n"
+                ]
+            ]));
 
         if ($json && $json !== 'ERROR') {
             $this->private_download_list = json_decode($json, true);
@@ -365,6 +368,7 @@ class plugin_downloader
 
             // Marcar cada plugin
             foreach ($this->private_download_list as $key => $value) {
+                $this->private_download_list[$key] = $this->normalizeDownloadItem($value, $key);
                 $this->private_download_list[$key]['instalado'] = file_exists($this->fsRoot . '/plugins/' . $value['nombre']);
                 $this->private_download_list[$key]['privado'] = true;
 
@@ -424,24 +428,18 @@ class plugin_downloader
 
             $this->messages[] = 'Descargando plugin privado ' . $item['nombre'];
 
-            // Preparar contexto con autenticación
-            $context = stream_context_create([
-                'http' => [
-                    'header' => "Authorization: token " . $config['github_token'] . "\r\n" .
-                        "User-Agent: FSFramework-Updater\r\n" .
-                        "Accept: application/vnd.github.v3.raw\r\n"
-                ]
-            ]);
-
-            $content = @file_get_contents($item['zip_link'], false, $context);
-            if (!$content) {
-                $this->errors[] = 'Error al descargar el plugin privado.';
-                return false;
-            }
-
             $zipPath = $this->fsRoot . '/download.zip';
-            if (!@file_put_contents($zipPath, $content)) {
-                $this->errors[] = 'Error al guardar el archivo ZIP.';
+            $downloaded = function_exists('fs_file_download_auth')
+                ? @fs_file_download_auth($item['zip_link'], $zipPath, $config['github_token'], 60)
+                : (($content = @file_get_contents($this->normalizeUrl($item['zip_link']), false, stream_context_create([
+                    'http' => [
+                        'header' => "Authorization: token " . $config['github_token'] . "\r\n" .
+                            "User-Agent: FSFramework-Updater\r\n" .
+                            "Accept: application/vnd.github.v3.raw\r\n"
+                    ]
+                ]))) && @file_put_contents($zipPath, $content));
+            if (!$downloaded) {
+                $this->errors[] = 'Error al descargar el plugin privado.';
                 return false;
             }
 
@@ -499,14 +497,14 @@ class plugin_downloader
 
         $config = $this->get_private_config();
 
-        $context = stream_context_create([
-            'http' => [
-                'header' => "Authorization: token " . $config['github_token'] . "\r\n" .
-                    "User-Agent: FSFramework-Updater\r\n"
-            ]
-        ]);
-
-        $json = @file_get_contents($config['private_plugins_url'], false, $context);
+        $json = function_exists('fs_file_get_contents_auth')
+            ? @fs_file_get_contents_auth($config['private_plugins_url'], $config['github_token'], 10)
+            : @file_get_contents($this->normalizeUrl($config['private_plugins_url']), false, stream_context_create([
+                'http' => [
+                    'header' => "Authorization: token " . $config['github_token'] . "\r\n" .
+                        "User-Agent: FSFramework-Updater\r\n"
+                ]
+            ]));
 
         if ($json && $json !== 'ERROR') {
             $data = json_decode($json, true);
@@ -568,7 +566,7 @@ class plugin_downloader
         }
 
         // Extraer usuario y repo del link
-        $parsed = parse_url(trim($plugin_data['link']));
+        $parsed = $this->parseRepositoryUrl($plugin_data['link']);
         if (!isset($parsed['path'])) {
             return false;
         }
@@ -676,11 +674,11 @@ class plugin_downloader
         $url = '';
 
         if (!empty($pluginData['repository_url'])) {
-            $url = trim($pluginData['repository_url']);
+            $url = $this->normalizeUrl($pluginData['repository_url']);
         } elseif (!empty($pluginData['link'])) {
-            $url = trim($pluginData['link']);
+            $url = $this->normalizeUrl($pluginData['link']);
         } elseif (!empty($pluginData['zip_link'])) {
-            $zipLink = trim($pluginData['zip_link']);
+            $zipLink = $this->normalizeUrl($pluginData['zip_link']);
             if (preg_match('#^https?://github\.com/([^/]+)/([^/]+)/archive/(?:refs/heads/)?([^/]+)\.zip$#i', $zipLink, $matches)) {
                 $url = 'https://github.com/' . $matches[1] . '/' . $matches[2] . '.git';
                 $branch = $matches[3];
@@ -698,6 +696,87 @@ class plugin_downloader
             'url' => $url,
             'branch' => $branch,
         ];
+    }
+
+    /**
+     * Normaliza URLs procedentes del JSON remoto.
+     *
+     * @param mixed $url
+     *
+     * @return string
+     */
+    private function normalizeUrl($url)
+    {
+        if (function_exists('fs_normalize_url')) {
+            return fs_normalize_url($url);
+        }
+
+        if (!is_string($url)) {
+            return '';
+        }
+
+        $normalized = html_entity_decode(trim($url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $normalized = preg_replace('/[\x00-\x1F\x7F]/u', '', $normalized);
+        if (!is_string($normalized) || '' === $normalized) {
+            return '';
+        }
+
+        return str_replace(' ', '%20', $normalized);
+    }
+
+    /**
+     * Homogeneiza un elemento de plugin remoto.
+     *
+     * @param array $item
+     * @param int|string $key
+     *
+     * @return array
+     */
+    private function normalizeDownloadItem(array $item, $key)
+    {
+        if (!isset($item['id']) || $item['id'] === '') {
+            $item['id'] = $key;
+        }
+
+        if (empty($item['link']) && !empty($item['url'])) {
+            $item['link'] = $item['url'];
+        }
+
+        if (empty($item['zip_link'])) {
+            if (!empty($item['download_url'])) {
+                $item['zip_link'] = $item['download_url'];
+            } elseif (!empty($item['archive_url'])) {
+                $item['zip_link'] = $item['archive_url'];
+            }
+        }
+
+        if (!empty($item['link'])) {
+            $item['link'] = $this->normalizeUrl($item['link']);
+        }
+
+        if (!empty($item['zip_link'])) {
+            $item['zip_link'] = $this->normalizeUrl($item['zip_link']);
+        }
+
+        return $item;
+    }
+
+    /**
+     * Parsea una URL de repositorio con saneado previo para evitar warnings.
+     *
+     * @param mixed $url
+     *
+     * @return array|false
+     */
+    private function parseRepositoryUrl($url)
+    {
+        $normalized = $this->normalizeUrl($url);
+        if ($normalized === '') {
+            return false;
+        }
+
+        $parsed = @parse_url($normalized);
+        return is_array($parsed) ? $parsed : false;
     }
 
     /**
