@@ -189,15 +189,12 @@ class plugin_downloader
             $pluginsList = scandir($this->fsRoot . '/plugins');
 
             // Extraer ZIP
-            $zip = new ZipArchive();
-            if ($zip->open($zipPath) !== true) {
-                $this->errors[] = 'Error al abrir el archivo ZIP.';
+            if (!$this->extractZipSafe($zipPath, $this->fsRoot . '/plugins/')) {
+                $this->errors[] = 'Error al extraer el archivo ZIP.';
                 @unlink($zipPath);
                 return false;
             }
 
-            $zip->extractTo($this->fsRoot . '/plugins/');
-            $zip->close();
             @unlink($zipPath);
 
             // Renombrar si es necesario
@@ -447,15 +444,12 @@ class plugin_downloader
             $pluginsList = scandir($this->fsRoot . '/plugins');
 
             // Extraer
-            $zip = new ZipArchive();
-            if ($zip->open($zipPath) !== true) {
-                $this->errors[] = 'Error al abrir el archivo ZIP.';
+            if (!$this->extractZipSafe($zipPath, $this->fsRoot . '/plugins/')) {
+                $this->errors[] = 'Error al extraer el archivo ZIP.';
                 @unlink($zipPath);
                 return false;
             }
 
-            $zip->extractTo($this->fsRoot . '/plugins/');
-            $zip->close();
             @unlink($zipPath);
 
             // Renombrar si es necesario
@@ -642,16 +636,7 @@ class plugin_downloader
             return;
         }
 
-        $command = 'git clone --depth 1 --branch ' . escapeshellarg($repository['branch'])
-            . ' ' . escapeshellarg($repository['url'])
-            . ' ' . escapeshellarg($tempClone)
-            . ' 2>&1';
-
-        $output = [];
-        $returnVar = 1;
-        @exec($command, $output, $returnVar);
-
-        if ($returnVar === 0 && is_dir($tempClone . '/.git')) {
+        if ($this->cloneGitRepository($repository['url'], $repository['branch'], $tempClone) && is_dir($tempClone . '/.git')) {
             $this->copyTree($tempClone . '/.git', $targetPath . '/.git');
             $this->messages[] = 'Se añadieron los metadatos Git al plugin ' . basename($targetPath) . '.';
         }
@@ -786,10 +771,106 @@ class plugin_downloader
      */
     private function isGitAvailable()
     {
+        if (!$this->shellFunctionsAvailable()) {
+            return false;
+        }
+
         $output = [];
         $returnVar = 1;
         @exec('git --version 2>&1', $output, $returnVar);
         return $returnVar === 0;
+    }
+
+    /**
+     * Clona un repositorio Git si las funciones shell están disponibles.
+     *
+     * @param string $repositoryUrl
+     * @param string $branch
+     * @param string $destination
+     *
+     * @return bool
+     */
+    private function cloneGitRepository($repositoryUrl, $branch, $destination)
+    {
+        if (!$this->shellFunctionsAvailable()) {
+            return false;
+        }
+
+        if (is_dir($destination)) {
+            $this->delTree($destination);
+        }
+
+        $parentDir = dirname($destination);
+        if (!is_dir($parentDir) && !@mkdir($parentDir, 0755, true)) {
+            return false;
+        }
+
+        $command = 'git clone --depth 1 --branch ' . escapeshellarg($branch)
+            . ' ' . escapeshellarg($repositoryUrl)
+            . ' ' . escapeshellarg($destination)
+            . ' 2>&1';
+
+        $output = [];
+        $returnVar = 1;
+        @exec($command, $output, $returnVar);
+        return $returnVar === 0 && is_dir($destination);
+    }
+
+    /**
+     * Comprueba si exec está disponible en el hosting.
+     *
+     * @return bool
+     */
+    private function shellFunctionsAvailable()
+    {
+        if (!function_exists('exec')) {
+            return false;
+        }
+
+        $disabled = (string) ini_get('disable_functions');
+        if ($disabled === '') {
+            return true;
+        }
+
+        $disabledFunctions = array_map('trim', explode(',', $disabled));
+        return !in_array('exec', $disabledFunctions, true);
+    }
+
+    /**
+     * Extrae un ZIP con validación básica de rutas.
+     *
+     * @param string $zipPath
+     * @param string $destination
+     *
+     * @return bool
+     */
+    private function extractZipSafe($zipPath, $destination)
+    {
+        if (!class_exists('ZipArchive')) {
+            return false;
+        }
+
+        $zip = new ZipArchive();
+        if ($zip->open($zipPath) !== true) {
+            return false;
+        }
+
+        for ($index = 0; $index < $zip->numFiles; $index++) {
+            $filename = $zip->getNameIndex($index);
+            if ($filename === false) {
+                $zip->close();
+                return false;
+            }
+
+            if (strpos($filename, '../') !== false || strpos($filename, '..\\') !== false || strpos($filename, '/') === 0 || preg_match('/^[A-Za-z]:\\\\/', $filename)) {
+                $zip->close();
+                return false;
+            }
+        }
+
+        $result = $zip->extractTo($destination);
+        $zip->close();
+        return $result;
     }
 
     /**

@@ -474,25 +474,30 @@ class admin_updater extends fs_controller
      */
     private function actionPrepareUpdaterUpdate()
     {
-        $pending = $this->updater_mgr->get_pending_self_update();
-        if ($pending && !empty($pending['finalize_url'])) {
-            header('Location: ' . $pending['finalize_url']);
-            exit;
-        }
-
-        $result = $this->updater_mgr->prepare_self_update();
-        if (!$result || empty($result['finalize_url'])) {
-            $errors = $this->updater_mgr->get_errors();
-            $this->errorMessage = 'No se pudo preparar la actualización del actualizador.';
-            if (!empty($errors)) {
-                $this->errorMessage .= ' ' . implode(' ', $errors);
+        try {
+            $pending = $this->updater_mgr->get_pending_self_update();
+            if ($pending && !empty($pending['finalize_url'])) {
+                header('Location: ' . $pending['finalize_url']);
+                exit;
             }
-            $this->new_error_msg($this->errorMessage);
-            return;
-        }
 
-        header('Location: ' . $result['finalize_url']);
-        exit;
+            $result = $this->updater_mgr->prepare_self_update();
+            if (!$result || empty($result['finalize_url'])) {
+                $errors = $this->updater_mgr->get_errors();
+                $this->errorMessage = 'No se pudo preparar la actualización del actualizador.';
+                if (!empty($errors)) {
+                    $this->errorMessage .= ' ' . implode(' ', $errors);
+                }
+                $this->new_error_msg($this->errorMessage);
+                return;
+            }
+
+            header('Location: ' . $result['finalize_url']);
+            exit;
+        } catch (\Throwable $e) {
+            $this->errorMessage = 'No se pudo preparar la actualización del actualizador. ' . $e->getMessage();
+            $this->new_error_msg($this->errorMessage);
+        }
     }
 
     /**

@@ -311,14 +311,6 @@ class updater_manager
             return true;
         }
 
-        if (!class_exists('fs_file_manager') && file_exists($this->rootPath . '/base/fs_file_manager.php')) {
-            require_once $this->rootPath . '/base/fs_file_manager.php';
-        }
-
-        if (class_exists('fs_file_manager')) {
-            return fs_file_manager::del_tree($path);
-        }
-
         if (is_file($path)) {
             return @unlink($path);
         }
@@ -501,7 +493,7 @@ class updater_manager
             }
 
             return false;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->errors[] = 'Error al comprobar actualizaciones: ' . $e->getMessage();
             return false;
         }
@@ -534,10 +526,6 @@ class updater_manager
         }
 
         try {
-            if (!class_exists('fs_file_manager') && file_exists($this->rootPath . '/base/fs_file_manager.php')) {
-                require_once $this->rootPath . '/base/fs_file_manager.php';
-            }
-
             $this->clearPendingState();
 
             $token = bin2hex(random_bytes(32));
@@ -578,7 +566,7 @@ class updater_manager
             $this->messages[] = 'Actualización del plugin preparada. Se procederá al intercambio externo.';
             return $manifest;
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->errors[] = 'Error durante la actualización: ' . $e->getMessage();
             return false;
         }
@@ -616,7 +604,7 @@ class updater_manager
             return false;
         }
 
-        if (!class_exists('fs_file_manager') || !fs_file_manager::extract_zip_safe($packagePath, $extractPath)) {
+        if (!$this->extractZipSafe($packagePath, $extractPath)) {
             $this->errors[] = 'No se pudo extraer el paquete descargado del actualizador.';
             return false;
         }
@@ -627,7 +615,7 @@ class updater_manager
             return false;
         }
 
-        if (!@rename($sourcePath, $payloadPath) && !fs_file_manager::recurse_copy($sourcePath, $payloadPath)) {
+        if (!@rename($sourcePath, $payloadPath) && !$this->copyTree($sourcePath, $payloadPath)) {
             $this->errors[] = 'No se pudo preparar la carpeta de despliegue del actualizador.';
             return false;
         }
@@ -643,6 +631,10 @@ class updater_manager
      */
     private function isGitAvailable()
     {
+        if (!$this->shellFunctionsAvailable()) {
+            return false;
+        }
+
         $output = [];
         $returnVar = 1;
         @exec('git --version 2>&1', $output, $returnVar);
@@ -661,6 +653,10 @@ class updater_manager
      */
     private function cloneGitRepository($repositoryUrl, $branch, $destination)
     {
+        if (!$this->shellFunctionsAvailable()) {
+            return false;
+        }
+
         if (is_dir($destination)) {
             $this->removeTree($destination);
         }
@@ -728,21 +724,22 @@ class updater_manager
                 @mkdir($parentDir, 0755, true);
             }
 
-            @copy($source, $destination);
-            return;
+            return @copy($source, $destination);
         }
 
         if (!is_dir($source)) {
-            return;
+            return false;
         }
 
         if (!is_dir($destination)) {
-            @mkdir($destination, 0755, true);
+            if (!@mkdir($destination, 0755, true) && !is_dir($destination)) {
+                return false;
+            }
         }
 
         $items = @scandir($source);
         if (!is_array($items)) {
-            return;
+            return false;
         }
 
         foreach ($items as $item) {
@@ -750,8 +747,69 @@ class updater_manager
                 continue;
             }
 
-            $this->copyTree($source . DIRECTORY_SEPARATOR . $item, $destination . DIRECTORY_SEPARATOR . $item);
+            if (!$this->copyTree($source . DIRECTORY_SEPARATOR . $item, $destination . DIRECTORY_SEPARATOR . $item)) {
+                return false;
+            }
         }
+
+        return true;
+    }
+
+    /**
+     * Comprueba si las funciones de shell requeridas están disponibles.
+     *
+     * @return bool
+     */
+    private function shellFunctionsAvailable()
+    {
+        if (!function_exists('exec')) {
+            return false;
+        }
+
+        $disabled = (string) ini_get('disable_functions');
+        if ($disabled === '') {
+            return true;
+        }
+
+        $disabledFunctions = array_map('trim', explode(',', $disabled));
+        return !in_array('exec', $disabledFunctions, true);
+    }
+
+    /**
+     * Extrae un ZIP con validación básica de rutas.
+     *
+     * @param string $zipPath
+     * @param string $destination
+     *
+     * @return bool
+     */
+    private function extractZipSafe($zipPath, $destination)
+    {
+        if (!class_exists('ZipArchive')) {
+            return false;
+        }
+
+        $zip = new ZipArchive();
+        if ($zip->open($zipPath) !== true) {
+            return false;
+        }
+
+        for ($index = 0; $index < $zip->numFiles; $index++) {
+            $filename = $zip->getNameIndex($index);
+            if ($filename === false) {
+                $zip->close();
+                return false;
+            }
+
+            if (strpos($filename, '../') !== false || strpos($filename, '..\\') !== false || strpos($filename, '/') === 0 || preg_match('/^[A-Za-z]:\\\\/', $filename)) {
+                $zip->close();
+                return false;
+            }
+        }
+
+        $result = $zip->extractTo($destination);
+        $zip->close();
+        return $result;
     }
 
     /**
