@@ -209,8 +209,6 @@ class core_updater
      */
     private function downloadCoreZipSource($extractPath)
     {
-        require_once $this->rootPath . '/base/fs_file_manager.php';
-
         $zipUrls = [
             'https://github.com/eltictacdicta/fs-framework/archive/refs/heads/master.zip',
             'https://github.com/eltictacdicta/fs-framework/archive/refs/heads/main.zip',
@@ -221,7 +219,7 @@ class core_updater
         $downloadPath = $this->rootPath . '/download_core.zip';
 
         foreach ($zipUrls as $zipUrl) {
-            if (@fs_file_download($zipUrl, $downloadPath) && fs_file_manager::extract_zip_safe($downloadPath, $extractPath)) {
+            if ($this->downloadFile($zipUrl, $downloadPath) && $this->extractZipSafe($downloadPath, $extractPath)) {
                 @unlink($downloadPath);
                 return $this->findFirstDirectory($extractPath);
             }
@@ -237,6 +235,10 @@ class core_updater
      */
     private function isGitAvailable()
     {
+        if (!$this->shellFunctionsAvailable()) {
+            return false;
+        }
+
         $output = [];
         $returnVar = 1;
         @exec('git --version 2>&1', $output, $returnVar);
@@ -253,6 +255,10 @@ class core_updater
      */
     private function cloneGitRepository($repositoryUrl, $branch, $destination)
     {
+        if (!$this->shellFunctionsAvailable()) {
+            return false;
+        }
+
         if (is_dir($destination)) {
             $this->deleteDirectoryRecursive($destination);
         }
@@ -305,12 +311,10 @@ class core_updater
      */
     private function clearTemplateCache()
     {
-        if (!class_exists('fs_file_manager') && file_exists($this->rootPath . '/base/fs_file_manager.php')) {
-            require_once $this->rootPath . '/base/fs_file_manager.php';
-        }
+        $this->clearDirectoryContents($this->rootPath . '/tmp/twig_cache', true);
 
-        if (class_exists('fs_file_manager') && method_exists('fs_file_manager', 'clear_all_template_cache')) {
-            @fs_file_manager::clear_all_template_cache();
+        if (defined('FS_TMP_NAME') && FS_TMP_NAME !== '') {
+            $this->deleteMatchingFiles($this->rootPath . '/tmp/' . FS_TMP_NAME, '.php');
         }
     }
 
@@ -332,6 +336,179 @@ class core_updater
         }
 
         return @rmdir($dir);
+    }
+
+    /**
+     * @return bool
+     */
+    private function shellFunctionsAvailable()
+    {
+        if (!function_exists('exec')) {
+            return false;
+        }
+
+        $disabled = (string) ini_get('disable_functions');
+        if ($disabled === '') {
+            return true;
+        }
+
+        $disabledFunctions = array_map('trim', explode(',', $disabled));
+        return !in_array('exec', $disabledFunctions, true);
+    }
+
+    /**
+     * @param string $url
+     * @param string $destination
+     *
+     * @return bool
+     */
+    private function downloadFile($url, $destination)
+    {
+        if (function_exists('fs_file_download') && @fs_file_download($url, $destination)) {
+            return file_exists($destination) && filesize($destination) > 0;
+        }
+
+        if (function_exists('curl_init')) {
+            $handle = @fopen($destination, 'wb');
+            if ($handle) {
+                $ch = curl_init($url);
+                curl_setopt($ch, CURLOPT_FILE, $handle);
+                curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+                curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+                curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 20);
+                curl_setopt($ch, CURLOPT_USERAGENT, 'FSFramework-System-Updater');
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+
+                $result = curl_exec($ch);
+                $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+                fclose($handle);
+
+                if ($result && $httpCode >= 200 && $httpCode < 400 && file_exists($destination) && filesize($destination) > 0) {
+                    return true;
+                }
+
+                @unlink($destination);
+            }
+        }
+
+        $context = stream_context_create([
+            'http' => [
+                'timeout' => 120,
+                'follow_location' => 1,
+                'user_agent' => 'FSFramework-System-Updater',
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+            ],
+        ]);
+
+        $content = @file_get_contents($url, false, $context);
+        if ($content === false || $content === '') {
+            return false;
+        }
+
+        return @file_put_contents($destination, $content) !== false;
+    }
+
+    /**
+     * @param string $zipPath
+     * @param string $destination
+     *
+     * @return bool
+     */
+    private function extractZipSafe($zipPath, $destination)
+    {
+        if (!class_exists('ZipArchive')) {
+            $this->errors[] = 'ZipArchive no esta disponible en el servidor.';
+            return false;
+        }
+
+        $zip = new ZipArchive();
+        if ($zip->open($zipPath) !== true) {
+            return false;
+        }
+
+        for ($index = 0; $index < $zip->numFiles; $index++) {
+            $filename = $zip->getNameIndex($index);
+            if ($filename === false) {
+                $zip->close();
+                return false;
+            }
+
+            if (strpos($filename, '../') !== false || strpos($filename, '..\\') !== false || strpos($filename, '/') === 0 || preg_match('/^[A-Za-z]:\\\\/', $filename)) {
+                $zip->close();
+                $this->errors[] = 'Se detecto una ruta no valida en el paquete de actualizacion.';
+                return false;
+            }
+        }
+
+        $result = $zip->extractTo($destination);
+        $zip->close();
+        return $result;
+    }
+
+    /**
+     * @param string $dir
+     * @param bool $recreate
+     *
+     * @return void
+     */
+    private function clearDirectoryContents($dir, $recreate = false)
+    {
+        if (!file_exists($dir)) {
+            if ($recreate) {
+                @mkdir($dir, 0777, true);
+            }
+            return;
+        }
+
+        if (is_dir($dir)) {
+            $this->deleteDirectoryRecursive($dir);
+            if ($recreate) {
+                @mkdir($dir, 0777, true);
+            }
+            return;
+        }
+
+        @unlink($dir);
+    }
+
+    /**
+     * @param string $dir
+     * @param string $extension
+     *
+     * @return void
+     */
+    private function deleteMatchingFiles($dir, $extension)
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        $entries = @scandir($dir);
+        if (!is_array($entries)) {
+            return;
+        }
+
+        $suffixLength = strlen($extension);
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $path = $dir . '/' . $entry;
+            if (!is_file($path)) {
+                continue;
+            }
+
+            if ($suffixLength === 0 || substr($entry, -$suffixLength) === $extension) {
+                @unlink($path);
+            }
+        }
     }
 
     /**

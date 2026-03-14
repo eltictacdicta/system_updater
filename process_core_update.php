@@ -106,7 +106,7 @@ switch ($action) {
                 save_progress('error', $errorMsg, 0, $errorMsg);
                 send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
             }
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             $errorMsg = 'Excepción: ' . $e->getMessage();
             save_progress('error', $errorMsg, 0, $errorMsg);
             send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
