@@ -72,6 +72,8 @@ if (!$is_logged) {
 
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 $createBackup = isset($_GET['create_backup']) && $_GET['create_backup'] === '0' ? false : true;
+$mode = isset($_GET['mode']) && $_GET['mode'] === 'reinstall' ? 'reinstall' : 'update';
+$operationLabel = $mode === 'reinstall' ? 'reinstalación' : 'actualización';
 
 $progressFile = sys_get_temp_dir() . '/fs_core_update_' . session_id() . '.json';
 
@@ -83,12 +85,12 @@ $progressCallback = function ($step, $message, $percent) {
 
 switch ($action) {
     case 'start':
-        send_sse('start', ['message' => 'Iniciando actualización del núcleo...', 'percent' => 0]);
+        send_sse('start', ['message' => 'Iniciando ' . $operationLabel . ' del núcleo...', 'percent' => 0]);
         save_progress('init', 'Inicializando...', 0);
 
         try {
             $updater = new core_updater(FS_FOLDER);
-            send_sse('init', ['message' => 'Verificando entorno de actualización...', 'percent' => 2]);
+            send_sse('init', ['message' => 'Verificando entorno de ' . $operationLabel . '...', 'percent' => 2]);
 
             $result = $updater->update_core($createBackup, $progressCallback);
 

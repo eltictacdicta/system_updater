@@ -446,7 +446,7 @@ $(document).ready(function() {
         $('#btn-update-core, #btn-reinstall-core').prop('disabled', true);
         $('#coreUpdateProgressModal').modal('show');
 
-        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&create_backup=' + (createBackup ? '1' : '0');
+        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0');
         coreUpdateEventSource = new EventSource(sseUrl);
 
         coreUpdateEventSource.addEventListener('start', function(e) {
