@@ -131,7 +131,15 @@ class core_updater
 
         $this->copyDirectorySelective($sourceDir, $this->rootPath, $excludeFiles);
 
-        $reportProgress('copy_complete', 'Archivos del núcleo actualizados.', 90);
+        $reportProgress('plugins_sync', 'Sincronizando plugins integrados del núcleo...', 92);
+        $pluginsSync = $this->syncBundledPlugins($sourceDir . '/plugins', $this->rootPath . '/plugins');
+        if (!empty($pluginsSync['errors'])) {
+            foreach ($pluginsSync['errors'] as $error) {
+                $this->errors[] = $error;
+            }
+        }
+
+        $reportProgress('copy_complete', 'Archivos del núcleo y plugins integrados actualizados.', 95);
 
         if (is_dir($extractPath)) {
             $this->deleteDirectoryRecursive($extractPath);
@@ -141,6 +149,20 @@ class core_updater
 
         $installedVersion = $this->getInstalledCoreVersion();
         $message = 'Núcleo actualizado correctamente.';
+
+        if (!empty($pluginsSync['updated']) || !empty($pluginsSync['added'])) {
+            $message .= ' Plugins del núcleo sincronizados';
+
+            if (!empty($pluginsSync['updated'])) {
+                $message .= ': actualizados ' . implode(', ', $pluginsSync['updated']);
+            }
+
+            if (!empty($pluginsSync['added'])) {
+                $message .= (!empty($pluginsSync['updated']) ? ';' : ':') . ' añadidos ' . implode(', ', $pluginsSync['added']);
+            }
+
+            $message .= '.';
+        }
 
         if ($gitMetadataInstalled) {
             $message .= ' Se ha descargado también el repositorio Git del núcleo.';
@@ -157,6 +179,9 @@ class core_updater
             'installed_version' => $installedVersion,
             'used_git' => $usedGitClone,
             'git_metadata_installed' => $gitMetadataInstalled,
+            'bundled_plugins_updated' => $pluginsSync['updated'],
+            'bundled_plugins_added' => $pluginsSync['added'],
+            'bundled_plugins_errors' => $pluginsSync['errors'],
             'backup_created' => (bool) $createBackup,
         ];
     }
@@ -548,5 +573,111 @@ class core_updater
         }
 
         closedir($dir);
+    }
+
+    /**
+     * Actualiza solo los plugins incluidos en el repositorio del núcleo.
+     * Conserva cualquier otro plugin local que no forme parte del paquete descargado.
+     *
+     * @param string $sourcePluginsDir
+     * @param string $targetPluginsDir
+     *
+     * @return array
+     */
+    private function syncBundledPlugins($sourcePluginsDir, $targetPluginsDir)
+    {
+        $result = [
+            'updated' => [],
+            'added' => [],
+            'errors' => [],
+        ];
+
+        if (!is_dir($sourcePluginsDir)) {
+            return $result;
+        }
+
+        if (!is_dir($targetPluginsDir) && !@mkdir($targetPluginsDir, 0755, true)) {
+            $result['errors'][] = 'No se pudo crear el directorio de plugins local.';
+            return $result;
+        }
+
+        $entries = @scandir($sourcePluginsDir);
+        if (!is_array($entries)) {
+            $result['errors'][] = 'No se pudo leer la carpeta de plugins del paquete del núcleo.';
+            return $result;
+        }
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $sourcePath = $sourcePluginsDir . '/' . $entry;
+            if (!$this->isBundledPluginDirectory($sourcePath)) {
+                continue;
+            }
+
+            $targetPath = $targetPluginsDir . '/' . $entry;
+            $alreadyInstalled = is_dir($targetPath);
+
+            if ($alreadyInstalled && !$this->deleteDirectoryRecursive($targetPath)) {
+                $result['errors'][] = 'No se pudo reemplazar el plugin del núcleo ' . $entry . '.';
+                continue;
+            }
+
+            if (!@mkdir($targetPath, 0755, true) && !is_dir($targetPath)) {
+                $result['errors'][] = 'No se pudo crear la carpeta del plugin del núcleo ' . $entry . '.';
+                continue;
+            }
+
+            $this->copyDirectorySelective($sourcePath, $targetPath);
+
+            if (!$this->pluginInstallLooksValid($targetPath)) {
+                $result['errors'][] = 'La sincronización del plugin del núcleo ' . $entry . ' no se completó correctamente.';
+                continue;
+            }
+
+            if ($alreadyInstalled) {
+                $result['updated'][] = $entry;
+            } else {
+                $result['added'][] = $entry;
+            }
+        }
+
+        sort($result['updated']);
+        sort($result['added']);
+
+        return $result;
+    }
+
+    /**
+     * @param string $path
+     *
+     * @return bool
+     */
+    private function isBundledPluginDirectory($path)
+    {
+        if (!is_dir($path)) {
+            return false;
+        }
+
+        return file_exists($path . '/fsframework.ini')
+            || file_exists($path . '/facturascripts.ini')
+            || file_exists($path . '/Init.php');
+    }
+
+    /**
+     * @param string $path
+     *
+     * @return bool
+     */
+    private function pluginInstallLooksValid($path)
+    {
+        return is_dir($path)
+            && (
+                file_exists($path . '/fsframework.ini')
+                || file_exists($path . '/facturascripts.ini')
+                || file_exists($path . '/Init.php')
+            );
     }
 }
