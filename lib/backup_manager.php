@@ -51,7 +51,6 @@ class backup_manager
         '.idea',
         '.vscode',
         'node_modules',
-        'vendor',            // Composer dependencies can be reinstalled
     );
 
     /**
