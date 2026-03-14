@@ -12,6 +12,8 @@
  * @version 1.0.0
  */
 
+namespace FSFramework\Plugins\system_updater;
+
 /**
  * Clase de inicialización del plugin
  */
@@ -43,6 +45,13 @@ class Init
     {
         // Registrar hook para cuando se solicite un controlador de este plugin
         // Esto permite que el framework enrute las peticiones correctamente
+    }
+
+    /**
+     * Punto de entrada compatible con el cargador moderno de plugins.
+     */
+    public function init(): void
+    {
     }
 
     /**
