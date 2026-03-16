@@ -570,7 +570,12 @@ class admin_updater extends fs_controller
         $filePath = $this->backup_manager->get_backup_path() . DIRECTORY_SEPARATOR . basename($file);
 
         if (file_exists($filePath)) {
-            // Enviar el archivo para descarga
+            // Limpiar todos los buffers de salida del framework para evitar
+            // que el archivo completo se acumule en memoria.
+            while (ob_get_level()) {
+                ob_end_clean();
+            }
+
             header('Content-Description: File Transfer');
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . basename($filePath) . '"');
@@ -578,7 +583,16 @@ class admin_updater extends fs_controller
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             header('Content-Length: ' . filesize($filePath));
-            readfile($filePath);
+
+            // Streaming: leer y enviar en bloques de 8 KB
+            $handle = fopen($filePath, 'rb');
+            if ($handle) {
+                while (!feof($handle)) {
+                    echo fread($handle, 8192);
+                    flush();
+                }
+                fclose($handle);
+            }
             exit;
         } else {
             $this->errorMessage = 'El archivo de backup no se encontró.';
