@@ -477,6 +477,9 @@ class admin_updater extends fs_controller
         try {
             $pending = $this->updater_mgr->get_pending_self_update();
             if ($pending && !empty($pending['finalize_url'])) {
+                while (ob_get_level()) {
+                    ob_end_clean();
+                }
                 header('Location: ' . $pending['finalize_url']);
                 exit;
             }
@@ -488,14 +491,19 @@ class admin_updater extends fs_controller
                 if (!empty($errors)) {
                     $this->errorMessage .= ' ' . implode(' ', $errors);
                 }
+                error_log('system_updater: prepare_self_update failed: ' . $this->errorMessage);
                 $this->new_error_msg($this->errorMessage);
                 return;
             }
 
+            while (ob_get_level()) {
+                ob_end_clean();
+            }
             header('Location: ' . $result['finalize_url']);
             exit;
         } catch (\Throwable $e) {
             $this->errorMessage = 'No se pudo preparar la actualización del actualizador. ' . $e->getMessage();
+            error_log('system_updater: prepare_self_update exception: ' . $e->getMessage());
             $this->new_error_msg($this->errorMessage);
         }
     }
