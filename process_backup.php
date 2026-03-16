@@ -21,6 +21,7 @@ header('X-Accel-Buffering: no'); // Desactivar buffering de nginx
 @set_time_limit(0);
 @ini_set('max_execution_time', 0);
 @ini_set('memory_limit', '512M');
+@ignore_user_abort(true);
 
 // Desactivar compresión de salida
 @ini_set('zlib.output_compression', 'Off');
@@ -82,14 +83,36 @@ if (!$is_logged) {
     exit;
 }
 
+// Liberar el bloqueo de sesión para permitir peticiones paralelas de estado/progreso.
+session_write_close();
+
 // Obtener parámetros
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 
 // Crear archivo de progreso temporal
 $progressFile = sys_get_temp_dir() . '/fs_backup_' . session_id() . '.json';
 
+// Mantener un pequeño histórico del estado final para permitir recuperación
+// si el canal SSE se corta antes de que el navegador procese el último evento.
+function load_progress()
+{
+    global $progressFile;
+
+    if (!file_exists($progressFile)) {
+        return null;
+    }
+
+    $content = @file_get_contents($progressFile);
+    if ($content === false || $content === '') {
+        return null;
+    }
+
+    $data = json_decode($content, true);
+    return is_array($data) ? $data : null;
+}
+
 // Función para guardar progreso
-function save_progress($step, $message, $percent, $error = null)
+function save_progress($step, $message, $percent, $error = null, array $extra = [])
 {
     global $progressFile;
     $data = [
@@ -97,8 +120,14 @@ function save_progress($step, $message, $percent, $error = null)
         'message' => $message,
         'percent' => $percent,
         'timestamp' => time(),
-        'error' => $error
+        'error' => $error,
+        'status' => $error ? 'error' : (($step === 'complete') ? 'complete' : 'running')
     ];
+
+    if (!empty($extra)) {
+        $data = array_merge($data, $extra);
+    }
+
     @file_put_contents($progressFile, json_encode($data));
     return $data;
 }
@@ -111,7 +140,8 @@ $progressCallback = function ($step, $message, $percent) {
         'step' => $step,
         'message' => $message,
         'percent' => $percent,
-        'timestamp' => time()
+        'timestamp' => time(),
+        'status' => 'running'
     ];
 
     // Guardar en archivo
@@ -127,6 +157,11 @@ $progressCallback = function ($step, $message, $percent) {
 // Procesar según la acción
 switch ($action) {
     case 'start':
+        $existingProgress = load_progress();
+        if (is_array($existingProgress) && !empty($existingProgress['timestamp']) && (time() - (int) $existingProgress['timestamp']) > 86400) {
+            @unlink($progressFile);
+        }
+
         // Iniciar backup
         send_sse('start', ['message' => 'Iniciando proceso de backup...', 'percent' => 0]);
 
@@ -154,47 +189,86 @@ switch ($action) {
                     'database_size' => $result['database']['size_formatted'] ?? '',
                     'redirect' => 'index.php?page=admin_updater&success=backup'
                 ];
-                save_progress('complete', $data['message'], 100);
+                save_progress('complete', $data['message'], 100, null, [
+                    'finished_at' => time(),
+                    'result' => $data,
+                ]);
                 send_sse('complete', $data);
             } else {
                 $errors = $backupManager->get_errors();
                 $errorMsg = !empty($errors) ? implode('; ', $errors) : 'Error desconocido durante el backup';
-                save_progress('error', $errorMsg, 0, $errorMsg);
+                save_progress('error', $errorMsg, 0, $errorMsg, [
+                    'finished_at' => time(),
+                ]);
                 send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
             }
 
         } catch (Exception $e) {
             $errorMsg = 'Excepción: ' . $e->getMessage();
-            save_progress('error', $errorMsg, 0, $errorMsg);
+            save_progress('error', $errorMsg, 0, $errorMsg, [
+                'finished_at' => time(),
+            ]);
             send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
         }
-
-        // Limpiar archivo de progreso
-        @unlink($progressFile);
         break;
 
     case 'progress':
         // Solo devolver el progreso actual (para polling)
-        if (file_exists($progressFile)) {
-            $data = json_decode(file_get_contents($progressFile), true);
-            send_sse('progress', $data);
+        $data = load_progress();
+        if (is_array($data)) {
+            if (isset($_GET['format']) && $_GET['format'] === 'json') {
+                header('Content-Type: application/json');
+                echo json_encode($data);
+            } else {
+                send_sse('progress', $data);
+            }
         } else {
-            send_sse('progress', ['step' => 'waiting', 'message' => 'Esperando inicio...', 'percent' => 0]);
+            $payload = ['step' => 'waiting', 'message' => 'Esperando inicio...', 'percent' => 0, 'status' => 'idle'];
+            if (isset($_GET['format']) && $_GET['format'] === 'json') {
+                header('Content-Type: application/json');
+                echo json_encode($payload);
+            } else {
+                send_sse('progress', $payload);
+            }
         }
         break;
 
     case 'status':
         // Verificar si hay un proceso en ejecución
-        if (file_exists($progressFile)) {
-            $data = json_decode(file_get_contents($progressFile), true);
+        $data = load_progress();
+        if (is_array($data)) {
             // Verificar si el proceso está "vivo" (menos de 2 minutos sin actualizar)
-            $isAlive = (time() - $data['timestamp']) < 120;
-            send_sse('status', [
+            $status = $data['status'] ?? 'running';
+            $isAlive = $status === 'running' && (time() - $data['timestamp']) < 120;
+            $payload = [
                 'active' => $isAlive,
                 'data' => $data
-            ]);
+            ];
+
+            if (isset($_GET['format']) && $_GET['format'] === 'json') {
+                header('Content-Type: application/json');
+                echo json_encode($payload);
+            } else {
+                send_sse('status', $payload);
+            }
         } else {
-            send_sse('status', ['active' => false, 'data' => null]);
+            $payload = ['active' => false, 'data' => null];
+            if (isset($_GET['format']) && $_GET['format'] === 'json') {
+                header('Content-Type: application/json');
+                echo json_encode($payload);
+            } else {
+                send_sse('status', $payload);
+            }
+        }
+        break;
+
+    case 'cleanup':
+        @unlink($progressFile);
+        if (isset($_GET['format']) && $_GET['format'] === 'json') {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => true]);
+        } else {
+            send_sse('complete', ['success' => true]);
         }
         break;
 

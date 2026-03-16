@@ -299,6 +299,9 @@ $(document).ready(function() {
     var restoreLog = [];
     var restoreFinished = false;
     var backupEventSource = null;
+    var backupStatusPoller = null;
+    var backupSseRecovered = false;
+    var backupLastStatusMessage = '';
     var backupLog = [];
     var backupFinished = false;
     var coreUpdateEventSource = null;
@@ -317,6 +320,12 @@ $(document).ready(function() {
     function startBackup() {
         backupLog = [];
         backupFinished = false;
+        backupSseRecovered = false;
+        backupLastStatusMessage = '';
+        if (backupStatusPoller) {
+            clearInterval(backupStatusPoller);
+            backupStatusPoller = null;
+        }
         updateBackupProgress(0, 'Iniciando copia de seguridad...');
         $('#backupDetails').html('<small class="text-muted">Conectando al servidor...</small>');
         $('#backupCompleteBtn').hide();
@@ -364,36 +373,143 @@ $(document).ready(function() {
             $('#btn-create-backup').prop('disabled', false);
             hideLoading();
             backupEventSource.close();
+            cleanupBackupStatus();
         });
 
         backupEventSource.addEventListener('error', function(e) {
-            backupFinished = true;
             try {
                 var data = JSON.parse(e.data);
-                updateBackupProgress(data.percent || 0, data.message, 'danger');
-                addBackupLogEntry('✗ ERROR: ' + data.message);
+                if (data && data.message) {
+                    backupFinished = true;
+                    updateBackupProgress(data.percent || 0, data.message, 'danger');
+                    addBackupLogEntry('✗ ERROR: ' + data.message);
+                    $('#backupErrorBtn').show();
+                    $('#btn-create-backup').prop('disabled', false);
+                    hideLoading();
+                    backupEventSource.close();
+                    return;
+                }
             } catch (err) {
-                updateBackupProgress(0, 'Error de conexión con el servidor', 'danger');
-                addBackupLogEntry('✗ Error de conexión');
             }
-            $('#backupErrorBtn').show();
-            $('#btn-create-backup').prop('disabled', false);
-            hideLoading();
-            backupEventSource.close();
+            handleBackupSseDisconnect();
         });
 
         backupEventSource.onerror = function() {
             if (backupFinished) {
                 return;
             }
-            backupFinished = true;
-            updateBackupProgress(0, 'Error de conexión con el servidor', 'danger');
-            addBackupLogEntry('✗ Error de conexión');
-            $('#backupErrorBtn').show();
-            $('#btn-create-backup').prop('disabled', false);
-            hideLoading();
-            backupEventSource.close();
+            handleBackupSseDisconnect();
         };
+    }
+
+    function handleBackupSseDisconnect() {
+        if (backupFinished) {
+            return;
+        }
+
+        if (backupEventSource) {
+            backupEventSource.close();
+        }
+
+        if (!backupSseRecovered) {
+            backupSseRecovered = true;
+            addBackupLogEntry('Canal SSE interrumpido. Recuperando estado del backup...');
+        }
+
+        updateBackupProgress(0, 'Conexión SSE interrumpida. Verificando estado del backup...', 'info');
+        startBackupStatusPolling();
+    }
+
+    function startBackupStatusPolling() {
+        if (backupStatusPoller) {
+            return;
+        }
+
+        var attempts = 0;
+
+        var poll = function() {
+            attempts++;
+
+            $.ajax({
+                url: 'plugins/system_updater/process_backup.php?action=status&format=json',
+                type: 'GET',
+                dataType: 'json',
+                cache: false,
+                success: function(response) {
+                    var data = response && response.data ? response.data : null;
+
+                    if (!data) {
+                        if (attempts >= 10) {
+                            finishBackupAsError('No se pudo recuperar el estado del backup en el servidor.');
+                        }
+                        return;
+                    }
+
+                    if (data.message && data.message !== backupLastStatusMessage) {
+                        backupLastStatusMessage = data.message;
+                        if (data.status === 'running') {
+                            addBackupLogEntry('[recuperado] ' + data.message);
+                        }
+                    }
+
+                    if (data.status === 'complete') {
+                        var result = data.result || {};
+                        backupFinished = true;
+                        stopBackupStatusPolling();
+                        updateBackupProgress(100, result.message || data.message || '¡Copia de seguridad creada con éxito!', 'success');
+                        addBackupLogEntry('✓ ' + (result.message || data.message || 'Copia de seguridad completada'));
+                        if (result.backup_name) {
+                            addBackupLogEntry('Backup: ' + result.backup_name);
+                        }
+                        $('#backupCompleteBtn').show();
+                        $('#btn-create-backup').prop('disabled', false);
+                        hideLoading();
+                        cleanupBackupStatus();
+                        return;
+                    }
+
+                    if (data.status === 'error') {
+                        finishBackupAsError(data.error || data.message || 'Error desconocido durante el backup');
+                        return;
+                    }
+
+                    updateBackupProgress(data.percent || 0, data.message || 'Procesando backup...', 'info');
+                },
+                error: function() {
+                    if (attempts >= 10) {
+                        finishBackupAsError('Error de conexión con el servidor');
+                    }
+                }
+            });
+        };
+
+        poll();
+        backupStatusPoller = setInterval(poll, 2000);
+    }
+
+    function stopBackupStatusPolling() {
+        if (backupStatusPoller) {
+            clearInterval(backupStatusPoller);
+            backupStatusPoller = null;
+        }
+    }
+
+    function cleanupBackupStatus() {
+        $.ajax({
+            url: 'plugins/system_updater/process_backup.php?action=cleanup&format=json',
+            type: 'GET',
+            cache: false
+        });
+    }
+
+    function finishBackupAsError(message) {
+        backupFinished = true;
+        stopBackupStatusPolling();
+        updateBackupProgress(0, message, 'danger');
+        addBackupLogEntry('✗ ' + message);
+        $('#backupErrorBtn').show();
+        $('#btn-create-backup').prop('disabled', false);
+        hideLoading();
     }
 
     function updateBackupProgress(percent, message, type) {
