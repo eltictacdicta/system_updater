@@ -758,74 +758,160 @@
                 // ========================================
                 // BACKUP FUNCTIONALITY
                 // ========================================
-                var backupEventSource = null;
+                var backupJobId = '';
+                var backupStatusPoller = null;
+                var backupFinished = false;
+                var backupLastStatusMessage = '';
                 var backupLog = [];
 
                 function startBackup() {
-                    // Reset UI
                     backupLog = [];
+                    backupFinished = false;
+                    backupJobId = '';
+                    backupLastStatusMessage = '';
+                    if (backupStatusPoller) {
+                        clearInterval(backupStatusPoller);
+                        backupStatusPoller = null;
+                    }
                     updateBackupProgress(0, 'Iniciando copia de seguridad...');
                     document.getElementById('backupDetails').innerHTML = '<small class="text-muted">Conectando al servidor...</small>';
                     document.getElementById('backupCompleteBtn').style.display = 'none';
                     document.getElementById('backupErrorBtn').style.display = 'none';
+                    if (backupBtn) {
+                        backupBtn.disabled = true;
+                    }
 
-                    // Show modal
                     jQuery('#backupProgressModal').modal('show');
 
-                    // Start SSE connection
-                    var sseUrl = 'plugins/system_updater/process_backup.php?action=start';
+                    jQuery.ajax({
+                        url: 'plugins/system_updater/process_backup.php?action=start&format=json',
+                        type: 'GET',
+                        dataType: 'json',
+                        cache: false,
+                        success: function (response) {
+                            if (!response || !response.success) {
+                                finishBackupAsError((response && response.message) || 'No se pudo iniciar el backup');
+                                return;
+                            }
 
-                    backupEventSource = new EventSource(sseUrl);
+                            backupJobId = response.job_id || '';
+                            addBackupLogEntry(response.message || 'Proceso de backup iniciado');
 
-                    backupEventSource.addEventListener('start', function (e) {
-                        var data = JSON.parse(e.data);
-                        addBackupLogEntry('Iniciando: ' + data.message);
-                    });
+                            if (response.already_running && response.data && response.data.message) {
+                                updateBackupProgress(response.data.percent || 0, response.data.message);
+                                addBackupLogEntry('[recuperado] ' + response.data.message);
+                            }
 
-                    backupEventSource.addEventListener('init', function (e) {
-                        var data = JSON.parse(e.data);
-                        updateBackupProgress(data.percent, data.message);
-                        addBackupLogEntry(data.message);
-                    });
-
-                    backupEventSource.addEventListener('phase', function (e) {
-                        var data = JSON.parse(e.data);
-                        addBackupLogEntry('=== Fase: ' + data.message + ' ===');
-                    });
-
-                    backupEventSource.addEventListener('progress', function (e) {
-                        var data = JSON.parse(e.data);
-                        updateBackupProgress(data.percent, data.message);
-                        if (data.step && data.step.indexOf('_progress') === -1 && data.step.indexOf('db_table') === -1) {
-                            addBackupLogEntry(data.message);
+                            startBackupStatusPolling(backupJobId);
+                        },
+                        error: function (xhr) {
+                            var message = 'Error de conexión con el servidor';
+                            if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                                message = xhr.responseJSON.message;
+                            }
+                            finishBackupAsError(message);
                         }
                     });
+                }
 
-                    backupEventSource.addEventListener('complete', function (e) {
-                        var data = JSON.parse(e.data);
-                        updateBackupProgress(100, data.message, 'success');
-                        addBackupLogEntry('✓ ' + data.message);
-                        if (data.backup_name) {
-                            addBackupLogEntry('   Backup: ' + data.backup_name);
-                        }
-                        document.getElementById('backupCompleteBtn').style.display = 'inline-block';
-                        backupEventSource.close();
-                    });
+                function startBackupStatusPolling(jobId) {
+                    if (jobId) {
+                        backupJobId = jobId;
+                    }
 
-                    backupEventSource.addEventListener('error', function (e) {
-                        var data = JSON.parse(e.data);
-                        updateBackupProgress(data.percent || 0, data.message, 'danger');
-                        addBackupLogEntry('✗ ERROR: ' + data.message);
-                        document.getElementById('backupErrorBtn').style.display = 'inline-block';
-                        backupEventSource.close();
-                    });
+                    if (backupStatusPoller) {
+                        return;
+                    }
 
-                    backupEventSource.onerror = function () {
-                        updateBackupProgress(0, 'Error de conexión con el servidor', 'danger');
-                        addBackupLogEntry('✗ Error de conexión');
-                        document.getElementById('backupErrorBtn').style.display = 'inline-block';
-                        backupEventSource.close();
+                    var attempts = 0;
+
+                    var poll = function () {
+                        attempts++;
+
+                        jQuery.ajax({
+                            url: 'plugins/system_updater/process_backup.php?action=status&format=json',
+                            type: 'GET',
+                            dataType: 'json',
+                            cache: false,
+                            data: backupJobId ? {job_id: backupJobId} : {},
+                            success: function (response) {
+                                var data = response && response.data ? response.data : null;
+
+                                if (!data) {
+                                    if (attempts >= 10) {
+                                        finishBackupAsError('No se pudo recuperar el estado del backup en el servidor.');
+                                    }
+                                    return;
+                                }
+
+                                if (data.message && data.message !== backupLastStatusMessage) {
+                                    backupLastStatusMessage = data.message;
+                                    if (data.status === 'queued' || data.status === 'running') {
+                                        addBackupLogEntry('[estado] ' + data.message);
+                                    }
+                                }
+
+                                if (data.status === 'complete') {
+                                    var result = data.result || {};
+                                    backupFinished = true;
+                                    stopBackupStatusPolling();
+                                    updateBackupProgress(100, result.message || data.message || '¡Copia de seguridad creada con éxito!', 'success');
+                                    addBackupLogEntry('✓ ' + (result.message || data.message || 'Copia de seguridad completada'));
+                                    if (result.backup_name) {
+                                        addBackupLogEntry('Backup: ' + result.backup_name);
+                                    }
+                                    document.getElementById('backupCompleteBtn').style.display = 'inline-block';
+                                    if (backupBtn) {
+                                        backupBtn.disabled = false;
+                                    }
+                                    cleanupBackupStatus();
+                                    return;
+                                }
+
+                                if (data.status === 'error') {
+                                    finishBackupAsError(data.error || data.message || 'Error desconocido durante el backup');
+                                    return;
+                                }
+
+                                updateBackupProgress(data.percent || 0, data.message || 'Procesando backup...');
+                            },
+                            error: function () {
+                                if (attempts >= 10) {
+                                    finishBackupAsError('Error de conexión con el servidor');
+                                }
+                            }
+                        });
                     };
+
+                    poll();
+                    backupStatusPoller = setInterval(poll, 2000);
+                }
+
+                function stopBackupStatusPolling() {
+                    if (backupStatusPoller) {
+                        clearInterval(backupStatusPoller);
+                        backupStatusPoller = null;
+                    }
+                }
+
+                function cleanupBackupStatus() {
+                    jQuery.ajax({
+                        url: 'plugins/system_updater/process_backup.php?action=cleanup&format=json',
+                        type: 'GET',
+                        cache: false,
+                        data: backupJobId ? {job_id: backupJobId} : {}
+                    });
+                }
+
+                function finishBackupAsError(message) {
+                    backupFinished = true;
+                    stopBackupStatusPolling();
+                    updateBackupProgress(0, message, 'danger');
+                    addBackupLogEntry('✗ ' + message);
+                    document.getElementById('backupErrorBtn').style.display = 'inline-block';
+                    if (backupBtn) {
+                        backupBtn.disabled = false;
+                    }
                 }
 
                 function updateBackupProgress(percent, message, type) {

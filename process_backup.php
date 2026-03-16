@@ -1,108 +1,113 @@
 <?php
 /**
- * Procesador de Backup con Progreso - Plugin system_updater
- * 
- * Este script maneja la creación de backups con reporte de progreso en tiempo real
- * usando Server-Sent Events (SSE).
- * 
- * Se ejecuta de forma asíncrona para evitar timeouts en servidores con límites de tiempo.
- * 
+ * Procesador de Backup con estado persistente - Plugin system_updater
+ *
+ * El backup se ejecuta desacoplado de la conexión HTTP para evitar que el
+ * progreso dependa de un canal SSE largo o de un navegador conectado.
+ *
  * @author Javier Trujillo
  * @license LGPL-3.0-or-later
  */
 
-// Configurar headers para SSE
-header('Content-Type: text/event-stream');
-header('Cache-Control: no-cache');
-header('Connection: keep-alive');
-header('X-Accel-Buffering: no'); // Desactivar buffering de nginx
+const FS_BACKUP_STALE_SECONDS = 1800;
 
-// Aumentar límites de ejecución
+if (PHP_SAPI === 'cli' && isset($argv) && is_array($argv)) {
+    foreach (array_slice($argv, 1) as $argument) {
+        if (strpos($argument, '=') === false) {
+            continue;
+        }
+
+        list($key, $value) = explode('=', $argument, 2);
+        $_GET[$key] = $value;
+        $_REQUEST[$key] = $value;
+    }
+}
+
 @set_time_limit(0);
-@ini_set('max_execution_time', 0);
+@ini_set('max_execution_time', '0');
 @ini_set('memory_limit', '512M');
 @ignore_user_abort(true);
 
-// Desactivar compresión de salida
-@ini_set('zlib.output_compression', 'Off');
-@ini_set('output_buffering', 'Off');
-@ini_set('output_handler', '');
-
-// Limpiar cualquier buffer existente
-while (ob_get_level()) {
-    ob_end_clean();
-}
-
-// Función para enviar eventos SSE
-function send_sse($event, $data)
-{
-    echo "event: {$event}\n";
-    echo "data: " . json_encode($data) . "\n\n";
-
-    // Forzar envío inmediato
-    @flush();
-}
-
 define('FS_FOLDER', dirname(dirname(__DIR__)));
 
-// Cargar configuración
-if (file_exists(FS_FOLDER . '/config.php')) {
-    require_once FS_FOLDER . '/config.php';
-} else {
-    send_sse('error', ['message' => 'Error: No se encuentra el archivo config.php.', 'percent' => 0]);
-    exit;
-}
-
-// Iniciar sesión para mantener estado
-// Usar el nombre de sesión configurado o el por defecto de PHP (PHPSESSID)
-if (defined('FS_SESSION_NAME')) {
-    session_name(FS_SESSION_NAME);
-}
-session_start();
-
-// Cargar Backup Manager
-if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
-    require_once __DIR__ . '/lib/backup_manager.php';
-} else {
-    send_sse('error', ['message' => 'Error: No se encuentra el plugin system_updater.', 'percent' => 0]);
-    exit;
-}
-
-// Verificar autenticación (compatibilidad con Symfony Session y Legacy)
-$is_logged = false;
-if (isset($_SESSION['user_id'])) {
-    $is_logged = true;
-} elseif (isset($_SESSION['user_nick'])) {
-    $is_logged = true;
-} elseif (isset($_SESSION['_sf2_attributes']['user_nick'])) {
-    $is_logged = true;
-}
-
-if (!$is_logged) {
-    send_sse('error', ['message' => 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.', 'percent' => 0]);
-    exit;
-}
-
-// Liberar el bloqueo de sesión para permitir peticiones paralelas de estado/progreso.
-session_write_close();
-
-// Obtener parámetros
-$action = isset($_GET['action']) ? $_GET['action'] : '';
-
-// Crear archivo de progreso temporal
-$progressFile = sys_get_temp_dir() . '/fs_backup_' . session_id() . '.json';
-
-// Mantener un pequeño histórico del estado final para permitir recuperación
-// si el canal SSE se corta antes de que el navegador procese el último evento.
-function load_progress()
+function backup_json_encode(array $payload)
 {
-    global $progressFile;
+    return json_encode($payload, JSON_UNESCAPED_UNICODE);
+}
 
-    if (!file_exists($progressFile)) {
+function respond_json(array $payload, $statusCode = 200, $exit = true)
+{
+    if (!headers_sent()) {
+        http_response_code($statusCode);
+        header('Content-Type: application/json; charset=UTF-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+    }
+
+    echo backup_json_encode($payload);
+
+    if ($exit) {
+        exit;
+    }
+}
+
+function respond_and_continue(array $payload)
+{
+    $json = backup_json_encode($payload);
+
+    if (!headers_sent()) {
+        header('Content-Type: application/json; charset=UTF-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('Connection: close');
+        header('Content-Length: ' . strlen($json));
+    }
+
+    echo $json;
+
+    while (ob_get_level()) {
+        ob_end_flush();
+    }
+
+    @flush();
+
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    }
+}
+
+function get_request_param($name, $default = '')
+{
+    return $_GET[$name] ?? $_POST[$name] ?? $default;
+}
+
+function sanitize_token($value)
+{
+    return preg_replace('/[^A-Za-z0-9_.-]/', '', (string) $value);
+}
+
+function get_progress_file($jobId)
+{
+    return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'fs_backup_' . sanitize_token($jobId) . '.json';
+}
+
+function get_lock_file($jobId)
+{
+    return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'fs_backup_' . sanitize_token($jobId) . '.lock';
+}
+
+function get_session_pointer_file($sessionKey)
+{
+    return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'fs_backup_current_' . sanitize_token($sessionKey) . '.json';
+}
+
+function read_json_file($filePath)
+{
+    if (!is_file($filePath)) {
         return null;
     }
 
-    $content = @file_get_contents($progressFile);
+    $content = @file_get_contents($filePath);
     if ($content === false || $content === '') {
         return null;
     }
@@ -111,169 +116,456 @@ function load_progress()
     return is_array($data) ? $data : null;
 }
 
-// Función para guardar progreso
-function save_progress($step, $message, $percent, $error = null, array $extra = [])
+function write_json_file($filePath, array $data)
 {
-    global $progressFile;
-    $data = [
-        'step' => $step,
-        'message' => $message,
-        'percent' => $percent,
-        'timestamp' => time(),
-        'error' => $error,
-        'status' => $error ? 'error' : (($step === 'complete') ? 'complete' : 'running')
-    ];
+    return @file_put_contents($filePath, backup_json_encode($data), LOCK_EX) !== false;
+}
 
-    if (!empty($extra)) {
-        $data = array_merge($data, $extra);
+function load_pointer($sessionKey)
+{
+    return read_json_file(get_session_pointer_file($sessionKey));
+}
+
+function load_progress($jobId = '', $sessionKey = '')
+{
+    $jobId = sanitize_token($jobId);
+
+    if ($jobId === '' && $sessionKey !== '') {
+        $pointer = load_pointer($sessionKey);
+        $jobId = sanitize_token($pointer['job_id'] ?? '');
     }
 
-    @file_put_contents($progressFile, json_encode($data));
+    if ($jobId === '') {
+        return null;
+    }
+
+    return read_json_file(get_progress_file($jobId));
+}
+
+function save_progress($jobId, $sessionKey, $step, $message, $percent, $error = null, array $extra = [], $status = null)
+{
+    $jobId = sanitize_token($jobId);
+    $sessionKey = sanitize_token($sessionKey);
+
+    if ($status === null) {
+        if ($error !== null) {
+            $status = 'error';
+        } elseif ($step === 'complete') {
+            $status = 'complete';
+        } elseif ($step === 'queued') {
+            $status = 'queued';
+        } else {
+            $status = 'running';
+        }
+    }
+
+    $data = array_merge([
+        'job_id' => $jobId,
+        'session_key' => $sessionKey,
+        'step' => $step,
+        'message' => $message,
+        'percent' => (int) $percent,
+        'timestamp' => time(),
+        'error' => $error,
+        'status' => $status,
+    ], $extra);
+
+    write_json_file(get_progress_file($jobId), $data);
+    write_json_file(get_session_pointer_file($sessionKey), [
+        'job_id' => $jobId,
+        'status' => $status,
+        'step' => $step,
+        'message' => $message,
+        'timestamp' => $data['timestamp'],
+    ]);
+
     return $data;
 }
 
-// Callback de progreso para backup_manager
-$progressCallback = function ($step, $message, $percent) {
-    global $progressFile;
+function clear_job_state($jobId, $sessionKey)
+{
+    $jobId = sanitize_token($jobId);
+    $sessionKey = sanitize_token($sessionKey);
 
-    $data = [
-        'step' => $step,
-        'message' => $message,
-        'percent' => $percent,
-        'timestamp' => time(),
-        'status' => 'running'
-    ];
+    if ($jobId !== '') {
+        @unlink(get_progress_file($jobId));
+        @unlink(get_lock_file($jobId));
+    }
 
-    // Guardar en archivo
-    @file_put_contents($progressFile, json_encode($data));
-
-    // Enviar vía SSE
-    send_sse('progress', $data);
-
-    // Pequeña pausa para permitir que el navegador procese
-    usleep(10000); // 10ms
-};
-
-// Procesar según la acción
-switch ($action) {
-    case 'start':
-        $existingProgress = load_progress();
-        if (is_array($existingProgress) && !empty($existingProgress['timestamp']) && (time() - (int) $existingProgress['timestamp']) > 86400) {
-            @unlink($progressFile);
-        }
-
-        // Iniciar backup
-        send_sse('start', ['message' => 'Iniciando proceso de backup...', 'percent' => 0]);
-
-        // Inicializar archivo de progreso
-        save_progress('init', 'Inicializando...', 0);
-
-        // Instanciar Backup Manager
-        $backupManager = new backup_manager(FS_FOLDER);
-
-        send_sse('init', ['message' => 'Preparando copia de seguridad...', 'percent' => 2]);
-
-        try {
-            // Crear backup con progreso
-            send_sse('phase', ['phase' => 'backup', 'message' => 'Creando copia de seguridad completa']);
-
-            $result = $backupManager->create_backup_with_progress('', true, $progressCallback);
-
-            // Verificar resultado
-            if (isset($result['complete']) && $result['complete']['success']) {
-                $data = [
-                    'message' => '¡Copia de seguridad creada con éxito!',
-                    'percent' => 100,
-                    'backup_name' => $result['complete']['backup_name'] ?? '',
-                    'files_size' => $result['files']['size_formatted'] ?? '',
-                    'database_size' => $result['database']['size_formatted'] ?? '',
-                    'redirect' => 'index.php?page=admin_updater&success=backup'
-                ];
-                save_progress('complete', $data['message'], 100, null, [
-                    'finished_at' => time(),
-                    'result' => $data,
-                ]);
-                send_sse('complete', $data);
-            } else {
-                $errors = $backupManager->get_errors();
-                $errorMsg = !empty($errors) ? implode('; ', $errors) : 'Error desconocido durante el backup';
-                save_progress('error', $errorMsg, 0, $errorMsg, [
-                    'finished_at' => time(),
-                ]);
-                send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
-            }
-
-        } catch (Exception $e) {
-            $errorMsg = 'Excepción: ' . $e->getMessage();
-            save_progress('error', $errorMsg, 0, $errorMsg, [
-                'finished_at' => time(),
-            ]);
-            send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
-        }
-        break;
-
-    case 'progress':
-        // Solo devolver el progreso actual (para polling)
-        $data = load_progress();
-        if (is_array($data)) {
-            if (isset($_GET['format']) && $_GET['format'] === 'json') {
-                header('Content-Type: application/json');
-                echo json_encode($data);
-            } else {
-                send_sse('progress', $data);
-            }
-        } else {
-            $payload = ['step' => 'waiting', 'message' => 'Esperando inicio...', 'percent' => 0, 'status' => 'idle'];
-            if (isset($_GET['format']) && $_GET['format'] === 'json') {
-                header('Content-Type: application/json');
-                echo json_encode($payload);
-            } else {
-                send_sse('progress', $payload);
-            }
-        }
-        break;
-
-    case 'status':
-        // Verificar si hay un proceso en ejecución
-        $data = load_progress();
-        if (is_array($data)) {
-            // Verificar si el proceso está "vivo" (menos de 2 minutos sin actualizar)
-            $status = $data['status'] ?? 'running';
-            $isAlive = $status === 'running' && (time() - $data['timestamp']) < 120;
-            $payload = [
-                'active' => $isAlive,
-                'data' => $data
-            ];
-
-            if (isset($_GET['format']) && $_GET['format'] === 'json') {
-                header('Content-Type: application/json');
-                echo json_encode($payload);
-            } else {
-                send_sse('status', $payload);
-            }
-        } else {
-            $payload = ['active' => false, 'data' => null];
-            if (isset($_GET['format']) && $_GET['format'] === 'json') {
-                header('Content-Type: application/json');
-                echo json_encode($payload);
-            } else {
-                send_sse('status', $payload);
-            }
-        }
-        break;
-
-    case 'cleanup':
-        @unlink($progressFile);
-        if (isset($_GET['format']) && $_GET['format'] === 'json') {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => true]);
-        } else {
-            send_sse('complete', ['success' => true]);
-        }
-        break;
-
-    default:
-        send_sse('error', ['message' => 'Acción no válida: ' . $action, 'percent' => 0]);
+    $pointerFile = get_session_pointer_file($sessionKey);
+    $pointer = read_json_file($pointerFile);
+    if (is_array($pointer) && ($pointer['job_id'] ?? '') === $jobId) {
+        @unlink($pointerFile);
+    }
 }
 
-exit;
+function mark_stale_job_if_needed(array $data, $sessionKey)
+{
+    $status = $data['status'] ?? 'idle';
+    $timestamp = (int) ($data['timestamp'] ?? 0);
+    $jobId = sanitize_token($data['job_id'] ?? '');
+
+    if ($jobId === '' || !in_array($status, ['queued', 'running'], true)) {
+        return $data;
+    }
+
+    if ((time() - $timestamp) <= FS_BACKUP_STALE_SECONDS) {
+        return $data;
+    }
+
+    return save_progress(
+        $jobId,
+        $sessionKey,
+        'error',
+        'El proceso de backup dejó de reportar actividad. Revise los logs del servidor.',
+        (int) ($data['percent'] ?? 0),
+        'Proceso sin actividad',
+        [
+            'finished_at' => time(),
+            'stale' => true,
+            'previous_status' => $status,
+        ],
+        'error'
+    );
+}
+
+function has_active_job($sessionKey, &$data = null)
+{
+    $data = load_progress('', $sessionKey);
+    if (!is_array($data)) {
+        return false;
+    }
+
+    $data = mark_stale_job_if_needed($data, $sessionKey);
+    return in_array($data['status'] ?? 'idle', ['queued', 'running'], true);
+}
+
+function shell_functions_available()
+{
+    $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+    foreach (['exec', 'escapeshellarg'] as $function) {
+        if (in_array($function, $disabled, true) || !function_exists($function)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function detect_php_binary()
+{
+    if (defined('PHP_BINARY') && PHP_BINARY && @is_executable(PHP_BINARY)) {
+        return PHP_BINARY;
+    }
+
+    if (!shell_functions_available()) {
+        return '';
+    }
+
+    $output = [];
+    $status = 0;
+    @exec('command -v php 2>/dev/null', $output, $status);
+
+    if ($status === 0 && !empty($output[0])) {
+        return trim($output[0]);
+    }
+
+    return '';
+}
+
+function launch_cli_worker($jobId, $sessionKey)
+{
+    if (!shell_functions_available()) {
+        return [false, null, 'shell-functions-disabled'];
+    }
+
+    $phpBinary = detect_php_binary();
+    if ($phpBinary === '') {
+        return [false, null, 'php-binary-not-found'];
+    }
+
+    $command = sprintf(
+        'nohup %s %s %s %s %s > /dev/null 2>&1 & echo $!',
+        escapeshellarg($phpBinary),
+        escapeshellarg(__FILE__),
+        escapeshellarg('action=worker'),
+        escapeshellarg('job_id=' . $jobId),
+        escapeshellarg('session_key=' . $sessionKey)
+    );
+
+    $output = [];
+    $status = 0;
+    @exec($command, $output, $status);
+
+    if ($status !== 0) {
+        return [false, null, 'worker-launch-failed'];
+    }
+
+    $pid = isset($output[0]) ? trim($output[0]) : null;
+    return [true, $pid !== '' ? $pid : null, 'cli'];
+}
+
+function create_job_id($sessionKey)
+{
+    try {
+        $suffix = bin2hex(random_bytes(8));
+    } catch (Throwable $exception) {
+        $suffix = str_replace('.', '', uniqid('', true));
+    }
+
+    return sanitize_token($sessionKey . '_' . $suffix);
+}
+
+function is_logged_in()
+{
+    return isset($_SESSION['user_id'])
+        || isset($_SESSION['user_nick'])
+        || isset($_SESSION['_sf2_attributes']['user_nick']);
+}
+
+function ensure_session_ready()
+{
+    if (PHP_SAPI === 'cli') {
+        return '';
+    }
+
+    if (defined('FS_SESSION_NAME')) {
+        session_name(FS_SESSION_NAME);
+    }
+
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        session_start();
+    }
+
+    if (!is_logged_in()) {
+        respond_json([
+            'success' => false,
+            'message' => 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.',
+        ], 401);
+    }
+
+    $sessionKey = session_id();
+    session_write_close();
+
+    return $sessionKey;
+}
+
+function run_backup_job($jobId, $sessionKey)
+{
+    $jobId = sanitize_token($jobId);
+    $sessionKey = sanitize_token($sessionKey);
+
+    if ($jobId === '' || $sessionKey === '') {
+        return false;
+    }
+
+    if (!file_exists(__DIR__ . '/lib/backup_manager.php')) {
+        save_progress($jobId, $sessionKey, 'error', 'Error: No se encuentra el plugin system_updater.', 0, 'backup_manager.php no encontrado', [
+            'finished_at' => time(),
+        ], 'error');
+        return false;
+    }
+
+    require_once __DIR__ . '/lib/backup_manager.php';
+
+    $lockHandle = @fopen(get_lock_file($jobId), 'c');
+    if (!$lockHandle) {
+        save_progress($jobId, $sessionKey, 'error', 'No se pudo adquirir el bloqueo del proceso de backup.', 0, 'No se pudo abrir el lockfile', [
+            'finished_at' => time(),
+        ], 'error');
+        return false;
+    }
+
+    if (!@flock($lockHandle, LOCK_EX | LOCK_NB)) {
+        fclose($lockHandle);
+        return false;
+    }
+
+    $pid = function_exists('getmypid') ? getmypid() : null;
+
+    try {
+        save_progress($jobId, $sessionKey, 'init', 'Preparando copia de seguridad...', 2, null, [
+            'pid' => $pid,
+            'started_at' => time(),
+        ], 'running');
+
+        $backupManager = new backup_manager(FS_FOLDER);
+
+        $progressCallback = function ($step, $message, $percent) use ($jobId, $sessionKey, $pid) {
+            save_progress($jobId, $sessionKey, $step, $message, $percent, null, [
+                'pid' => $pid,
+            ], 'running');
+        };
+
+        $result = $backupManager->create_backup_with_progress('', true, $progressCallback);
+
+        if (isset($result['complete']) && !empty($result['complete']['success'])) {
+            $payload = [
+                'message' => '¡Copia de seguridad creada con éxito!',
+                'percent' => 100,
+                'backup_name' => $result['complete']['backup_name'] ?? '',
+                'files_size' => $result['files']['size_formatted'] ?? '',
+                'database_size' => $result['database']['size_formatted'] ?? '',
+                'redirect' => 'index.php?page=admin_updater&success=backup',
+            ];
+
+            save_progress($jobId, $sessionKey, 'complete', $payload['message'], 100, null, [
+                'pid' => $pid,
+                'finished_at' => time(),
+                'result' => $payload,
+            ], 'complete');
+        } else {
+            $errors = $backupManager->get_errors();
+            $errorMessage = !empty($errors) ? implode('; ', $errors) : 'Error desconocido durante el backup';
+
+            save_progress($jobId, $sessionKey, 'error', $errorMessage, 0, $errorMessage, [
+                'pid' => $pid,
+                'finished_at' => time(),
+            ], 'error');
+        }
+    } catch (Throwable $exception) {
+        $errorMessage = 'Excepción: ' . $exception->getMessage();
+        save_progress($jobId, $sessionKey, 'error', $errorMessage, 0, $errorMessage, [
+            'pid' => $pid,
+            'finished_at' => time(),
+        ], 'error');
+    }
+
+    @flock($lockHandle, LOCK_UN);
+    fclose($lockHandle);
+
+    return true;
+}
+
+if (!file_exists(FS_FOLDER . '/config.php')) {
+    if (PHP_SAPI === 'cli') {
+        fwrite(STDERR, "Error: No se encuentra el archivo config.php.\n");
+        exit(1);
+    }
+
+    respond_json([
+        'success' => false,
+        'message' => 'Error: No se encuentra el archivo config.php.',
+    ], 500);
+}
+
+require_once FS_FOLDER . '/config.php';
+
+$action = get_request_param('action', '');
+
+switch ($action) {
+    case 'start':
+        $sessionKey = ensure_session_ready();
+
+        $existingData = null;
+        if (has_active_job($sessionKey, $existingData)) {
+            respond_json([
+                'success' => true,
+                'message' => 'Ya hay una copia de seguridad en ejecución.',
+                'job_id' => $existingData['job_id'] ?? '',
+                'already_running' => true,
+                'data' => $existingData,
+            ]);
+        }
+
+        $jobId = create_job_id($sessionKey);
+        save_progress($jobId, $sessionKey, 'queued', 'Preparando el proceso de backup...', 1, null, [
+            'created_at' => time(),
+            'launch_mode' => 'pending',
+        ], 'queued');
+
+        list($launched, $pid, $launchMode) = launch_cli_worker($jobId, $sessionKey);
+
+        if ($launched) {
+            save_progress($jobId, $sessionKey, 'queued', 'Proceso de backup lanzado en segundo plano.', 2, null, [
+                'created_at' => time(),
+                'launch_mode' => $launchMode,
+                'pid' => $pid,
+            ], 'queued');
+
+            respond_json([
+                'success' => true,
+                'job_id' => $jobId,
+                'message' => 'Proceso de backup iniciado en segundo plano.',
+                'launch_mode' => $launchMode,
+                'pid' => $pid,
+            ]);
+        }
+
+        save_progress($jobId, $sessionKey, 'queued', 'El servidor no permite lanzar un worker CLI. Se continuará tras cerrar la respuesta HTTP.', 2, null, [
+            'created_at' => time(),
+            'launch_mode' => 'shutdown',
+            'launch_error' => $launchMode,
+        ], 'queued');
+
+        respond_and_continue([
+            'success' => true,
+            'job_id' => $jobId,
+            'message' => 'Proceso de backup iniciado. El servidor continuará trabajando aunque la ventana no mantenga una conexión SSE.',
+            'launch_mode' => 'shutdown',
+        ]);
+
+        run_backup_job($jobId, $sessionKey);
+        exit;
+
+    case 'worker':
+        if (PHP_SAPI !== 'cli') {
+            respond_json([
+                'success' => false,
+                'message' => 'Acción no válida fuera de CLI.',
+            ], 400);
+        }
+
+        $jobId = sanitize_token(get_request_param('job_id'));
+        $sessionKey = sanitize_token(get_request_param('session_key'));
+
+        if ($jobId === '' || $sessionKey === '') {
+            fwrite(STDERR, "Parámetros de worker incompletos.\n");
+            exit(1);
+        }
+
+        run_backup_job($jobId, $sessionKey);
+        exit(0);
+
+    case 'progress':
+    case 'status':
+        $sessionKey = ensure_session_ready();
+        $jobId = sanitize_token(get_request_param('job_id'));
+        $data = load_progress($jobId, $sessionKey);
+
+        if (is_array($data)) {
+            $data = mark_stale_job_if_needed($data, $sessionKey);
+            respond_json([
+                'active' => in_array($data['status'] ?? 'idle', ['queued', 'running'], true),
+                'job_id' => $data['job_id'] ?? $jobId,
+                'data' => $data,
+            ]);
+        }
+
+        respond_json([
+            'active' => false,
+            'job_id' => $jobId,
+            'data' => null,
+        ]);
+
+    case 'cleanup':
+        $sessionKey = ensure_session_ready();
+        $jobId = sanitize_token(get_request_param('job_id'));
+
+        if ($jobId === '') {
+            $pointer = load_pointer($sessionKey);
+            $jobId = sanitize_token($pointer['job_id'] ?? '');
+        }
+
+        if ($jobId !== '') {
+            clear_job_state($jobId, $sessionKey);
+        }
+
+        respond_json(['success' => true, 'job_id' => $jobId]);
+
+    default:
+        respond_json([
+            'success' => false,
+            'message' => 'Acción no válida: ' . $action,
+        ], 400);
+}

@@ -298,9 +298,8 @@ $(document).ready(function() {
     var restoreEventSource = null;
     var restoreLog = [];
     var restoreFinished = false;
-    var backupEventSource = null;
+    var backupJobId = '';
     var backupStatusPoller = null;
-    var backupSseRecovered = false;
     var backupLastStatusMessage = '';
     var backupLog = [];
     var backupFinished = false;
@@ -316,11 +315,10 @@ $(document).ready(function() {
         $('#backup-loading').hide();
     }
 
-    // Crear Backup con SSE (Server-Sent Events)
     function startBackup() {
         backupLog = [];
         backupFinished = false;
-        backupSseRecovered = false;
+        backupJobId = '';
         backupLastStatusMessage = '';
         if (backupStatusPoller) {
             clearInterval(backupStatusPoller);
@@ -334,93 +332,42 @@ $(document).ready(function() {
 
         $('#backupProgressModal').modal('show');
 
-        var sseUrl = 'plugins/system_updater/process_backup.php?action=start';
-        backupEventSource = new EventSource(sseUrl);
-
-        backupEventSource.addEventListener('start', function(e) {
-            var data = JSON.parse(e.data);
-            addBackupLogEntry('Iniciando: ' + data.message);
-        });
-
-        backupEventSource.addEventListener('init', function(e) {
-            var data = JSON.parse(e.data);
-            updateBackupProgress(data.percent, data.message);
-            addBackupLogEntry(data.message);
-        });
-
-        backupEventSource.addEventListener('phase', function(e) {
-            var data = JSON.parse(e.data);
-            addBackupLogEntry('=== Fase: ' + data.message + ' ===');
-        });
-
-        backupEventSource.addEventListener('progress', function(e) {
-            var data = JSON.parse(e.data);
-            updateBackupProgress(data.percent, data.message);
-            if (data.step && data.step.indexOf('_progress') === -1 && data.step.indexOf('db_table') === -1) {
-                addBackupLogEntry(data.message);
-            }
-        });
-
-        backupEventSource.addEventListener('complete', function(e) {
-            var data = JSON.parse(e.data);
-            backupFinished = true;
-            updateBackupProgress(100, data.message, 'success');
-            addBackupLogEntry('✓ ' + data.message);
-            if (data.backup_name) {
-                addBackupLogEntry('Backup: ' + data.backup_name);
-            }
-            $('#backupCompleteBtn').show();
-            $('#btn-create-backup').prop('disabled', false);
-            hideLoading();
-            backupEventSource.close();
-            cleanupBackupStatus();
-        });
-
-        backupEventSource.addEventListener('error', function(e) {
-            try {
-                var data = JSON.parse(e.data);
-                if (data && data.message) {
-                    backupFinished = true;
-                    updateBackupProgress(data.percent || 0, data.message, 'danger');
-                    addBackupLogEntry('✗ ERROR: ' + data.message);
-                    $('#backupErrorBtn').show();
-                    $('#btn-create-backup').prop('disabled', false);
-                    hideLoading();
-                    backupEventSource.close();
+        $.ajax({
+            url: 'plugins/system_updater/process_backup.php?action=start&format=json',
+            type: 'GET',
+            dataType: 'json',
+            cache: false,
+            success: function(response) {
+                if (!response || !response.success) {
+                    finishBackupAsError((response && response.message) || 'No se pudo iniciar el backup');
                     return;
                 }
-            } catch (err) {
+
+                backupJobId = response.job_id || '';
+                addBackupLogEntry(response.message || 'Proceso de backup iniciado');
+
+                if (response.already_running && response.data && response.data.message) {
+                    updateBackupProgress(response.data.percent || 0, response.data.message, 'info');
+                    addBackupLogEntry('[recuperado] ' + response.data.message);
+                }
+
+                startBackupStatusPolling(backupJobId);
+            },
+            error: function(xhr) {
+                var message = 'Error de conexión con el servidor';
+                if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                    message = xhr.responseJSON.message;
+                }
+                finishBackupAsError(message);
             }
-            handleBackupSseDisconnect();
         });
-
-        backupEventSource.onerror = function() {
-            if (backupFinished) {
-                return;
-            }
-            handleBackupSseDisconnect();
-        };
     }
 
-    function handleBackupSseDisconnect() {
-        if (backupFinished) {
-            return;
+    function startBackupStatusPolling(jobId) {
+        if (jobId) {
+            backupJobId = jobId;
         }
 
-        if (backupEventSource) {
-            backupEventSource.close();
-        }
-
-        if (!backupSseRecovered) {
-            backupSseRecovered = true;
-            addBackupLogEntry('Canal SSE interrumpido. Recuperando estado del backup...');
-        }
-
-        updateBackupProgress(0, 'Conexión SSE interrumpida. Verificando estado del backup...', 'info');
-        startBackupStatusPolling();
-    }
-
-    function startBackupStatusPolling() {
         if (backupStatusPoller) {
             return;
         }
@@ -433,6 +380,7 @@ $(document).ready(function() {
             $.ajax({
                 url: 'plugins/system_updater/process_backup.php?action=status&format=json',
                 type: 'GET',
+                data: backupJobId ? {job_id: backupJobId} : {},
                 dataType: 'json',
                 cache: false,
                 success: function(response) {
@@ -498,6 +446,7 @@ $(document).ready(function() {
         $.ajax({
             url: 'plugins/system_updater/process_backup.php?action=cleanup&format=json',
             type: 'GET',
+            data: backupJobId ? {job_id: backupJobId} : {},
             cache: false
         });
     }
