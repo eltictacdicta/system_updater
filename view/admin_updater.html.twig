@@ -295,6 +295,7 @@ $(document).ready(function() {
     var coreUpdateLog = [];
     var coreUpdateFinished = false;
     var pendingCoreAction = null;
+    var pendingBackupChain = null;
 
     function getCoreOperationLabels(isReinstall) {
         if (isReinstall) {
@@ -358,7 +359,31 @@ $(document).ready(function() {
         $('#backup-loading').hide();
     }
 
-    function startBackup() {
+    function setCoreActionButtonsEnabled(enabled) {
+        $('#btn-update-core, #btn-reinstall-core').prop('disabled', !enabled);
+    }
+
+    function configureBackupModal(chainConfig) {
+        var isChained = !!chainConfig;
+        var isReinstall = isChained && !!chainConfig.isReinstall;
+        var operationText = isReinstall ? 'reinstalacion' : 'actualizacion';
+
+        if (!isChained) {
+            $('#backupModalTitle').html('<i class="fa fa-database fa-spin"></i> Creando Copia de Seguridad');
+            $('#backupStatusText').text('Iniciando copia de seguridad...');
+            $('#backupChainNotice').hide().text('');
+            return;
+        }
+
+        $('#backupModalTitle').html('<i class="fa fa-database fa-spin"></i> Copia Previa a la ' + (isReinstall ? 'Reinstalacion' : 'Actualizacion'));
+        $('#backupStatusText').text('Iniciando copia previa a la ' + operationText + ' del nucleo...');
+        $('#backupChainNotice')
+            .text('Al completarse la copia, se iniciara automaticamente la ' + operationText + ' del nucleo.')
+            .show();
+    }
+
+    function startBackup(chainConfig) {
+        pendingBackupChain = chainConfig || null;
         backupLog = [];
         backupFinished = false;
         backupJobId = '';
@@ -367,11 +392,15 @@ $(document).ready(function() {
             clearInterval(backupStatusPoller);
             backupStatusPoller = null;
         }
-        updateBackupProgress(0, 'Iniciando copia de seguridad...');
+        configureBackupModal(pendingBackupChain);
+        updateBackupProgress(0, pendingBackupChain ? 'Iniciando copia previa...' : 'Iniciando copia de seguridad...');
         $('#backupDetails').html('<small class="text-muted">Conectando al servidor...</small>');
         $('#backupCompleteBtn').hide();
         $('#backupErrorBtn').hide();
         $('#btn-create-backup').prop('disabled', true);
+        if (pendingBackupChain) {
+            setCoreActionButtonsEnabled(false);
+        }
 
         $('#backupProgressModal').modal('show');
 
@@ -452,10 +481,22 @@ $(document).ready(function() {
                         if (result.backup_name) {
                             addBackupLogEntry('Backup: ' + result.backup_name);
                         }
-                        $('#backupCompleteBtn').show();
                         $('#btn-create-backup').prop('disabled', false);
                         hideLoading();
                         cleanupBackupStatus();
+
+                        if (pendingBackupChain) {
+                            addBackupLogEntry('Iniciando automaticamente el siguiente paso...');
+                            var nextAction = pendingBackupChain;
+                            pendingBackupChain = null;
+                            setTimeout(function() {
+                                $('#backupProgressModal').modal('hide');
+                                startCoreUpdate(false, nextAction.isReinstall);
+                            }, 500);
+                            return;
+                        }
+
+                        $('#backupCompleteBtn').show();
                         return;
                     }
 
@@ -501,6 +542,10 @@ $(document).ready(function() {
         addBackupLogEntry('✗ ' + message);
         $('#backupErrorBtn').show();
         $('#btn-create-backup').prop('disabled', false);
+        if (pendingBackupChain) {
+            setCoreActionButtonsEnabled(true);
+            pendingBackupChain = null;
+        }
         hideLoading();
     }
 
@@ -589,7 +634,7 @@ $(document).ready(function() {
                 $('#coreUpdateCompleteBtn').attr('href', data.redirect);
             }
             $('#coreUpdateCompleteBtn').show();
-            $('#btn-update-core, #btn-reinstall-core').prop('disabled', false);
+                setCoreActionButtonsEnabled(true);
             coreUpdateEventSource.close();
         });
 
@@ -604,7 +649,7 @@ $(document).ready(function() {
                 addCoreUpdateLogEntry('✗ Error de conexión');
             }
             $('#coreUpdateErrorBtn').show();
-            $('#btn-update-core, #btn-reinstall-core').prop('disabled', false);
+            setCoreActionButtonsEnabled(true);
             coreUpdateEventSource.close();
         });
 
@@ -616,7 +661,7 @@ $(document).ready(function() {
             updateCoreProgress(0, 'Error de conexión con el servidor', 'danger');
             addCoreUpdateLogEntry('✗ Error de conexión');
             $('#coreUpdateErrorBtn').show();
-            $('#btn-update-core, #btn-reinstall-core').prop('disabled', false);
+            setCoreActionButtonsEnabled(true);
             coreUpdateEventSource.close();
         };
     }
@@ -673,7 +718,15 @@ $(document).ready(function() {
 
         var createBackup = $(this).data('backup') === 1;
         $('#coreActionWizardModal').modal('hide');
-        startCoreUpdate(createBackup, pendingCoreAction.isReinstall);
+
+        if (createBackup) {
+            startBackup({
+                isReinstall: pendingCoreAction.isReinstall
+            });
+            return;
+        }
+
+        startCoreUpdate(false, pendingCoreAction.isReinstall);
     });
 
     // Restaurar con SSE (Server-Sent Events)
@@ -1118,7 +1171,7 @@ $(document).ready(function() {
     <div class="modal-dialog modal-lg" role="document">
         <div class="modal-content">
             <div class="modal-header" style="background: #00a65a; color: white;">
-                <h4 class="modal-title">
+                <h4 class="modal-title" id="backupModalTitle">
                     <i class="fa fa-database fa-spin"></i> Creando Copia de Seguridad
                 </h4>
             </div>
@@ -1139,6 +1192,8 @@ $(document).ready(function() {
                     <i class="fa fa-spinner fa-spin"></i>
                     <span id="backupStatusText">Iniciando copia de seguridad...</span>
                 </div>
+
+                <div id="backupChainNotice" class="alert alert-warning text-center" style="display: none; margin-top: 15px;"></div>
 
                 <div id="backupDetails" class="well well-sm" style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background-color: #f5f5f5;">
                     <small class="text-muted">Esperando inicio...</small>

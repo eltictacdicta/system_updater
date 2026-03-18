@@ -114,16 +114,17 @@
                                                     <strong>Nueva versión:</strong>
                                                     <?php echo htmlspecialchars($fsc->updates['core_new_version']); ?>
                                                 </p>
-                                                <a href="<?php echo $fsc->url(); ?>&action=update_core"
-                                                    class="btn btn-warning"
-                                                    onclick="this.innerHTML='<i class=\'fa fa-spinner fa-spin\'></i> Actualizando...'; this.disabled=true; return confirm('¿Actualizar el núcleo? Se creará una copia de seguridad automáticamente.');">
+                                                <button type="button" id="btnUpdateCore" class="btn btn-warning">
                                                     <i class="fa fa-upload"></i> Actualizar Núcleo
-                                                </a>
+                                                </button>
                                             </div>
                                         <?php else: ?>
-                                            <div class="alert alert-success">
+                                            <div class="alert alert-success clearfix">
                                                 <i class="fa fa-check-circle"></i> El núcleo está actualizado (v
                                                 <?php echo $fsc->plugin_manager->version; ?>)
+                                                <button type="button" id="btnReinstallCore" class="btn btn-danger btn-xs pull-right">
+                                                    <i class="fa fa-exclamation-triangle"></i> Reinstalar Core
+                                                </button>
                                             </div>
                                         <?php endif; ?>
 
@@ -534,7 +535,7 @@
         <div class="modal-dialog modal-lg" role="document">
             <div class="modal-content">
                 <div class="modal-header bg-success" style="color: white;">
-                    <h4 class="modal-title">
+                    <h4 class="modal-title" id="backupModalTitle">
                         <i class="fa fa-database fa-spin"></i> Creando Copia de Seguridad
                     </h4>
                 </div>
@@ -556,6 +557,9 @@
                         <span id="backupStatusText">Iniciando copia de seguridad...</span>
                     </div>
 
+                    <div id="backupChainNotice" class="alert alert-warning text-center"
+                        style="display: none; margin-top: 15px;"></div>
+
                     <div id="backupDetails" class="well well-sm"
                         style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background-color: #f5f5f5;">
                         <small class="text-muted">Esperando inicio...</small>
@@ -575,391 +579,646 @@
         </div>
     </div>
 
+    <!-- Modal de Progreso de Actualización del Núcleo -->
+    <div class="modal fade" id="coreUpdateProgressModal" tabindex="-1" role="dialog" data-backdrop="static"
+        data-keyboard="false">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header" id="coreUpdateModalHeader" style="background: #f39c12; color: white;">
+                    <h4 class="modal-title" id="coreUpdateModalTitle">
+                        <i class="fa fa-cube fa-spin"></i> Actualizando Núcleo
+                    </h4>
+                </div>
+                <div class="modal-body">
+                    <div class="text-center" style="margin-bottom: 20px;">
+                        <i class="fa fa-download" id="coreUpdateModalHeroIcon" style="font-size: 48px; color: #f39c12;"></i>
+                    </div>
+
+                    <div class="progress" style="height: 30px;">
+                        <div id="coreUpdateProgressBar" class="progress-bar progress-bar-warning progress-bar-striped active"
+                            role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                            style="width: 0%; min-width: 2em; line-height: 30px;">
+                            0%
+                        </div>
+                    </div>
+
+                    <div id="coreUpdateStatusMessage" class="alert alert-info text-center" style="margin-top: 15px;">
+                        <i class="fa fa-spinner fa-spin"></i>
+                        <span id="coreUpdateStatusText">Iniciando actualización del núcleo...</span>
+                    </div>
+
+                    <div id="coreUpdateDetails" class="well well-sm"
+                        style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; background-color: #f5f5f5;">
+                        <small class="text-muted">Esperando inicio...</small>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <a href="index.php?page=admin_updater" id="coreUpdateCompleteBtn" class="btn btn-success"
+                        style="display: none;">
+                        <i class="fa fa-check"></i> Aceptar
+                    </a>
+                    <button type="button" id="coreUpdateErrorBtn" class="btn btn-danger" data-dismiss="modal"
+                        style="display: none;">
+                        <i class="fa fa-times"></i> Cerrar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Asistente para Actualización/Reinstalación del Núcleo -->
+    <div class="modal fade" id="coreActionWizardModal" tabindex="-1" role="dialog" aria-hidden="true">
+        <div class="modal-dialog" role="document">
+            <div class="modal-content">
+                <div class="modal-header" style="background: #3c8dbc; color: white;">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close"
+                        style="color: white; opacity: 0.9;">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                    <h4 class="modal-title" id="coreActionWizardTitle">Asistente del Núcleo</h4>
+                </div>
+                <div class="modal-body">
+                    <p id="coreActionWizardSummary" class="text-muted" style="margin-bottom: 20px;"></p>
+                    <div class="list-group" style="margin-bottom: 0;">
+                        <button type="button" class="list-group-item btn-core-action-option" data-backup="0">
+                            <h4 class="list-group-item-heading" id="coreActionPrimaryTitle">Actualizar ahora</h4>
+                            <p class="list-group-item-text" id="coreActionPrimaryDescription">Inicia el proceso sin copia previa.</p>
+                        </button>
+                        <button type="button" class="list-group-item btn-core-action-option" data-backup="1">
+                            <h4 class="list-group-item-heading" id="coreActionSecondaryTitle">Copia de seguridad + actualizar</h4>
+                            <p class="list-group-item-text" id="coreActionSecondaryDescription">Genera una copia y después ejecuta el proceso.</p>
+                        </button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-default" data-dismiss="modal">Cancelar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
-        (function () {
+        jQuery(function ($) {
             var restoreEventSource = null;
             var restoreLog = [];
+            var restoreFinished = false;
+            var backupJobId = '';
+            var backupStatusPoller = null;
+            var backupLastStatusMessage = '';
+            var backupLog = [];
+            var backupFinished = false;
+            var coreUpdateEventSource = null;
+            var coreUpdateLog = [];
+            var coreUpdateFinished = false;
+            var pendingCoreAction = null;
+            var pendingBackupChain = null;
+
+            function getCoreOperationLabels(isReinstall) {
+                if (isReinstall) {
+                    return {
+                        noun: 'reinstalación',
+                        nounDisplay: 'Reinstalación',
+                        action: 'reinstalar',
+                        actionDisplay: 'Reinstalar',
+                        gerund: 'Reinstalando',
+                        icon: 'fa-exclamation-triangle',
+                        iconColor: '#dd4b39',
+                        headerColor: '#dd4b39'
+                    };
+                }
+
+                return {
+                    noun: 'actualización',
+                    nounDisplay: 'Actualización',
+                    action: 'actualizar',
+                    actionDisplay: 'Actualizar',
+                    gerund: 'Actualizando',
+                    icon: 'fa-download',
+                    iconColor: '#f39c12',
+                    headerColor: '#f39c12'
+                };
+            }
+
+            function setCoreActionButtonsEnabled(enabled) {
+                $('#btnUpdateCore, #btnReinstallCore').prop('disabled', !enabled);
+            }
+
+            function openCoreActionWizard(isReinstall) {
+                var labels = getCoreOperationLabels(isReinstall);
+
+                pendingCoreAction = {
+                    isReinstall: isReinstall
+                };
+
+                $('#coreActionWizardTitle').text('Asistente de ' + labels.nounDisplay + ' del Núcleo');
+                $('#coreActionWizardSummary').text('Elige si quieres ' + labels.action + ' el núcleo directamente o crear una copia de seguridad previa antes de continuar.');
+                $('#coreActionPrimaryTitle').text(labels.actionDisplay + ' ahora');
+                $('#coreActionPrimaryDescription').text('Inicia la ' + labels.noun + ' del núcleo sin crear una copia previa.');
+                $('#coreActionSecondaryTitle').text('Copia de seguridad + ' + labels.actionDisplay.toLowerCase());
+                $('#coreActionSecondaryDescription').text('Crea una copia completa y, al terminar, ejecuta la ' + labels.noun + ' del núcleo.');
+                $('#coreActionWizardModal').modal('show');
+            }
+
+            function configureBackupModal(chainConfig) {
+                var isChained = !!chainConfig;
+                var isReinstall = isChained && !!chainConfig.isReinstall;
+                var operationText = isReinstall ? 'reinstalación' : 'actualización';
+
+                if (!isChained) {
+                    $('#backupModalTitle').html('<i class="fa fa-database fa-spin"></i> Creando Copia de Seguridad');
+                    $('#backupStatusText').text('Iniciando copia de seguridad...');
+                    $('#backupChainNotice').hide().text('');
+                    return;
+                }
+
+                $('#backupModalTitle').html('<i class="fa fa-database fa-spin"></i> Copia Previa a la ' + (isReinstall ? 'Reinstalación' : 'Actualización'));
+                $('#backupStatusText').text('Iniciando copia previa a la ' + operationText + ' del núcleo...');
+                $('#backupChainNotice').text('Al completarse la copia, se iniciará automáticamente la ' + operationText + ' del núcleo.').show();
+            }
+
+            function configureCoreUpdateModal(isReinstall) {
+                var labels = getCoreOperationLabels(isReinstall);
+                $('#coreUpdateModalHeader').css('background', labels.headerColor);
+                $('#coreUpdateModalTitle').html('<i class="fa ' + labels.icon + ' fa-spin"></i> ' + labels.gerund + ' Núcleo');
+                $('#coreUpdateModalHeroIcon').attr('class', 'fa ' + labels.icon).css({
+                    fontSize: '48px',
+                    color: labels.iconColor
+                });
+                $('#coreUpdateStatusText').text('Iniciando ' + labels.noun + ' del núcleo...');
+                $('#coreUpdateDetails').html('<small class="text-muted">Esperando inicio...</small>');
+            }
 
             function startRestore(file, type) {
-                // Reset UI
                 restoreLog = [];
-                updateProgress(0, 'Iniciando restauración...');
-                document.getElementById('restoreDetails').innerHTML = '<small class="text-muted">Conectando al servidor...</small>';
-                document.getElementById('restoreCompleteBtn').style.display = 'none';
-                document.getElementById('restoreErrorBtn').style.display = 'none';
+                restoreFinished = false;
+                updateRestoreProgress(0, 'Iniciando restauración...');
+                $('#restoreDetails').html('<small class="text-muted">Conectando al servidor...</small>');
+                $('#restoreCompleteBtn').hide();
+                $('#restoreErrorBtn').hide();
+                $('#restoreProgressModal').modal('show');
 
-                // Show modal
-                jQuery('#restoreProgressModal').modal('show');
-
-                // Start SSE connection
                 var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type);
-
                 restoreEventSource = new EventSource(sseUrl);
 
                 restoreEventSource.addEventListener('start', function (e) {
                     var data = JSON.parse(e.data);
-                    addLogEntry('Iniciando: ' + data.message);
+                    addRestoreLogEntry('Iniciando: ' + data.message);
                 });
 
                 restoreEventSource.addEventListener('init', function (e) {
                     var data = JSON.parse(e.data);
-                    updateProgress(data.percent, data.message);
-                    addLogEntry(data.message);
+                    updateRestoreProgress(data.percent, data.message);
+                    addRestoreLogEntry(data.message);
                 });
 
                 restoreEventSource.addEventListener('phase', function (e) {
                     var data = JSON.parse(e.data);
-                    addLogEntry('=== Fase: ' + data.message + ' ===');
+                    addRestoreLogEntry('=== Fase: ' + data.message + ' ===');
                 });
 
                 restoreEventSource.addEventListener('progress', function (e) {
                     var data = JSON.parse(e.data);
-                    updateProgress(data.percent, data.message);
+                    updateRestoreProgress(data.percent, data.message);
                     if (data.step && data.step.indexOf('_progress') === -1) {
-                        addLogEntry(data.message);
+                        addRestoreLogEntry(data.message);
                     }
                 });
 
                 restoreEventSource.addEventListener('complete', function (e) {
                     var data = JSON.parse(e.data);
-                    updateProgress(100, data.message, 'success');
-                    addLogEntry('✓ ' + data.message);
-                    document.getElementById('restoreCompleteBtn').style.display = 'inline-block';
+                    restoreFinished = true;
+                    updateRestoreProgress(100, data.message, 'success');
+                    addRestoreLogEntry('✓ ' + data.message);
+                    $('#restoreCompleteBtn').show();
                     restoreEventSource.close();
                 });
 
                 restoreEventSource.addEventListener('error', function (e) {
-                    var data = JSON.parse(e.data);
-                    updateProgress(data.percent || 0, data.message, 'danger');
-                    addLogEntry('✗ ERROR: ' + data.message);
-                    document.getElementById('restoreErrorBtn').style.display = 'inline-block';
+                    restoreFinished = true;
+                    try {
+                        var data = JSON.parse(e.data);
+                        updateRestoreProgress(data.percent || 0, data.message, 'danger');
+                        addRestoreLogEntry('✗ ERROR: ' + data.message);
+                    } catch (err) {
+                        updateRestoreProgress(0, 'Error de conexión con el servidor', 'danger');
+                        addRestoreLogEntry('✗ Error de conexión');
+                    }
+                    $('#restoreErrorBtn').show();
                     restoreEventSource.close();
                 });
 
                 restoreEventSource.onerror = function () {
-                    updateProgress(0, 'Error de conexión con el servidor', 'danger');
-                    addLogEntry('✗ Error de conexión');
-                    document.getElementById('restoreErrorBtn').style.display = 'inline-block';
+                    if (restoreFinished) {
+                        return;
+                    }
+                    restoreFinished = true;
+                    updateRestoreProgress(0, 'Error de conexión con el servidor', 'danger');
+                    addRestoreLogEntry('✗ Error de conexión');
+                    $('#restoreErrorBtn').show();
                     restoreEventSource.close();
                 };
             }
 
-            function updateProgress(percent, message, type) {
-                var progressBar = document.getElementById('restoreProgressBar');
-                var statusMessage = document.getElementById('restoreStatusMessage');
-                var statusText = document.getElementById('restoreStatusText');
+            function updateRestoreProgress(percent, message, type) {
+                var $progressBar = $('#restoreProgressBar');
+                var $statusMessage = $('#restoreStatusMessage');
+                var $statusText = $('#restoreStatusText');
 
-                progressBar.style.width = percent + '%';
-                progressBar.setAttribute('aria-valuenow', percent);
-                progressBar.textContent = percent + '%';
+                $progressBar.css('width', percent + '%');
+                $progressBar.attr('aria-valuenow', percent);
+                $progressBar.text(Math.round(percent) + '%');
+                $statusText.text(message);
 
-                statusText.textContent = message;
-
-                // Update alert type
-                statusMessage.className = 'alert text-center';
+                $statusMessage.removeClass('alert-info alert-success alert-danger');
                 if (type === 'success') {
-                    statusMessage.classList.add('alert-success');
-                    progressBar.classList.remove('active');
+                    $statusMessage.addClass('alert-success');
+                    $progressBar.removeClass('active progress-bar-danger');
                 } else if (type === 'danger') {
-                    statusMessage.classList.add('alert-danger');
-                    progressBar.classList.add('progress-bar-danger');
+                    $statusMessage.addClass('alert-danger');
+                    $progressBar.addClass('progress-bar-danger');
                 } else {
-                    statusMessage.classList.add('alert-info');
+                    $statusMessage.addClass('alert-info');
                 }
             }
 
-            function addLogEntry(message) {
+            function addRestoreLogEntry(message) {
                 restoreLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
-                var detailsDiv = document.getElementById('restoreDetails');
-                detailsDiv.innerHTML = restoreLog.map(function (entry) {
+                var $detailsDiv = $('#restoreDetails');
+                $detailsDiv.html(restoreLog.map(function (entry) {
                     return '<div>' + entry + '</div>';
-                }).join('');
-                detailsDiv.scrollTop = detailsDiv.scrollHeight;
+                }).join(''));
+                $detailsDiv.scrollTop($detailsDiv[0].scrollHeight);
             }
 
-            // Override restore link clicks
-            document.addEventListener('DOMContentLoaded', function () {
-                // Find all restore links and override them
-                var restoreLinks = document.querySelectorAll('a[href*="action=restore_complete"]');
-                restoreLinks.forEach(function (link) {
-                    link.addEventListener('click', function (e) {
-                        e.preventDefault();
+            function startBackup(chainConfig) {
+                pendingBackupChain = chainConfig || null;
+                backupLog = [];
+                backupFinished = false;
+                backupJobId = '';
+                backupLastStatusMessage = '';
 
-                        // Parse URL to get file parameter
-                        var url = new URL(link.href, window.location.href);
-                        var file = url.searchParams.get('file');
+                if (backupStatusPoller) {
+                    clearInterval(backupStatusPoller);
+                    backupStatusPoller = null;
+                }
 
-                        if (!file) {
-                            // Try to extract from the href directly
-                            var match = link.href.match(/file=([^&]+)/);
-                            if (match) {
-                                file = decodeURIComponent(match[1]);
-                            }
+                configureBackupModal(pendingBackupChain);
+                updateBackupProgress(0, pendingBackupChain ? 'Iniciando copia previa...' : 'Iniciando copia de seguridad...');
+                $('#backupDetails').html('<small class="text-muted">Conectando al servidor...</small>');
+                $('#backupCompleteBtn').hide();
+                $('#backupErrorBtn').hide();
+                $('#btnCreateBackup').prop('disabled', true);
+
+                if (pendingBackupChain) {
+                    setCoreActionButtonsEnabled(false);
+                }
+
+                $('#backupProgressModal').modal('show');
+
+                $.ajax({
+                    url: 'plugins/system_updater/process_backup.php?action=start&format=json',
+                    type: 'GET',
+                    dataType: 'json',
+                    cache: false,
+                    success: function (response) {
+                        if (!response || !response.success) {
+                            finishBackupAsError((response && response.message) || 'No se pudo iniciar el backup');
+                            return;
                         }
 
-                        if (file) {
-                            if (confirm('¿Restaurar TODO? Esta acción sobrescribirá los datos actuales. ¿Estás seguro?')) {
-                                startRestore(file, 'complete');
-                            }
-                        } else {
-                            alert('Error: No se pudo determinar el archivo de backup');
-                        }
-                    });
-                });
+                        backupJobId = response.job_id || '';
+                        addBackupLogEntry(response.message || 'Proceso de backup iniciado');
 
-                // Handle restore database links
-                var dbRestoreLinks = document.querySelectorAll('a[href*="action=restore_database"]');
-                dbRestoreLinks.forEach(function (link) {
-                    link.addEventListener('click', function (e) {
-                        e.preventDefault();
-
-                        var url = new URL(link.href, window.location.href);
-                        var file = url.searchParams.get('file');
-
-                        if (!file) {
-                            var match = link.href.match(/file=([^&]+)/);
-                            if (match) {
-                                file = decodeURIComponent(match[1]);
-                            }
+                        if (response.already_running && response.data && response.data.message) {
+                            updateBackupProgress(response.data.percent || 0, response.data.message, 'info');
+                            addBackupLogEntry('[recuperado] ' + response.data.message);
                         }
 
-                        if (file) {
-                            if (confirm('¿Restaurar solo la BASE DE DATOS?')) {
-                                startRestore(file, 'database');
-                            }
+                        startBackupStatusPolling(backupJobId);
+                    },
+                    error: function (xhr) {
+                        var message = 'Error de conexión con el servidor';
+                        if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                            message = xhr.responseJSON.message;
                         }
-                    });
-                });
-
-                // Handle restore files links
-                var filesRestoreLinks = document.querySelectorAll('a[href*="action=restore_files"]');
-                filesRestoreLinks.forEach(function (link) {
-                    link.addEventListener('click', function (e) {
-                        e.preventDefault();
-
-                        var url = new URL(link.href, window.location.href);
-                        var file = url.searchParams.get('file');
-
-                        if (!file) {
-                            var match = link.href.match(/file=([^&]+)/);
-                            if (match) {
-                                file = decodeURIComponent(match[1]);
-                            }
-                        }
-
-                        if (file) {
-                            if (confirm('¿Restaurar solo los ARCHIVOS?')) {
-                                startRestore(file, 'files');
-                            }
-                        }
-                    });
-                });
-
-                // ========================================
-                // BACKUP FUNCTIONALITY
-                // ========================================
-                var backupJobId = '';
-                var backupStatusPoller = null;
-                var backupFinished = false;
-                var backupLastStatusMessage = '';
-                var backupLog = [];
-
-                function startBackup() {
-                    backupLog = [];
-                    backupFinished = false;
-                    backupJobId = '';
-                    backupLastStatusMessage = '';
-                    if (backupStatusPoller) {
-                        clearInterval(backupStatusPoller);
-                        backupStatusPoller = null;
+                        finishBackupAsError(message);
                     }
-                    updateBackupProgress(0, 'Iniciando copia de seguridad...');
-                    document.getElementById('backupDetails').innerHTML = '<small class="text-muted">Conectando al servidor...</small>';
-                    document.getElementById('backupCompleteBtn').style.display = 'none';
-                    document.getElementById('backupErrorBtn').style.display = 'none';
-                    if (backupBtn) {
-                        backupBtn.disabled = true;
-                    }
+                });
+            }
 
-                    jQuery('#backupProgressModal').modal('show');
+            function startBackupStatusPolling(jobId) {
+                if (jobId) {
+                    backupJobId = jobId;
+                }
 
-                    jQuery.ajax({
-                        url: 'plugins/system_updater/process_backup.php?action=start&format=json',
+                if (backupStatusPoller) {
+                    return;
+                }
+
+                var attempts = 0;
+
+                var poll = function () {
+                    attempts++;
+
+                    $.ajax({
+                        url: 'plugins/system_updater/process_backup.php?action=status&format=json',
                         type: 'GET',
                         dataType: 'json',
                         cache: false,
+                        data: backupJobId ? { job_id: backupJobId } : {},
                         success: function (response) {
-                            if (!response || !response.success) {
-                                finishBackupAsError((response && response.message) || 'No se pudo iniciar el backup');
+                            var data = response && response.data ? response.data : null;
+
+                            if (!data) {
+                                if (attempts >= 10) {
+                                    finishBackupAsError('No se pudo recuperar el estado del backup en el servidor.');
+                                }
                                 return;
                             }
 
-                            backupJobId = response.job_id || '';
-                            addBackupLogEntry(response.message || 'Proceso de backup iniciado');
-
-                            if (response.already_running && response.data && response.data.message) {
-                                updateBackupProgress(response.data.percent || 0, response.data.message);
-                                addBackupLogEntry('[recuperado] ' + response.data.message);
+                            if (data.message && data.message !== backupLastStatusMessage) {
+                                backupLastStatusMessage = data.message;
+                                if (data.status === 'running' || data.status === 'queued') {
+                                    addBackupLogEntry('[estado] ' + data.message);
+                                }
                             }
 
-                            startBackupStatusPolling(backupJobId);
+                            if (data.status === 'complete') {
+                                var result = data.result || {};
+                                backupFinished = true;
+                                stopBackupStatusPolling();
+                                updateBackupProgress(100, result.message || data.message || '¡Copia de seguridad creada con éxito!', 'success');
+                                addBackupLogEntry('✓ ' + (result.message || data.message || 'Copia de seguridad completada'));
+                                if (result.backup_name) {
+                                    addBackupLogEntry('Backup: ' + result.backup_name);
+                                }
+                                $('#btnCreateBackup').prop('disabled', false);
+                                cleanupBackupStatus();
+
+                                if (pendingBackupChain) {
+                                    addBackupLogEntry('Iniciando automáticamente el siguiente paso...');
+                                    var nextAction = pendingBackupChain;
+                                    pendingBackupChain = null;
+                                    setTimeout(function () {
+                                        $('#backupProgressModal').modal('hide');
+                                        startCoreUpdate(false, nextAction.isReinstall);
+                                    }, 500);
+                                    return;
+                                }
+
+                                $('#backupCompleteBtn').show();
+                                return;
+                            }
+
+                            if (data.status === 'error') {
+                                finishBackupAsError(data.error || data.message || 'Error desconocido durante el backup');
+                                return;
+                            }
+
+                            updateBackupProgress(data.percent || 0, data.message || 'Procesando backup...', 'info');
                         },
-                        error: function (xhr) {
-                            var message = 'Error de conexión con el servidor';
-                            if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
-                                message = xhr.responseJSON.message;
+                        error: function () {
+                            if (attempts >= 10) {
+                                finishBackupAsError('Error de conexión con el servidor');
                             }
-                            finishBackupAsError(message);
                         }
                     });
+                };
+
+                poll();
+                backupStatusPoller = setInterval(poll, 2000);
+            }
+
+            function stopBackupStatusPolling() {
+                if (backupStatusPoller) {
+                    clearInterval(backupStatusPoller);
+                    backupStatusPoller = null;
                 }
+            }
 
-                function startBackupStatusPolling(jobId) {
-                    if (jobId) {
-                        backupJobId = jobId;
+            function cleanupBackupStatus() {
+                $.ajax({
+                    url: 'plugins/system_updater/process_backup.php?action=cleanup&format=json',
+                    type: 'GET',
+                    cache: false,
+                    data: backupJobId ? { job_id: backupJobId } : {}
+                });
+            }
+
+            function finishBackupAsError(message) {
+                backupFinished = true;
+                stopBackupStatusPolling();
+                updateBackupProgress(0, message, 'danger');
+                addBackupLogEntry('✗ ' + message);
+                $('#backupErrorBtn').show();
+                $('#btnCreateBackup').prop('disabled', false);
+                if (pendingBackupChain) {
+                    setCoreActionButtonsEnabled(true);
+                    pendingBackupChain = null;
+                }
+            }
+
+            function updateBackupProgress(percent, message, type) {
+                var $progressBar = $('#backupProgressBar');
+                var $statusMessage = $('#backupStatusMessage');
+                var $statusText = $('#backupStatusText');
+
+                $progressBar.css('width', percent + '%');
+                $progressBar.attr('aria-valuenow', percent);
+                $progressBar.text(Math.round(percent) + '%');
+                $statusText.text(message);
+
+                $statusMessage.removeClass('alert-info alert-success alert-danger');
+                if (type === 'success') {
+                    $statusMessage.addClass('alert-success');
+                    $progressBar.removeClass('active progress-bar-striped progress-bar-danger').addClass('progress-bar-success');
+                } else if (type === 'danger') {
+                    $statusMessage.addClass('alert-danger');
+                    $progressBar.removeClass('progress-bar-success').addClass('progress-bar-danger');
+                } else {
+                    $statusMessage.addClass('alert-info');
+                }
+            }
+
+            function addBackupLogEntry(message) {
+                backupLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
+                var $detailsDiv = $('#backupDetails');
+                $detailsDiv.html(backupLog.map(function (entry) {
+                    return '<div>' + entry + '</div>';
+                }).join(''));
+                $detailsDiv.scrollTop($detailsDiv[0].scrollHeight);
+            }
+
+            function startCoreUpdate(createBackup, isReinstall) {
+                configureCoreUpdateModal(isReinstall);
+                coreUpdateLog = [];
+                coreUpdateFinished = false;
+                updateCoreProgress(0, isReinstall ? 'Iniciando reinstalación del núcleo...' : 'Iniciando actualización del núcleo...');
+                $('#coreUpdateDetails').html('<small class="text-muted">Conectando al servidor...</small>');
+                $('#coreUpdateCompleteBtn').hide();
+                $('#coreUpdateErrorBtn').hide();
+                setCoreActionButtonsEnabled(false);
+                $('#coreUpdateProgressModal').modal('show');
+
+                var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0');
+                coreUpdateEventSource = new EventSource(sseUrl);
+
+                coreUpdateEventSource.addEventListener('start', function (e) {
+                    var data = JSON.parse(e.data);
+                    addCoreUpdateLogEntry('Iniciando: ' + data.message);
+                });
+
+                coreUpdateEventSource.addEventListener('init', function (e) {
+                    var data = JSON.parse(e.data);
+                    updateCoreProgress(data.percent, data.message);
+                    addCoreUpdateLogEntry(data.message);
+                });
+
+                coreUpdateEventSource.addEventListener('progress', function (e) {
+                    var data = JSON.parse(e.data);
+                    updateCoreProgress(data.percent, data.message);
+                    if (data.step && data.step.indexOf('_progress') === -1) {
+                        addCoreUpdateLogEntry(data.message);
                     }
+                });
 
-                    if (backupStatusPoller) {
+                coreUpdateEventSource.addEventListener('complete', function (e) {
+                    var data = JSON.parse(e.data);
+                    coreUpdateFinished = true;
+                    updateCoreProgress(100, data.message, 'success');
+                    addCoreUpdateLogEntry('✓ ' + data.message);
+                    if (data.installed_version) {
+                        addCoreUpdateLogEntry('Versión instalada: ' + data.installed_version);
+                    }
+                    if (data.redirect) {
+                        $('#coreUpdateCompleteBtn').attr('href', data.redirect);
+                    }
+                    $('#coreUpdateCompleteBtn').show();
+                    setCoreActionButtonsEnabled(true);
+                    coreUpdateEventSource.close();
+                });
+
+                coreUpdateEventSource.addEventListener('error', function (e) {
+                    coreUpdateFinished = true;
+                    try {
+                        var data = JSON.parse(e.data);
+                        updateCoreProgress(data.percent || 0, data.message, 'danger');
+                        addCoreUpdateLogEntry('✗ ERROR: ' + data.message);
+                    } catch (err) {
+                        updateCoreProgress(0, 'Error de conexión con el servidor', 'danger');
+                        addCoreUpdateLogEntry('✗ Error de conexión');
+                    }
+                    $('#coreUpdateErrorBtn').show();
+                    setCoreActionButtonsEnabled(true);
+                    coreUpdateEventSource.close();
+                });
+
+                coreUpdateEventSource.onerror = function () {
+                    if (coreUpdateFinished) {
                         return;
                     }
+                    coreUpdateFinished = true;
+                    updateCoreProgress(0, 'Error de conexión con el servidor', 'danger');
+                    addCoreUpdateLogEntry('✗ Error de conexión');
+                    $('#coreUpdateErrorBtn').show();
+                    setCoreActionButtonsEnabled(true);
+                    coreUpdateEventSource.close();
+                };
+            }
 
-                    var attempts = 0;
+            function updateCoreProgress(percent, message, type) {
+                var $progressBar = $('#coreUpdateProgressBar');
+                var $statusMessage = $('#coreUpdateStatusMessage');
+                var $statusText = $('#coreUpdateStatusText');
 
-                    var poll = function () {
-                        attempts++;
+                $progressBar.css('width', percent + '%');
+                $progressBar.attr('aria-valuenow', percent);
+                $progressBar.text(Math.round(percent) + '%');
+                $statusText.text(message);
 
-                        jQuery.ajax({
-                            url: 'plugins/system_updater/process_backup.php?action=status&format=json',
-                            type: 'GET',
-                            dataType: 'json',
-                            cache: false,
-                            data: backupJobId ? {job_id: backupJobId} : {},
-                            success: function (response) {
-                                var data = response && response.data ? response.data : null;
-
-                                if (!data) {
-                                    if (attempts >= 10) {
-                                        finishBackupAsError('No se pudo recuperar el estado del backup en el servidor.');
-                                    }
-                                    return;
-                                }
-
-                                if (data.message && data.message !== backupLastStatusMessage) {
-                                    backupLastStatusMessage = data.message;
-                                    if (data.status === 'queued' || data.status === 'running') {
-                                        addBackupLogEntry('[estado] ' + data.message);
-                                    }
-                                }
-
-                                if (data.status === 'complete') {
-                                    var result = data.result || {};
-                                    backupFinished = true;
-                                    stopBackupStatusPolling();
-                                    updateBackupProgress(100, result.message || data.message || '¡Copia de seguridad creada con éxito!', 'success');
-                                    addBackupLogEntry('✓ ' + (result.message || data.message || 'Copia de seguridad completada'));
-                                    if (result.backup_name) {
-                                        addBackupLogEntry('Backup: ' + result.backup_name);
-                                    }
-                                    document.getElementById('backupCompleteBtn').style.display = 'inline-block';
-                                    if (backupBtn) {
-                                        backupBtn.disabled = false;
-                                    }
-                                    cleanupBackupStatus();
-                                    return;
-                                }
-
-                                if (data.status === 'error') {
-                                    finishBackupAsError(data.error || data.message || 'Error desconocido durante el backup');
-                                    return;
-                                }
-
-                                updateBackupProgress(data.percent || 0, data.message || 'Procesando backup...');
-                            },
-                            error: function () {
-                                if (attempts >= 10) {
-                                    finishBackupAsError('Error de conexión con el servidor');
-                                }
-                            }
-                        });
-                    };
-
-                    poll();
-                    backupStatusPoller = setInterval(poll, 2000);
+                $statusMessage.removeClass('alert-info alert-success alert-danger');
+                if (type === 'success') {
+                    $statusMessage.addClass('alert-success');
+                    $progressBar.removeClass('active progress-bar-striped progress-bar-danger').addClass('progress-bar-warning');
+                } else if (type === 'danger') {
+                    $statusMessage.addClass('alert-danger');
+                    $progressBar.removeClass('progress-bar-warning').addClass('progress-bar-danger');
+                } else {
+                    $statusMessage.addClass('alert-info');
+                    $progressBar.removeClass('progress-bar-danger').addClass('progress-bar-warning');
                 }
+            }
 
-                function stopBackupStatusPolling() {
-                    if (backupStatusPoller) {
-                        clearInterval(backupStatusPoller);
-                        backupStatusPoller = null;
-                    }
-                }
+            function addCoreUpdateLogEntry(message) {
+                coreUpdateLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
+                var $detailsDiv = $('#coreUpdateDetails');
+                $detailsDiv.html(coreUpdateLog.map(function (entry) {
+                    return '<div>' + entry + '</div>';
+                }).join(''));
+                $detailsDiv.scrollTop($detailsDiv[0].scrollHeight);
+            }
 
-                function cleanupBackupStatus() {
-                    jQuery.ajax({
-                        url: 'plugins/system_updater/process_backup.php?action=cleanup&format=json',
-                        type: 'GET',
-                        cache: false,
-                        data: backupJobId ? {job_id: backupJobId} : {}
-                    });
-                }
-
-                function finishBackupAsError(message) {
-                    backupFinished = true;
-                    stopBackupStatusPolling();
-                    updateBackupProgress(0, message, 'danger');
-                    addBackupLogEntry('✗ ' + message);
-                    document.getElementById('backupErrorBtn').style.display = 'inline-block';
-                    if (backupBtn) {
-                        backupBtn.disabled = false;
-                    }
-                }
-
-                function updateBackupProgress(percent, message, type) {
-                    var progressBar = document.getElementById('backupProgressBar');
-                    var statusMessage = document.getElementById('backupStatusMessage');
-                    var statusText = document.getElementById('backupStatusText');
-
-                    progressBar.style.width = percent + '%';
-                    progressBar.setAttribute('aria-valuenow', percent);
-                    progressBar.textContent = percent + '%';
-
-                    statusText.textContent = message;
-
-                    // Update alert type
-                    statusMessage.className = 'alert text-center';
-                    if (type === 'success') {
-                        statusMessage.classList.add('alert-success');
-                        progressBar.classList.remove('active');
-                    } else if (type === 'danger') {
-                        statusMessage.classList.add('alert-danger');
-                        progressBar.classList.remove('progress-bar-success');
-                        progressBar.classList.add('progress-bar-danger');
-                    } else {
-                        statusMessage.classList.add('alert-info');
-                    }
-                }
-
-                function addBackupLogEntry(message) {
-                    backupLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
-                    var detailsDiv = document.getElementById('backupDetails');
-                    detailsDiv.innerHTML = backupLog.map(function (entry) {
-                        return '<div>' + entry + '</div>';
-                    }).join('');
-                    detailsDiv.scrollTop = detailsDiv.scrollHeight;
-                }
-
-                // Handle backup button click
-                var backupBtn = document.getElementById('btnCreateBackup');
-                if (backupBtn) {
-                    backupBtn.addEventListener('click', function (e) {
-                        e.preventDefault();
-                        if (confirm('¿Crear una copia de seguridad completa (base de datos + archivos)?')) {
-                            startBackup();
-                        }
-                    });
+            $('a[href*="action=restore_complete"]').on('click', function (e) {
+                e.preventDefault();
+                var file = new URL(this.href, window.location.href).searchParams.get('file');
+                if (file && confirm('¿Restaurar TODO? Esta acción sobrescribirá los datos actuales. ¿Estás seguro?')) {
+                    startRestore(file, 'complete');
                 }
             });
-        })();
+
+            $('a[href*="action=restore_database"]').on('click', function (e) {
+                e.preventDefault();
+                var file = new URL(this.href, window.location.href).searchParams.get('file');
+                if (file && confirm('¿Restaurar solo la BASE DE DATOS?')) {
+                    startRestore(file, 'database');
+                }
+            });
+
+            $('a[href*="action=restore_files"]').on('click', function (e) {
+                e.preventDefault();
+                var file = new URL(this.href, window.location.href).searchParams.get('file');
+                if (file && confirm('¿Restaurar solo los ARCHIVOS?')) {
+                    startRestore(file, 'files');
+                }
+            });
+
+            $('#btnCreateBackup').on('click', function (e) {
+                e.preventDefault();
+                if (confirm('¿Crear una copia de seguridad completa (base de datos + archivos)?')) {
+                    startBackup();
+                }
+            });
+
+            $('#btnUpdateCore').on('click', function (e) {
+                e.preventDefault();
+                openCoreActionWizard(false);
+            });
+
+            $('#btnReinstallCore').on('click', function (e) {
+                e.preventDefault();
+                openCoreActionWizard(true);
+            });
+
+            $('.btn-core-action-option').on('click', function (e) {
+                e.preventDefault();
+
+                if (!pendingCoreAction) {
+                    return;
+                }
+
+                var createBackup = $(this).data('backup') === 1;
+                $('#coreActionWizardModal').modal('hide');
+
+                if (createBackup) {
+                    startBackup({
+                        isReinstall: pendingCoreAction.isReinstall
+                    });
+                    return;
+                }
+
+                startCoreUpdate(false, pendingCoreAction.isReinstall);
+            });
+        });
     </script>
 
     <!-- Resumable.js para subida por chunks -->
