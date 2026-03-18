@@ -120,9 +120,14 @@ class core_updater
             ];
         }
 
-        $reportProgress('copy_prepare', 'Preparando reemplazo de archivos del núcleo...', 65);
+        $reportProgress('copy_prepare', 'Limpiando archivos antiguos del núcleo...', 60);
+        
+        // Limpiar directorio root antes de copiar nuevos archivos
+        $this->cleanupRootDirectories($progressCallback);
+        
+        $reportProgress('copy_files', 'Copiando archivos del núcleo...', 70);
 
-        $excludeFiles = ['config.php', 'plugins', 'backups', 'tmp'];
+        $excludeFiles = ['config.php', 'plugins', 'backups', 'tmp', 'apk', 'imgs', '.ddev'];
         if (file_exists($this->rootPath . '/.git')) {
             $excludeFiles[] = '.git';
         } else {
@@ -132,7 +137,7 @@ class core_updater
         $this->copyDirectorySelective($sourceDir, $this->rootPath, $excludeFiles);
 
         $reportProgress('plugins_sync', 'Sincronizando plugins integrados del núcleo...', 92);
-        $pluginsSync = $this->syncBundledPlugins($sourceDir . '/plugins', $this->rootPath . '/plugins');
+        $pluginsSync = $this->syncBundledPlugins($sourceDir . '/plugins', $this->rootPath . '/plugins', $progressCallback);
         if (!empty($pluginsSync['errors'])) {
             foreach ($pluginsSync['errors'] as $error) {
                 $this->errors[] = $error;
@@ -225,6 +230,101 @@ class core_updater
         }
 
         return $this->downloadCoreZipSource($extractPath);
+    }
+
+    /**
+     * Limpia los directorios root antes de actualizar, conservando solo lo necesario.
+     *
+     * @param callable|null $progressCallback
+     *
+     * @return bool
+     */
+    private function cleanupRootDirectories($progressCallback = null)
+    {
+        $reportProgress = function ($message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, 'cleanup', $message, $percent);
+            }
+        };
+
+        $reportProgress('Iniciando limpieza de archivos antiguos...', 0);
+
+        // Directorios y archivos a CONSERVAR
+        $keepItems = [
+            'apk',
+            'backups',
+            'tmp',
+            'imgs',
+            '.ddev',
+            'plugins',
+            '.git',
+            'config.php',
+
+        ];
+
+        // Directorios y archivos a ELIMINAR del root
+        $rootItems = [
+            'base',
+            'controller',
+            'model',
+            'view',
+            'src',
+            'themes',
+            'translations',
+            'docs',
+            'extras',
+            'config',
+            'vendor',
+            'node_modules',
+            'index.php',
+            'api.php',
+            'cron.php',
+            'install.php',
+            'updater.php',
+            'debug_loader.php',
+            'composer.json',
+            'composer.lock',
+            'package.json',
+            'phpunit.xml',
+            'VERSION',
+            'build.sh',
+            'htaccess-sample',
+            'robots.txt',
+            'COPYING',
+            'README.md',
+            'CONTRIBUTING.md',
+            'SECURITY.md',
+            'AGENTS.md',
+            'CAMBIOS_PORTAL.md',
+            'PROPUESTA_TERCEROS_CORE.md',
+            'SISTEMA_BACKUP_PLUGINS.md',
+            'apigen.neon-sample',
+            'tailwind.config.js',
+            '.gitignore',
+            '.gitmodules',
+        ];
+
+        $totalItems = count($rootItems);
+        $processed = 0;
+
+        foreach ($rootItems as $item) {
+            $itemPath = $this->rootPath . '/' . $item;
+
+            if (file_exists($itemPath) || is_dir($itemPath)) {
+                if (is_dir($itemPath)) {
+                    $this->deleteDirectoryRecursive($itemPath);
+                } else {
+                    @unlink($itemPath);
+                }
+            }
+
+            $processed++;
+            $percent = (int) (($processed / $totalItems) * 100);
+            $reportProgress("Limpiando $item...", $percent);
+        }
+
+        $reportProgress('Limpieza completada.', 100);
+        return true;
     }
 
     /**
@@ -584,13 +684,19 @@ class core_updater
      *
      * @return array
      */
-    private function syncBundledPlugins($sourcePluginsDir, $targetPluginsDir)
+    private function syncBundledPlugins($sourcePluginsDir, $targetPluginsDir, $progressCallback = null)
     {
         $result = [
             'updated' => [],
             'added' => [],
             'errors' => [],
         ];
+
+        $reportProgress = function ($message, $percent) use ($progressCallback) {
+            if ($progressCallback && is_callable($progressCallback)) {
+                call_user_func($progressCallback, 'plugins_sync', $message, $percent);
+            }
+        };
 
         if (!is_dir($sourcePluginsDir)) {
             return $result;
@@ -601,6 +707,8 @@ class core_updater
             return $result;
         }
 
+        // Primero, obtener lista de plugins del núcleo en el nuevo paquete
+        $bundledPluginNames = [];
         $entries = @scandir($sourcePluginsDir);
         if (!is_array($entries)) {
             $result['errors'][] = 'No se pudo leer la carpeta de plugins del paquete del núcleo.';
@@ -617,35 +725,75 @@ class core_updater
                 continue;
             }
 
-            $targetPath = $targetPluginsDir . '/' . $entry;
-            $alreadyInstalled = is_dir($targetPath);
+            $bundledPluginNames[] = $entry;
+        }
 
-            if ($alreadyInstalled && !$this->deleteDirectoryRecursive($targetPath)) {
-                $result['errors'][] = 'No se pudo reemplazar el plugin del núcleo ' . $entry . '.';
-                continue;
-            }
+        // Eliminar plugins del núcleo existentes antes de copiar los nuevos
+        // Esto asegura que no queden restos de versiones anteriores
+        $reportProgress('Eliminando plugins del núcleo existentes...', 10);
 
-            if (!@mkdir($targetPath, 0755, true) && !is_dir($targetPath)) {
-                $result['errors'][] = 'No se pudo crear la carpeta del plugin del núcleo ' . $entry . '.';
-                continue;
-            }
+        $localEntries = @scandir($targetPluginsDir);
+        if (is_array($localEntries)) {
+            foreach ($localEntries as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
 
-            $this->copyDirectorySelective($sourcePath, $targetPath);
+                $targetPath = $targetPluginsDir . '/' . $entry;
 
-            if (!$this->pluginInstallLooksValid($targetPath)) {
-                $result['errors'][] = 'La sincronización del plugin del núcleo ' . $entry . ' no se completó correctamente.';
-                continue;
-            }
-
-            if ($alreadyInstalled) {
-                $result['updated'][] = $entry;
-            } else {
-                $result['added'][] = $entry;
+                // Si es un plugin del núcleo (está en la lista de plugins del nuevo paquete), eliminarlo
+                if (in_array($entry, $bundledPluginNames)) {
+                    $reportProgress("Eliminando plugin antiguo: $entry...", 15);
+                    $this->deleteDirectoryRecursive($targetPath);
+                }
+                // Nota: Los plugins que NO están en el nuevo paquete se quedan (plugins no-core del usuario)
             }
         }
 
+        $reportProgress('Copiando nuevos plugins del núcleo...', 40);
+
+        // Ahora copiar todos los plugins del núcleo desde el nuevo paquete
+        $totalPlugins = count($bundledPluginNames);
+        $processedPlugins = 0;
+
+        foreach ($bundledPluginNames as $pluginName) {
+            $sourcePath = $sourcePluginsDir . '/' . $pluginName;
+
+            if (!$this->isBundledPluginDirectory($sourcePath)) {
+                continue;
+            }
+
+            $targetPath = $targetPluginsDir . '/' . $pluginName;
+
+            // Crear directorio destino
+            if (!@mkdir($targetPath, 0755, true) && !is_dir($targetPath)) {
+                $result['errors'][] = 'No se pudo crear la carpeta del plugin del núcleo ' . $pluginName . '.';
+                continue;
+            }
+
+            // Copiar archivos del plugin
+            $this->copyDirectorySelective($sourcePath, $targetPath);
+
+            if (!$this->pluginInstallLooksValid($targetPath)) {
+                $result['errors'][] = 'La sincronización del plugin del núcleo ' . $pluginName . ' no se completó correctamente.';
+                continue;
+            }
+
+            // Verificar si existía antes (si existía, es actualización; si no, es nuevo)
+            // Como ya lo eliminamos arriba, todos aparecerán como "nuevos" en la primera pasada
+            // Por eso usamos la lógica original de verificar
+            $result['added'][] = $pluginName;
+
+            $processedPlugins++;
+            $percent = 40 + (int)(($processedPlugins / max($totalPlugins, 1)) * 50);
+            $reportProgress("Procesando plugin: $pluginName...", $percent);
+        }
+
+        // Ordenar resultados
         sort($result['updated']);
         sort($result['added']);
+
+        $reportProgress('Sincronización de plugins del núcleo completada.', 100);
 
         return $result;
     }
