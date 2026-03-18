@@ -87,12 +87,6 @@
                     <strong><i class="fa fa-cube"></i> Nueva versión del núcleo disponible</strong>
                     <p>Versión actual: {{ fsc.plugin_manager.version }}<br>
                     Nueva versión: {{ fsc.updates.core_new_version }}</p>
-                    <div class="checkbox" style="margin-top: 10px; margin-bottom: 10px;">
-                        <label>
-                            <input type="checkbox" id="core-backup-before-update" checked>
-                            Crear copia de seguridad previa antes de actualizar el núcleo
-                        </label>
-                    </div>
                     <button type="button" class="btn btn-warning btn-sm" id="btn-update-core">
                         <i class="fa fa-sync"></i> Actualizar Núcleo
                     </button>
@@ -100,12 +94,6 @@
                 {% else %}
                 <div class="alert alert-success clearfix">
                     <i class="fa fa-check"></i> El núcleo está actualizado (v{{ fsc.plugin_manager.version }})
-                    <div class="checkbox" style="display: inline-block; margin: 0 10px 0 20px; vertical-align: middle;">
-                        <label style="font-weight: normal; margin-bottom: 0;">
-                            <input type="checkbox" id="core-backup-before-reinstall" checked>
-                            Crear copia previa
-                        </label>
-                    </div>
                     <button type="button" class="btn btn-danger btn-xs pull-right" id="btn-reinstall-core" style="margin-top: -2px;">
                         <i class="fa fa-exclamation-triangle"></i> Reinstalar Core
                     </button>
@@ -306,6 +294,61 @@ $(document).ready(function() {
     var coreUpdateEventSource = null;
     var coreUpdateLog = [];
     var coreUpdateFinished = false;
+    var pendingCoreAction = null;
+
+    function getCoreOperationLabels(isReinstall) {
+        if (isReinstall) {
+            return {
+                noun: 'reinstalacion',
+                nounDisplay: 'reinstalacion',
+                action: 'reinstalar',
+                actionDisplay: 'Reinstalar',
+                gerund: 'Reinstalando',
+                icon: 'fa-exclamation-triangle',
+                iconColor: '#dd4b39',
+                headerColor: '#dd4b39'
+            };
+        }
+
+        return {
+            noun: 'actualizacion',
+            nounDisplay: 'actualizacion',
+            action: 'actualizar',
+            actionDisplay: 'Actualizar',
+            gerund: 'Actualizando',
+            icon: 'fa-download',
+            iconColor: '#f39c12',
+            headerColor: '#f39c12'
+        };
+    }
+
+    function openCoreActionWizard(isReinstall) {
+        var labels = getCoreOperationLabels(isReinstall);
+
+        pendingCoreAction = {
+            isReinstall: isReinstall
+        };
+
+        $('#coreActionWizardTitle').text('Asistente de ' + labels.nounDisplay.charAt(0).toUpperCase() + labels.nounDisplay.slice(1) + ' del Nucleo');
+        $('#coreActionWizardSummary').text('Elige si quieres ' + labels.action + ' el nucleo directamente o crear una copia de seguridad previa antes de continuar.');
+        $('#coreActionPrimaryTitle').text(labels.actionDisplay + ' ahora');
+        $('#coreActionPrimaryDescription').text('Inicia la ' + labels.noun + ' del nucleo sin crear una copia previa.');
+        $('#coreActionSecondaryTitle').text('Copia de seguridad + ' + labels.actionDisplay.toLowerCase());
+        $('#coreActionSecondaryDescription').text('Crea una copia completa y, al terminar, ejecuta la ' + labels.noun + ' del nucleo.');
+        $('#coreActionWizardModal').modal('show');
+    }
+
+    function configureCoreUpdateModal(isReinstall) {
+        var labels = getCoreOperationLabels(isReinstall);
+        $('#coreUpdateModalHeader').css('background', labels.headerColor);
+        $('#coreUpdateModalTitle').html('<i class="fa ' + labels.icon + ' fa-spin"></i> ' + labels.gerund + ' Nucleo');
+        $('#coreUpdateModalHeroIcon').attr('class', 'fa ' + labels.icon).css({
+            fontSize: '48px',
+            color: labels.iconColor
+        });
+        $('#coreUpdateStatusText').text('Iniciando ' + labels.noun + ' del nucleo...');
+        $('#coreUpdateDetails').html('<small class="text-muted">Esperando inicio...</small>');
+    }
 
     function showLoading() {
         $('#backup-loading').show();
@@ -502,6 +545,7 @@ $(document).ready(function() {
     });
 
     function startCoreUpdate(createBackup, isReinstall) {
+        configureCoreUpdateModal(isReinstall);
         coreUpdateLog = [];
         coreUpdateFinished = false;
         updateCoreProgress(0, isReinstall ? 'Iniciando reinstalación del núcleo...' : 'Iniciando actualización del núcleo...');
@@ -612,26 +656,24 @@ $(document).ready(function() {
 
     $('#btn-update-core').click(function(e) {
         e.preventDefault();
-        var createBackup = $('#core-backup-before-update').is(':checked');
-        var confirmMessage = createBackup
-            ? '¿Actualizar el núcleo creando antes una copia de seguridad previa?'
-            : '¿Actualizar el núcleo sin crear copia de seguridad previa?';
-
-        if (confirm(confirmMessage)) {
-            startCoreUpdate(createBackup, false);
-        }
+        openCoreActionWizard(false);
     });
 
     $('#btn-reinstall-core').click(function(e) {
         e.preventDefault();
-        var createBackup = $('#core-backup-before-reinstall').is(':checked');
-        var confirmMessage = createBackup
-            ? '¿Seguro que quieres reinstalar el núcleo creando antes una copia previa?'
-            : '¿Seguro que quieres reinstalar el núcleo sin copia previa?';
+        openCoreActionWizard(true);
+    });
 
-        if (confirm(confirmMessage)) {
-            startCoreUpdate(createBackup, true);
+    $('.btn-core-action-option').click(function(e) {
+        e.preventDefault();
+
+        if (!pendingCoreAction) {
+            return;
         }
+
+        var createBackup = $(this).data('backup') === 1;
+        $('#coreActionWizardModal').modal('hide');
+        startCoreUpdate(createBackup, pendingCoreAction.isReinstall);
     });
 
     // Restaurar con SSE (Server-Sent Events)
@@ -1002,14 +1044,14 @@ $(document).ready(function() {
 <div class="modal fade" id="coreUpdateProgressModal" tabindex="-1" role="dialog" data-backdrop="static" data-keyboard="false">
     <div class="modal-dialog modal-lg" role="document">
         <div class="modal-content">
-            <div class="modal-header" style="background: #f39c12; color: white;">
-                <h4 class="modal-title">
-                    <i class="fa fa-cube fa-spin"></i> Actualizando Núcleo
+            <div class="modal-header" id="coreUpdateModalHeader" style="background: #f39c12; color: white;">
+                <h4 class="modal-title" id="coreUpdateModalTitle">
+                    <i class="fa fa-cube fa-spin"></i> Actualizando Nucleo
                 </h4>
             </div>
             <div class="modal-body">
                 <div class="text-center" style="margin-bottom: 20px;">
-                    <i class="fa fa-download" style="font-size: 48px; color: #f39c12;"></i>
+                    <i class="fa fa-download" id="coreUpdateModalHeroIcon" style="font-size: 48px; color: #f39c12;"></i>
                 </div>
 
                 <div class="progress" style="height: 30px;">
@@ -1036,6 +1078,36 @@ $(document).ready(function() {
                 <button type="button" id="coreUpdateErrorBtn" class="btn btn-danger" data-dismiss="modal" style="display: none;">
                     <i class="fa fa-times"></i> Cerrar
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal Asistente para Actualizacion/Reinstalacion del Nucleo -->
+<div class="modal fade" id="coreActionWizardModal" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header" style="background: #3c8dbc; color: white;">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close" style="color: white; opacity: 0.9;">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+                <h4 class="modal-title" id="coreActionWizardTitle">Asistente del Nucleo</h4>
+            </div>
+            <div class="modal-body">
+                <p id="coreActionWizardSummary" class="text-muted" style="margin-bottom: 20px;"></p>
+                <div class="list-group" style="margin-bottom: 0;">
+                    <button type="button" class="list-group-item btn-core-action-option" data-backup="0">
+                        <h4 class="list-group-item-heading" id="coreActionPrimaryTitle">Actualizar ahora</h4>
+                        <p class="list-group-item-text" id="coreActionPrimaryDescription">Inicia el proceso sin copia previa.</p>
+                    </button>
+                    <button type="button" class="list-group-item btn-core-action-option" data-backup="1">
+                        <h4 class="list-group-item-heading" id="coreActionSecondaryTitle">Copia de seguridad + actualizar</h4>
+                        <p class="list-group-item-text" id="coreActionSecondaryDescription">Genera una copia y despues ejecuta el proceso.</p>
+                    </button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Cancelar</button>
             </div>
         </div>
     </div>
