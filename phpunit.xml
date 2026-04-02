@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="../../vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="../../tests/bootstrap.php"
+         colors="true"
+         cacheDirectory="../../.phpunit.cache"
+>
+    <testsuites>
+        <testsuite name="system_updater">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+
+    <source>
+        <include>
+            <directory>lib</directory>
+            <directory>controller</directory>
+        </include>
+    </source>
+
+    <php>
+        <env name="SYMFONY_DEPRECATIONS_HELPER" value="weak"/>
+    </php>
+</phpunit>
