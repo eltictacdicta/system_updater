@@ -72,6 +72,11 @@ class admin_updater extends fs_controller
     public $plugin_manager;
 
     /**
+     * @var plugin_downloader
+     */
+    private $plugin_downloader;
+
+    /**
      * Constructor - registra la página en el menú admin
      */
     public function __construct()
@@ -87,11 +92,13 @@ class admin_updater extends fs_controller
         // Cargar dependencias
         require_once __DIR__ . '/../lib/backup_manager.php';
         require_once __DIR__ . '/../lib/core_updater.php';
+        require_once __DIR__ . '/../lib/plugin_downloader.php';
         require_once __DIR__ . '/../lib/updater_manager.php';
         require_once 'base/fs_plugin_manager.php';
 
         $this->backup_manager = new backup_manager();
         $this->updater_mgr = new updater_manager();
+        $this->plugin_downloader = new plugin_downloader();
         $this->plugin_manager = new fs_plugin_manager();
 
         $this->successMessage = '';
@@ -236,8 +243,8 @@ class admin_updater extends fs_controller
 
         // Comprobar actualizaciones de plugins instalados
         // Comparar versión local con versión remota de los plugins privados
-        if ($this->plugin_manager->is_private_plugins_enabled()) {
-            $remotePlugins = $this->plugin_manager->private_downloads();
+        if ($this->plugin_downloader->is_private_plugins_enabled()) {
+            $remotePlugins = $this->plugin_downloader->private_downloads();
             $installedPlugins = $this->plugin_manager->installed();
 
             foreach ($remotePlugins as $remote) {
@@ -449,14 +456,19 @@ class admin_updater extends fs_controller
     private function actionUpdatePlugin($pluginName)
     {
         // Intentar actualizar a través de la tienda de plugins privados
-        if ($this->plugin_manager->is_private_plugins_enabled()) {
-            $remotePlugins = $this->plugin_manager->private_downloads();
+        if ($this->plugin_downloader->is_private_plugins_enabled()) {
+            $remotePlugins = $this->plugin_downloader->private_downloads();
             foreach ($remotePlugins as $remote) {
                 if (($remote['nombre'] ?? '') === $pluginName && isset($remote['id'])) {
-                    if ($this->plugin_manager->download_private($remote['id'])) {
-                        $this->successMessage = "Plugin $pluginName actualizado correctamente.";
-                        $this->new_message($this->successMessage);
-                    } else {
+                    if ($this->plugin_downloader->download_private($remote['id'])) {
+                        if ($this->plugin_manager->enable($pluginName)) {
+                            $this->successMessage = "Plugin $pluginName actualizado y habilitado correctamente.";
+                            $this->new_message($this->successMessage);
+                        } else {
+                            $this->errorMessage = "Plugin $pluginName actualizado, pero no se pudo habilitar.";
+                            $this->new_error_msg($this->errorMessage);
+                        }
+                    } else {                    } else {
                         $this->errorMessage = "Error al actualizar el plugin $pluginName.";
                         $this->new_error_msg($this->errorMessage);
                     }

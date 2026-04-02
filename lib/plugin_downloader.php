@@ -17,6 +17,12 @@ class plugin_downloader
      * Evita que nuevas altas en el repositorio tarden demasiado en mostrarse.
      */
     private const PUBLIC_DOWNLOAD_CACHE_TTL = 180;
+    private const PUBLIC_DOWNLOAD_CATALOG_URLS = [
+        'https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json',
+        'https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/master/custom_plugins.json',
+        'https://raw.githubusercontent.com/eltictacdicta/fs-custom-plugins/main/custom_plugins.json',
+        'https://raw.githubusercontent.com/eltictacdicta/fs-custom-plugins/master/custom_plugins.json',
+    ];
 
     /**
      * @var array Lista de plugins públicos
@@ -110,10 +116,12 @@ class plugin_downloader
         }
 
         // Descargar lista de plugins de la comunidad
-        if (function_exists('fs_file_get_contents')) {
-            $json = @fs_file_get_contents('https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json', 10);
-        } else {
-            $json = @file_get_contents('https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json');
+        $json = false;
+        foreach ($this->getPublicDownloadCatalogUrls() as $url) {
+            $json = $this->fetchRemoteContents($url, 10);
+            if ($json && $json !== 'ERROR') {
+                break;
+            }
         }
 
         if ($json && $json !== 'ERROR') {
@@ -160,6 +168,38 @@ class plugin_downloader
         return $this->download_list;
     }
 
+    /**
+     * @return array
+     */
+    protected function getPublicDownloadCatalogUrls()
+    {
+        return self::PUBLIC_DOWNLOAD_CATALOG_URLS;
+    }
+
+    /**
+     * @param string $url
+     * @param int $timeout
+     *
+     * @return string|false
+     */
+protected function fetchRemoteContents($url, $timeout = 10)
+{
+    if (function_exists('fs_file_get_contents')) {
+        return @fs_file_get_contents($url, $timeout);
+    }
+
+    $context = stream_context_create([
+        'http' => [
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+        ],
+        'ssl' => [
+            'verify_peer' => true,
+        ],
+    ]);
+
+    return @file_get_contents($url, false, $context);
+}
     /**
      * Descarga e instala un plugin público
      * @param int $plugin_id ID del plugin

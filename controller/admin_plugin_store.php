@@ -77,10 +77,6 @@ class admin_plugin_store extends fs_controller
      */
     protected function private_core()
     {
-        $targetHash = $this->resolveTargetHash();
-        header('Location: index.php?page=admin_home#' . $targetHash);
-        exit;
-
         // Cargar el plugin_downloader
         require_once __DIR__ . '/../lib/plugin_downloader.php';
         require_once 'base/fs_plugin_manager.php';
@@ -96,23 +92,6 @@ class admin_plugin_store extends fs_controller
 
         // Cargar datos
         $this->loadData();
-    }
-
-    /**
-     * Decide qué pestaña del panel de administración abrir.
-     *
-     * @return string
-     */
-    private function resolveTargetHash()
-    {
-        $tab = (string) $this->getQueryParam('tab', 'public');
-        $action = (string) ($this->getQueryParam('action') ?: $this->getPostParam('action'));
-
-        if ($tab === 'private' || in_array($action, ['save_private_config', 'test_private_connection', 'delete_private_config', 'download_private'], true)) {
-            return 'privados';
-        }
-
-        return 'publicos';
     }
 
     /**
