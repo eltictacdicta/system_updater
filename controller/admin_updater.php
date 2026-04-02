@@ -468,7 +468,7 @@ class admin_updater extends fs_controller
                             $this->errorMessage = "Plugin $pluginName actualizado, pero no se pudo habilitar.";
                             $this->new_error_msg($this->errorMessage);
                         }
-                    } else {                    } else {
+                        } else {
                         $this->errorMessage = "Error al actualizar el plugin $pluginName.";
                         $this->new_error_msg($this->errorMessage);
                     }
