@@ -1,4 +1,194 @@
 <?php
+
+/**
+ * MySQL helper used by the standalone backup manager.
+ */
+class BackupMysqlHelper
+{
+    /**
+     * @var array
+     */
+    private $errors;
+
+    /**
+     * @param array $errors
+     */
+    public function __construct(array &$errors)
+    {
+        $this->errors =& $errors;
+    }
+
+    /**
+     * @param string $identifier
+     * @return string|false
+     */
+    public function quoteIdentifier($identifier)
+    {
+        $identifier = (string) $identifier;
+
+        if (!preg_match('/^\w+$/', $identifier)) {
+            $this->errors[] = 'Nombre de tabla no valido: ' . $identifier;
+            return false;
+        }
+
+        return '`' . $identifier . '`';
+    }
+
+    /**
+     * @param mysqli $mysqli
+     * @param string $tableName
+     * @return bool
+     */
+    public function tableExists($mysqli, $tableName)
+    {
+        $stmt = $mysqli->prepare('SHOW TABLES LIKE ?');
+        if (!$stmt) {
+            $this->errors[] = 'No se pudo preparar la comprobacion de tablas: ' . $mysqli->error;
+            return false;
+        }
+
+        $stmt->bind_param('s', $tableName);
+
+        if (!$stmt->execute()) {
+            $this->errors[] = 'No se pudo ejecutar la comprobacion de tablas: ' . $stmt->error;
+            $stmt->close();
+            return false;
+        }
+
+        $stmt->store_result();
+        $exists = $stmt->num_rows > 0;
+        $stmt->close();
+
+        return $exists;
+    }
+
+    /**
+     * @param mysqli $mysqli
+     * @param string $tableName
+     * @return mysqli_result|false
+     */
+    public function showCreateTable($mysqli, $tableName)
+    {
+        $quotedTable = $this->quoteIdentifier($tableName);
+        if ($quotedTable === false) {
+            return false;
+        }
+
+        return $mysqli->query('SHOW CREATE TABLE ' . $quotedTable);
+    }
+
+    /**
+     * @param mysqli $mysqli
+     * @param string $tableName
+     * @param int $resultMode
+     * @return mysqli_result|false
+     */
+    public function selectAllFromTable($mysqli, $tableName, $resultMode = MYSQLI_STORE_RESULT)
+    {
+        $quotedTable = $this->quoteIdentifier($tableName);
+        if ($quotedTable === false) {
+            return false;
+        }
+
+        return $mysqli->query('SELECT * FROM ' . $quotedTable, $resultMode);
+    }
+
+    /**
+     * @param mysqli $mysqli
+     * @param string $tableName
+     * @return bool
+     */
+    public function dropTableIfExists($mysqli, $tableName)
+    {
+        $quotedTable = $this->quoteIdentifier($tableName);
+        if ($quotedTable === false) {
+            return false;
+        }
+
+        return (bool) $mysqli->query('DROP TABLE IF EXISTS ' . $quotedTable);
+    }
+
+    /**
+     * @param mysqli $mysqli
+     * @param string $targetTable
+     * @param string $sourceTable
+     * @return bool
+     */
+    public function createTableLike($mysqli, $targetTable, $sourceTable)
+    {
+        $quotedTarget = $this->quoteIdentifier($targetTable);
+        $quotedSource = $this->quoteIdentifier($sourceTable);
+        if ($quotedTarget === false || $quotedSource === false) {
+            return false;
+        }
+
+        return (bool) $mysqli->query('CREATE TABLE ' . $quotedTarget . ' LIKE ' . $quotedSource);
+    }
+
+    /**
+     * @param mysqli $mysqli
+     * @param string $targetTable
+     * @param string $sourceTable
+     * @return bool
+     */
+    public function copyTableRows($mysqli, $targetTable, $sourceTable)
+    {
+        $quotedTarget = $this->quoteIdentifier($targetTable);
+        $quotedSource = $this->quoteIdentifier($sourceTable);
+        if ($quotedTarget === false || $quotedSource === false) {
+            return false;
+        }
+
+        return (bool) $mysqli->query('INSERT INTO ' . $quotedTarget . ' SELECT * FROM ' . $quotedSource);
+    }
+
+    /**
+     * @param mysqli $mysqli
+     * @param string $oldTableName
+     * @param string $newTableName
+     * @return bool
+     */
+    public function renameTable($mysqli, $oldTableName, $newTableName)
+    {
+        $quotedOld = $this->quoteIdentifier($oldTableName);
+        $quotedNew = $this->quoteIdentifier($newTableName);
+        if ($quotedOld === false || $quotedNew === false) {
+            return false;
+        }
+
+        return (bool) $mysqli->query('RENAME TABLE ' . $quotedOld . ' TO ' . $quotedNew);
+    }
+
+    /**
+     * @param string $tableName
+     * @param array $values
+     * @return string
+     */
+    public function buildInsertValuesStatement($tableName, array $values)
+    {
+        $quotedTable = $this->quoteIdentifier($tableName);
+        if ($quotedTable === false) {
+            return '';
+        }
+
+        return 'INSERT INTO ' . $quotedTable . ' VALUES (' . implode(', ', $values) . ");\n";
+    }
+
+    /**
+     * @param string $tableName
+     * @return string
+     */
+    public function buildDropTableStatement($tableName)
+    {
+        $quotedTable = $this->quoteIdentifier($tableName);
+        if ($quotedTable === false) {
+            return '';
+        }
+
+        return 'DROP TABLE IF EXISTS ' . $quotedTable . ";\n";
+    }
+}
+
 /**
  * Standalone Backup Manager for FSFramework
  * This class is designed to work independently from the framework,
@@ -40,6 +230,11 @@ class backup_manager
     private $messages = array();
 
     /**
+     * @var BackupMysqlHelper
+     */
+    private $mysqlHelper;
+
+    /**
      * Directories to exclude from file backups.
      * @var array
      */
@@ -70,6 +265,7 @@ class backup_manager
 
         // Store backups in /backups/ directory at project root
         $this->backupPath = $this->fsRoot . DIRECTORY_SEPARATOR . self::BACKUP_DIR;
+        $this->mysqlHelper = new BackupMysqlHelper($this->errors);
         $this->ensureBackupDirectoryExists();
     }
 
@@ -660,19 +856,19 @@ class backup_manager
             }
 
             // Get CREATE TABLE statement
-            $result = $mysqli->query("SHOW CREATE TABLE `" . $mysqli->real_escape_string($table) . "`");
+            $result = $this->mysqlHelper->showCreateTable($mysqli, $table);
             if ($result) {
                 $row = $result->fetch_array(MYSQLI_NUM);
                 gzwrite($gzFile, "\n-- --------------------------------------------------------\n");
                 gzwrite($gzFile, "-- Table structure for table `{$table}`\n");
                 gzwrite($gzFile, "-- --------------------------------------------------------\n\n");
-                gzwrite($gzFile, "DROP TABLE IF EXISTS `{$table}`;\n");
+                gzwrite($gzFile, $this->mysqlHelper->buildDropTableStatement($table));
                 gzwrite($gzFile, $row[1] . ";\n\n");
                 $result->free();
             }
 
             // Get table data
-            $result = $mysqli->query("SELECT * FROM `" . $mysqli->real_escape_string($table) . "`", MYSQLI_USE_RESULT);
+            $result = $this->mysqlHelper->selectAllFromTable($mysqli, $table, MYSQLI_USE_RESULT);
             if ($result) {
                 $columnCount = $result->field_count;
                 $hasData = false;
@@ -695,7 +891,7 @@ class backup_manager
                         }
                     }
 
-                    $insertLine = "INSERT INTO `{$table}` VALUES (" . implode(', ', $values) . ");\n";
+                    $insertLine = $this->mysqlHelper->buildInsertValuesStatement($table, $values);
                     $rowBuffer[] = $insertLine;
                     $bufferSize += strlen($insertLine);
 
@@ -854,19 +1050,19 @@ class backup_manager
             @set_time_limit(300);
 
             // Get CREATE TABLE statement
-            $result = $mysqli->query("SHOW CREATE TABLE `" . $mysqli->real_escape_string($table) . "`");
+            $result = $this->mysqlHelper->showCreateTable($mysqli, $table);
             if ($result) {
                 $row = $result->fetch_array(MYSQLI_NUM);
                 gzwrite($gzFile, "\n-- --------------------------------------------------------\n");
                 gzwrite($gzFile, "-- Table structure for table `{$table}`\n");
                 gzwrite($gzFile, "-- --------------------------------------------------------\n\n");
-                gzwrite($gzFile, "DROP TABLE IF EXISTS `{$table}`;\n");
+                gzwrite($gzFile, $this->mysqlHelper->buildDropTableStatement($table));
                 gzwrite($gzFile, $row[1] . ";\n\n");
                 $result->free();
             }
 
             // Get table data
-            $result = $mysqli->query("SELECT * FROM `" . $mysqli->real_escape_string($table) . "`", MYSQLI_USE_RESULT);
+            $result = $this->mysqlHelper->selectAllFromTable($mysqli, $table, MYSQLI_USE_RESULT);
             if ($result) {
                 $columnCount = $result->field_count;
                 $hasData = false;
@@ -889,7 +1085,7 @@ class backup_manager
                         }
                     }
 
-                    $insertLine = "INSERT INTO `{$table}` VALUES (" . implode(', ', $values) . ");\n";
+                    $insertLine = $this->mysqlHelper->buildInsertValuesStatement($table, $values);
                     $rowBuffer[] = $insertLine;
                     $bufferSize += strlen($insertLine);
 
@@ -1522,7 +1718,7 @@ class backup_manager
             $reportProgress('db_drop', "Eliminando {$totalTablesToDrop} tablas...", 62);
 
             foreach ($tables as $i => $table) {
-                $mysqli->query("DROP TABLE IF EXISTS `" . $mysqli->real_escape_string($table) . "`");
+                $this->mysqlHelper->dropTableIfExists($mysqli, $table);
 
                 if ($i % 10 === 0) {
                     $pct = 62 + (($i / $totalTablesToDrop) * 3);
@@ -2396,16 +2592,15 @@ class backup_manager
 
         foreach ($userTables as $table) {
             // Verificar si la tabla existe
-            $result = $mysqli->query("SHOW TABLES LIKE '{$table}'");
-            if ($result && $result->num_rows > 0) {
+            if ($this->mysqlHelper->tableExists($mysqli, $table)) {
                 $tempTable = '_' . $table . '_backup_temp';
 
                 // Eliminar tabla temporal anterior si existe
-                $mysqli->query("DROP TABLE IF EXISTS `{$tempTable}`");
+                $this->mysqlHelper->dropTableIfExists($mysqli, $tempTable);
 
                 // Crear copia de la tabla
-                $mysqli->query("CREATE TABLE `{$tempTable}` LIKE `{$table}`");
-                $mysqli->query("INSERT INTO `{$tempTable}` SELECT * FROM `{$table}`");
+                $this->mysqlHelper->createTableLike($mysqli, $tempTable, $table);
+                $this->mysqlHelper->copyTableRows($mysqli, $tempTable, $table);
 
                 $backedUp = true;
             }
@@ -2432,13 +2627,12 @@ class backup_manager
             $tempTable = '_' . $table . '_backup_temp';
 
             // Verificar si existe la tabla temporal
-            $result = $mysqli->query("SHOW TABLES LIKE '{$tempTable}'");
-            if ($result && $result->num_rows > 0) {
+            if ($this->mysqlHelper->tableExists($mysqli, $tempTable)) {
                 // Eliminar tabla actual si existe (puede estar corrupta)
-                $mysqli->query("DROP TABLE IF EXISTS `{$table}`");
+                $this->mysqlHelper->dropTableIfExists($mysqli, $table);
 
                 // Renombrar tabla temporal a la original
-                $mysqli->query("RENAME TABLE `{$tempTable}` TO `{$table}`");
+                $this->mysqlHelper->renameTable($mysqli, $tempTable, $table);
 
                 $restored = true;
             }
@@ -2460,7 +2654,7 @@ class backup_manager
 
         foreach ($userTables as $table) {
             $tempTable = '_' . $table . '_backup_temp';
-            $mysqli->query("DROP TABLE IF EXISTS `{$tempTable}`");
+            $this->mysqlHelper->dropTableIfExists($mysqli, $tempTable);
         }
     }
 }

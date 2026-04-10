@@ -502,8 +502,8 @@ class core_updater
                 curl_setopt($ch, CURLOPT_TIMEOUT, 120);
                 curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 20);
                 curl_setopt($ch, CURLOPT_USERAGENT, 'FSFramework-System-Updater');
-                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, true);
 
                 $result = curl_exec($ch);
                 $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
