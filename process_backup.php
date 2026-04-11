@@ -10,6 +10,8 @@
  */
 
 const FS_BACKUP_STALE_SECONDS = 1800;
+const FS_BACKUP_QUEUE_RECOVERY_SECONDS = 8;
+const FS_BACKUP_MAX_RECOVERY_ATTEMPTS = 2;
 
 if (PHP_SAPI === 'cli' && isset($argv) && is_array($argv)) {
     foreach (array_slice($argv, 1) as $argument) {
@@ -28,7 +30,9 @@ if (PHP_SAPI === 'cli' && isset($argv) && is_array($argv)) {
 @ini_set('memory_limit', '512M');
 @ignore_user_abort(true);
 
-define('FS_FOLDER', dirname(dirname(__DIR__)));
+if (!defined('FS_FOLDER')) {
+    define('FS_FOLDER', dirname(dirname(__DIR__)));
+}
 
 function backup_json_encode(array $payload)
 {
@@ -229,6 +233,63 @@ function mark_stale_job_if_needed(array $data, $sessionKey)
     );
 }
 
+function should_attempt_queue_recovery(array $data)
+{
+    $status = $data['status'] ?? 'idle';
+    $jobId = sanitize_token($data['job_id'] ?? '');
+    $timestamp = (int) ($data['timestamp'] ?? 0);
+    $recoveryAttempts = (int) ($data['recovery_attempts'] ?? 0);
+
+    if ($status !== 'queued' || $jobId === '' || $timestamp <= 0) {
+        return false;
+    }
+
+    if ($recoveryAttempts >= FS_BACKUP_MAX_RECOVERY_ATTEMPTS) {
+        return false;
+    }
+
+    return (time() - $timestamp) >= FS_BACKUP_QUEUE_RECOVERY_SECONDS;
+}
+
+function recover_queued_job(array $data, $sessionKey)
+{
+    $jobId = sanitize_token($data['job_id'] ?? '');
+    $sessionKey = sanitize_token($sessionKey);
+
+    if ($jobId === '' || $sessionKey === '' || !should_attempt_queue_recovery($data)) {
+        return false;
+    }
+
+    $message = 'El worker en segundo plano no respondió. Reintentando el backup desde la petición actual...';
+
+    $updatedData = save_progress(
+        $jobId,
+        $sessionKey,
+        'queued',
+        $message,
+        max(2, (int) ($data['percent'] ?? 0)),
+        null,
+        [
+            'created_at' => $data['created_at'] ?? time(),
+            'launch_mode' => $data['launch_mode'] ?? 'recovery',
+            'pid' => $data['pid'] ?? null,
+            'recovery_triggered_at' => time(),
+            'recovery_mode' => 'status-shutdown',
+        ],
+        'queued'
+    );
+
+    respond_and_continue([
+        'active' => true,
+        'job_id' => $jobId,
+        'data' => $updatedData,
+        'recovery_started' => true,
+    ]);
+
+    run_backup_job($jobId, $sessionKey);
+    exit;
+}
+
 function has_active_job($sessionKey, &$data = null)
 {
     $data = load_progress('', $sessionKey);
@@ -382,19 +443,27 @@ function run_backup_job($jobId, $sessionKey)
     }
 
     $pid = function_exists('getmypid') ? getmypid() : null;
+    $progressData = load_progress($jobId, $sessionKey);
+    $progressExtra = [];
+
+    if (is_array($progressData) && isset($progressData['recovery_triggered_at'])) {
+        $progressExtra['recovery_attempts'] = (int) ($progressData['recovery_attempts'] ?? 0) + 1;
+        $progressExtra['recovery_triggered_at'] = $progressData['recovery_triggered_at'];
+        $progressExtra['recovery_mode'] = $progressData['recovery_mode'] ?? 'status-shutdown';
+    }
 
     try {
         save_progress($jobId, $sessionKey, 'init', 'Preparando copia de seguridad...', 2, null, [
             'pid' => $pid,
             'started_at' => time(),
-        ], 'running');
+        ] + $progressExtra, 'running');
 
         $backupManager = new backup_manager(FS_FOLDER);
 
-        $progressCallback = function ($step, $message, $percent) use ($jobId, $sessionKey, $pid) {
+        $progressCallback = function ($step, $message, $percent) use ($jobId, $sessionKey, $pid, $progressExtra) {
             save_progress($jobId, $sessionKey, $step, $message, $percent, null, [
                 'pid' => $pid,
-            ], 'running');
+            ] + $progressExtra, 'running');
         };
 
         $result = $backupManager->create_backup_with_progress('', true, $progressCallback);
@@ -413,7 +482,7 @@ function run_backup_job($jobId, $sessionKey)
                 'pid' => $pid,
                 'finished_at' => time(),
                 'result' => $payload,
-            ], 'complete');
+            ] + $progressExtra, 'complete');
         } else {
             $errors = $backupManager->get_errors();
             $errorMessage = !empty($errors) ? implode('; ', $errors) : 'Error desconocido durante el backup';
@@ -421,20 +490,24 @@ function run_backup_job($jobId, $sessionKey)
             save_progress($jobId, $sessionKey, 'error', $errorMessage, 0, $errorMessage, [
                 'pid' => $pid,
                 'finished_at' => time(),
-            ], 'error');
+            ] + $progressExtra, 'error');
         }
     } catch (Throwable $exception) {
         $errorMessage = 'Excepción: ' . $exception->getMessage();
         save_progress($jobId, $sessionKey, 'error', $errorMessage, 0, $errorMessage, [
             'pid' => $pid,
             'finished_at' => time(),
-        ], 'error');
+        ] + $progressExtra, 'error');
     }
 
     @flock($lockHandle, LOCK_UN);
     fclose($lockHandle);
 
     return true;
+}
+
+if (defined('SYSTEM_UPDATER_PROCESS_BACKUP_BOOTSTRAP_ONLY') && SYSTEM_UPDATER_PROCESS_BACKUP_BOOTSTRAP_ONLY) {
+    return;
 }
 
 if (!file_exists(FS_FOLDER . '/config.php')) {
@@ -534,6 +607,10 @@ switch ($action) {
         $data = load_progress($jobId, $sessionKey);
 
         if (is_array($data)) {
+            if (should_attempt_queue_recovery($data)) {
+                recover_queued_job($data, $sessionKey);
+            }
+
             $data = mark_stale_job_if_needed($data, $sessionKey);
             respond_json([
                 'active' => in_array($data['status'] ?? 'idle', ['queued', 'running'], true),
