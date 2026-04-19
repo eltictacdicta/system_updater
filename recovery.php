@@ -67,8 +67,10 @@ if (!$user && isset($_POST['nick']) && isset($_POST['password'])) {
     $result = $stmt->get_result();
 
     if ($row = $result->fetch_assoc()) {
-        // Verificar contraseña (md5 o sha1 según versión antigua, o password_verify para nuevas)
-        if (sha1($password) === $row['password'] || md5($password) === $row['password'] || password_verify($password, $row['password'])) {
+        // Delegar hashes legacy al puente legacy_support y mantener password_verify para hashes modernos.
+        if (password_verify($password, $row['password'])
+            || (class_exists('FSFramework\\Plugins\\legacy_support\\LegacyCompatibility')
+                && \FSFramework\Plugins\legacy_support\LegacyCompatibility::verifyLegacyPassword($row['password'], $password))) {
             if ($row['admin']) {
                 $_SESSION['user_id'] = $row['nick'];
                 $user = $row;
