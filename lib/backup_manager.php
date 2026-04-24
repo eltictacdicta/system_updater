@@ -41,13 +41,16 @@ class BackupMysqlHelper
      */
     public function tableExists($mysqli, $tableName)
     {
-        $stmt = $mysqli->prepare('SHOW TABLES LIKE ?');
+        $dbName = $mysqli->query('SELECT DATABASE()')->fetch_row()[0] ?? '';
+        $stmt = $mysqli->prepare(
+            'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1'
+        );
         if (!$stmt) {
             $this->errors[] = 'No se pudo preparar la comprobacion de tablas: ' . $mysqli->error;
             return false;
         }
 
-        $stmt->bind_param('s', $tableName);
+        $stmt->bind_param('ss', $dbName, $tableName);
 
         if (!$stmt->execute()) {
             $this->errors[] = 'No se pudo ejecutar la comprobacion de tablas: ' . $stmt->error;
