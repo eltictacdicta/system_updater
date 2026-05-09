@@ -47,6 +47,63 @@
 {% endif %}
 
 <div class="row" style="margin: 10px;">
+    <div class="col-md-12">
+        <div class="panel panel-{% if fsc.maintenanceStatus and fsc.maintenanceStatus.active %}warning{% else %}default{% endif %}">
+            <div class="panel-heading">
+                <h3 class="panel-title"><i class="fa fa-wrench"></i> Modo mantenimiento</h3>
+            </div>
+            <div class="panel-body">
+                <div class="row">
+                    <div class="col-md-8">
+                        {% if fsc.maintenanceStatus and fsc.maintenanceStatus.active %}
+                        <form method="post" action="{{ fsc.url()|raw }}">
+                            <input type="hidden" name="action" value="disable_maintenance">
+                            {{ csrf_field() }}
+                            <button type="submit" class="btn btn-default" {% if fsc.maintenanceStatus.forced %}disabled title="Desactiva primero FS_FORCE_MAINTENANCE en config.php"{% else %}data-confirm-message="¿Desactivar el modo mantenimiento?"{% endif %}>
+                                <i class="fa fa-play"></i> Desactivar mantenimiento
+                            </button>
+                        </form>
+                        {% else %}
+                        {% set stealthReady = fsc.maintenanceStatus and fsc.maintenanceStatus.stealth and fsc.maintenanceStatus.stealth.ready %}
+                        <form method="post" action="{{ fsc.url()|raw }}">
+                            <input type="hidden" name="action" value="enable_maintenance">
+                            {{ csrf_field() }}
+                            {% if not stealthReady %}
+                            <div class="alert alert-warning">
+                                <i class="fa fa-eye-slash"></i>
+                                Activa primero el modo stealth para garantizar una ruta de acceso del administrador durante el mantenimiento.
+                                <a href="index.php?page=admin_stealth" class="btn btn-xs btn-warning" style="margin-left: 10px;">
+                                    <i class="fa fa-cog"></i> Configurar stealth
+                                </a>
+                            </div>
+                            {% endif %}
+                            <div class="form-group">
+                                <label for="maintenance_message">Mensaje visible</label>
+                                <input type="text" class="form-control" id="maintenance_message" name="maintenance_message" value="{{ (fsc.maintenanceStatus ? fsc.maintenanceStatus.message : '')|e('html_attr') }}" placeholder="Mantenimiento programado en curso.">
+                            </div>
+                            <div class="form-group">
+                                <label for="retry_after">Retry-After (segundos)</label>
+                                <input type="number" min="60" step="60" class="form-control" id="retry_after" name="retry_after" value="{{ fsc.maintenanceStatus and fsc.maintenanceStatus.state ? fsc.maintenanceStatus.state.retry_after|default(300) : 300 }}">
+                            </div>
+                            <button type="submit" class="btn btn-warning" {% if fsc.maintenanceStatus and fsc.maintenanceStatus.forced %}disabled title="Desactiva primero FS_FORCE_MAINTENANCE en config.php"{% elseif not stealthReady %}disabled title="Activa primero el modo stealth desde admin_stealth"{% endif %}>
+                                <i class="fa fa-power-off"></i> Activar mantenimiento
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-4">
+                        <div class="well well-sm" style="margin-bottom: 0;">
+                            <strong>Uso recomendado</strong>
+                            <p class="small" style="margin: 8px 0 0;">Actívalo antes de cambios manuales en BD o tareas delicadas. Las actualizaciones críticas desde este panel ya lo activan automáticamente.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row" style="margin: 10px;">
     {# Panel de Actualizaciones #}
     <div class="col-md-6">
         <div class="panel panel-primary">
@@ -63,7 +120,7 @@
                     <p class="small" style="margin-bottom: 10px;">
                         La actualización se preparará primero y el reemplazo final se realizará desde el cargador externo para evitar sobrescribir el plugin mientras se está ejecutando.
                     </p>
-                    <a href="{{ fsc.url()|raw }}&action=prepare_updater_update" class="btn btn-danger btn-sm" onclick="return confirm('¿Preparar y aplicar la actualización del plugin system_updater? El intercambio final se hará desde updater.php para mantener la estabilidad.');">
+                    <a href="{{ fsc.url()|raw }}&action=prepare_updater_update" class="btn btn-danger btn-sm" data-confirm-message="¿Preparar y aplicar la actualización del plugin system_updater? El intercambio final se hará desde updater.php para mantener la estabilidad.">
                         <i class="fa fa-sync"></i> Actualizar Actualizador
                     </a>
                 </div>
@@ -119,7 +176,7 @@
                             <td>{{ plugin.current_version }}</td>
                             <td><span class="label label-info">{{ plugin.new_version }}</span></td>
                             <td>
-                                <a href="{{ fsc.url()|raw }}&action=update_plugin&plugin={{ plugin.name }}" class="btn btn-xs btn-primary" onclick="return confirm('¿Actualizar {{ plugin.name }}?');">
+                                <a href="{{ fsc.url()|raw }}&action=update_plugin&plugin={{ plugin.name }}" class="btn btn-xs btn-primary" data-confirm-message="¿Actualizar {{ plugin.name|e('html_attr') }}?">
                                     <i class="fa fa-sync"></i>
                                 </a>
                             </td>
@@ -281,7 +338,7 @@
     </div>
 </div>
 
-<script type="text/javascript">
+<script {{ csp_nonce_attr() }} type="text/javascript">
 $(document).ready(function() {
     var restoreEventSource = null;
     var restoreLog = [];
@@ -888,13 +945,22 @@ $(document).ready(function() {
             });
         }
     });
+
+    // Confirmation dialog for elements with data-confirm-message
+    $(document).on('click', '[data-confirm-message]', function(e) {
+        var message = $(this).data('confirm-message');
+        if (message && !window.confirm(message)) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    });
 });
 </script>
 
 <!-- Resumable.js para subida por chunks -->
-<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
+<script {{ csp_nonce_attr() }} type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
 
-<script>
+<script {{ csp_nonce_attr() }}>
 $(document).ready(function() {
     // ========================================
     // BACKUP UPLOAD FUNCTIONALITY

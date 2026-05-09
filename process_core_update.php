@@ -53,6 +53,8 @@ if (file_exists(FS_FOLDER . '/config.php')) {
     exit;
 }
 
+require_once __DIR__ . '/lib/maintenance_mode_compat.php';
+
 if (defined('FS_SESSION_NAME')) {
     session_name(FS_SESSION_NAME);
 }
@@ -88,6 +90,25 @@ switch ($action) {
         send_sse('start', ['message' => 'Iniciando ' . $operationLabel . ' del núcleo...', 'percent' => 0]);
         save_progress('init', 'Inicializando...', 0);
 
+        $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
+        if (empty($stealthStatus['ready'])) {
+            $errorMsg = 'Activa primero el modo stealth desde admin_stealth para mantener una ruta de acceso del administrador durante el mantenimiento.';
+            save_progress('error', $errorMsg, 0, $errorMsg);
+            send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+            exit;
+        }
+
+        if (!fs_maintenance_mode::writeLock([
+            'message' => 'Actualización del núcleo en curso.',
+            'source' => 'system_updater.core_update',
+            'retry_after' => 300,
+        ])) {
+            $errorMsg = 'No se pudo activar el modo mantenimiento antes de iniciar la actualización del núcleo.';
+            save_progress('error', $errorMsg, 0, $errorMsg);
+            send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+            exit;
+        }
+
         try {
             $updater = new core_updater(FS_FOLDER);
             send_sse('init', ['message' => 'Verificando entorno de ' . $operationLabel . '...', 'percent' => 2]);
@@ -112,6 +133,8 @@ switch ($action) {
             $errorMsg = 'Excepción: ' . $e->getMessage();
             save_progress('error', $errorMsg, 0, $errorMsg);
             send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+        } finally {
+            fs_maintenance_mode::clearLock();
         }
 
         @unlink($progressFile);

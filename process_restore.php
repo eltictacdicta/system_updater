@@ -43,6 +43,8 @@ if (file_exists(FS_FOLDER . '/config.php')) {
     exit;
 }
 
+require_once __DIR__ . '/lib/maintenance_mode_compat.php';
+
 // Iniciar sesión para mantener estado
 // Usar el nombre de sesión configurado o el por defecto de PHP (PHPSESSID)
 if (defined('FS_SESSION_NAME')) {
@@ -149,6 +151,27 @@ switch ($action) {
         }
         
         send_sse('init', ['message' => 'Backup encontrado. Iniciando restauración...', 'percent' => 3]);
+
+        $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
+        if (empty($stealthStatus['ready'])) {
+            $error = 'Activa primero el modo stealth desde admin_stealth para mantener una ruta de acceso del administrador durante el mantenimiento.';
+            save_progress('error', $error, 0, $error);
+            send_sse('error', ['message' => $error, 'percent' => 0]);
+            @unlink($progressFile);
+            exit;
+        }
+
+        if (!fs_maintenance_mode::writeLock([
+            'message' => 'Restauración del sistema en curso.',
+            'source' => 'system_updater.restore',
+            'retry_after' => 300,
+        ])) {
+            $error = 'No se pudo activar el modo mantenimiento antes de iniciar la restauración.';
+            save_progress('error', $error, 0, $error);
+            send_sse('error', ['message' => $error, 'percent' => 0]);
+            @unlink($progressFile);
+            exit;
+        }
         
         // Ejecutar restauración según el tipo
         $result = null;
@@ -186,6 +209,8 @@ switch ($action) {
             $errorMsg = 'Excepción: ' . $e->getMessage();
             save_progress('error', $errorMsg, 0, $errorMsg);
             send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+        } finally {
+            fs_maintenance_mode::clearLock();
         }
         
         // Limpiar archivo de progreso

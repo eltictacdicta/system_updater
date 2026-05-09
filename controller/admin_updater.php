@@ -18,6 +18,7 @@
  */
 
 require_once 'base/fs_controller.php';
+require_once __DIR__ . '/../lib/maintenance_mode_compat.php';
 
 class admin_updater extends fs_controller
 {
@@ -72,6 +73,11 @@ class admin_updater extends fs_controller
     public $plugin_manager;
 
     /**
+     * @var array|null Estado actual del modo mantenimiento
+     */
+    public $maintenanceStatus;
+
+    /**
      * @var plugin_downloader
      */
     private $plugin_downloader;
@@ -82,6 +88,7 @@ class admin_updater extends fs_controller
     public function __construct()
     {
         parent::__construct(__CLASS__, 'Actualizador', 'admin', TRUE, TRUE);
+        $this->maintenanceStatus = $this->buildMaintenanceStatus();
     }
 
     /**
@@ -104,8 +111,16 @@ class admin_updater extends fs_controller
         $this->successMessage = '';
         $this->errorMessage = '';
 
-        // Verificar mensajes de éxito por parámetro GET
         $success = $this->getQueryParam('success');
+        $error = $this->getQueryParam('error');
+
+        // Procesar acciones
+        $this->processActions();
+
+        // Cargar datos
+        $this->loadData();
+
+        // Verificar mensajes de éxito o error por parámetro GET después de recalcular el estado.
         if ($success === 'backup') {
             $this->successMessage = 'Copia de seguridad creada correctamente.';
         } elseif ($success === '1') {
@@ -114,18 +129,29 @@ class admin_updater extends fs_controller
             $this->successMessage = 'Núcleo actualizado correctamente.';
         } elseif ($success === 'updater-self-update') {
             $this->successMessage = 'El plugin system_updater se actualizó correctamente.';
+        } elseif ($success === 'maintenance-enabled') {
+            if (!empty($this->maintenanceStatus['active'])) {
+                $this->successMessage = 'Modo mantenimiento activado correctamente.';
+            } else {
+                $this->errorMessage = 'No se pudo confirmar la activación del modo mantenimiento.';
+            }
+        } elseif ($success === 'maintenance-disabled') {
+            if (empty($this->maintenanceStatus['active'])) {
+                $this->successMessage = 'Modo mantenimiento desactivado correctamente.';
+            } else {
+                $this->errorMessage = 'No se pudo confirmar la desactivación del modo mantenimiento.';
+            }
         }
 
-        $error = $this->getQueryParam('error');
         if ($error === 'updater-self-update') {
             $this->errorMessage = 'No se pudo completar la actualización del plugin system_updater. Se mantuvo la versión anterior.';
+        } elseif ($error === 'maintenance-stealth-required') {
+            $this->errorMessage = $this->getMaintenanceStealthRequiredMessage();
+        } elseif ($error === 'maintenance-failed') {
+            $this->errorMessage = 'No se pudo cambiar el estado del modo mantenimiento.';
+        } elseif ($error === 'csrf') {
+            $this->errorMessage = 'Token de seguridad inválido. Recarga la página e inténtalo de nuevo.';
         }
-
-        // Procesar acciones
-        $this->processActions();
-
-        // Cargar datos
-        $this->loadData();
     }
 
     /**
@@ -202,6 +228,13 @@ class admin_updater extends fs_controller
             case 'reinstall_core':
                 $this->actionReinstallCore();
                 break;
+            case 'enable_maintenance':
+                $this->actionEnableMaintenance();
+                break;
+
+            case 'disable_maintenance':
+                $this->actionDisableMaintenance();
+                break;
         }
     }
 
@@ -210,6 +243,8 @@ class admin_updater extends fs_controller
      */
     private function loadData()
     {
+        $this->maintenanceStatus = $this->buildMaintenanceStatus();
+
         // Información del actualizador
         $this->updaterInfo = $this->updater_mgr->get_info();
 
@@ -218,6 +253,49 @@ class admin_updater extends fs_controller
 
         // Verificar actualizaciones
         $this->updates = $this->checkUpdates();
+    }
+
+    /**
+     * Construye el estado del modo mantenimiento sin depender del resto de datos de la página.
+     *
+     * @return array
+     */
+    private function buildMaintenanceStatus()
+    {
+        $state = fs_maintenance_mode::readLockState();
+        $forced = fs_maintenance_mode::isForced();
+        $active = $forced;
+
+        if (is_array($state)) {
+            $rawActive = $state['active'] ?? true;
+            if (is_bool($rawActive)) {
+                $active = $active || $rawActive;
+            } elseif (is_numeric($rawActive)) {
+                $active = $active || ((int) $rawActive !== 0);
+            } else {
+                $active = $active || !in_array(strtolower(trim((string) $rawActive)), ['', '0', 'false', 'off', 'no'], true);
+            }
+        }
+
+        return [
+            'active' => $active,
+            'forced' => $forced,
+            'message' => fs_maintenance_mode::message(),
+            'lock_file' => fs_maintenance_mode::lockFilePath(),
+            'state' => $state,
+            'stealth' => fs_maintenance_mode::stealthAccessStatus(),
+        ];
+    }
+
+    private function isStealthAccessReady()
+    {
+        $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
+        return !empty($stealthStatus['ready']);
+    }
+
+    private function getMaintenanceStealthRequiredMessage()
+    {
+        return 'Activa primero el modo stealth desde admin_stealth para mantener una ruta de acceso del administrador durante el mantenimiento.';
     }
 
     /**
@@ -431,6 +509,7 @@ class admin_updater extends fs_controller
             }
 
             $this->new_message($this->successMessage);
+            $this->maintenanceStatus = $this->buildMaintenanceStatus();
             return;
         }
 
@@ -455,30 +534,57 @@ class admin_updater extends fs_controller
      */
     private function actionUpdatePlugin($pluginName)
     {
-        // Intentar actualizar a través de la tienda de plugins privados
-        if ($this->plugin_downloader->is_private_plugins_enabled()) {
-            $remotePlugins = $this->plugin_downloader->private_downloads();
-            foreach ($remotePlugins as $remote) {
-                if (($remote['nombre'] ?? '') === $pluginName && isset($remote['id'])) {
-                    if ($this->plugin_downloader->download_private($remote['id'])) {
-                        if ($this->plugin_manager->enable($pluginName)) {
-                            $this->successMessage = "Plugin $pluginName actualizado y habilitado correctamente.";
-                            $this->new_message($this->successMessage);
-                        } else {
-                            $this->errorMessage = "Plugin $pluginName actualizado, pero no se pudo habilitar.";
-                            $this->new_error_msg($this->errorMessage);
-                        }
-                        } else {
-                        $this->errorMessage = "Error al actualizar el plugin $pluginName.";
-                        $this->new_error_msg($this->errorMessage);
-                    }
-                    return;
-                }
-            }
+        if (!$this->validateCsrf()) {
+            $this->errorMessage = 'Token CSRF inválido. Recarga la página e inténtalo de nuevo.';
+            $this->new_error_msg($this->errorMessage);
+            return;
         }
 
-        $this->errorMessage = "No se pudo encontrar la actualización para $pluginName.";
-        $this->new_error_msg($this->errorMessage);
+        if (!$this->isStealthAccessReady()) {
+            $this->errorMessage = $this->getMaintenanceStealthRequiredMessage();
+            $this->new_error_msg($this->errorMessage);
+            return;
+        }
+
+        if (!fs_maintenance_mode::writeLock([
+            'message' => 'Actualización del plugin ' . $pluginName . ' en curso.',
+            'source' => 'system_updater.plugin_update',
+            'plugin' => $pluginName,
+            'retry_after' => 180,
+        ])) {
+            $this->errorMessage = 'No se pudo activar el modo mantenimiento antes de actualizar el plugin ' . $pluginName . '.';
+            $this->new_error_msg($this->errorMessage);
+            return;
+        }
+
+        try {
+        // Intentar actualizar a través de la tienda de plugins privados
+            if ($this->plugin_downloader->is_private_plugins_enabled()) {
+                $remotePlugins = $this->plugin_downloader->private_downloads();
+                foreach ($remotePlugins as $remote) {
+                    if (($remote['nombre'] ?? '') === $pluginName && isset($remote['id'])) {
+                        if ($this->plugin_downloader->download_private($remote['id'])) {
+                            if ($this->plugin_manager->enable($pluginName)) {
+                                $this->successMessage = "Plugin $pluginName actualizado y habilitado correctamente.";
+                                $this->new_message($this->successMessage);
+                            } else {
+                                $this->errorMessage = "Plugin $pluginName actualizado, pero no se pudo habilitar.";
+                                $this->new_error_msg($this->errorMessage);
+                            }
+                        } else {
+                            $this->errorMessage = "Error al actualizar el plugin $pluginName.";
+                            $this->new_error_msg($this->errorMessage);
+                        }
+                        return;
+                    }
+                }
+            }
+
+            $this->errorMessage = "No se pudo encontrar la actualización para $pluginName.";
+            $this->new_error_msg($this->errorMessage);
+        } finally {
+            fs_maintenance_mode::clearLock();
+        }
     }
 
     /**
@@ -656,6 +762,63 @@ class admin_updater extends fs_controller
     private function actionReinstallCore()
     {
         $this->actionUpdateCore();
+    }
+
+    /**
+     * Acción: activar manualmente el modo mantenimiento.
+     */
+    private function actionEnableMaintenance()
+    {
+        if (!$this->validateCsrf()) {
+            header('Location: ' . $this->url() . '&error=csrf');
+            exit;
+        }
+
+        if (!$this->isStealthAccessReady()) {
+            header('Location: ' . $this->url() . '&error=maintenance-stealth-required');
+            exit;
+        }
+
+        $message = trim((string) $this->getPostParam('maintenance_message', ''));
+        if ($message === '') {
+            $message = 'Mantenimiento activado manualmente desde system_updater.';
+        }
+
+        $retryAfter = (int) $this->getPostParam('retry_after', '300');
+        if ($retryAfter <= 0) {
+            $retryAfter = 300;
+        }
+
+        if (fs_maintenance_mode::writeLock([
+            'message' => $message,
+            'source' => 'system_updater.manual',
+            'retry_after' => $retryAfter,
+        ])) {
+            header('Location: ' . $this->url() . '&success=maintenance-enabled');
+            exit;
+        }
+
+        header('Location: ' . $this->url() . '&error=maintenance-failed');
+        exit;
+    }
+
+    /**
+     * Acción: desactivar manualmente el modo mantenimiento.
+     */
+    private function actionDisableMaintenance()
+    {
+        if (!$this->validateCsrf()) {
+            header('Location: ' . $this->url() . '&error=csrf');
+            exit;
+        }
+
+        if (fs_maintenance_mode::clearLock()) {
+            header('Location: ' . $this->url() . '&success=maintenance-disabled');
+            exit;
+        }
+
+        header('Location: ' . $this->url() . '&error=maintenance-failed');
+        exit;
     }
 
     /**
