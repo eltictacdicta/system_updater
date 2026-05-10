@@ -528,6 +528,9 @@ $action = get_request_param('action', '');
 
 switch ($action) {
     case 'start':
+        require_once __DIR__ . '/lib/csrf_guard.php';
+        ensure_request_csrf();
+
         $sessionKey = ensure_session_ready();
 
         $existingData = null;

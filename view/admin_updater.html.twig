@@ -5,6 +5,7 @@
  */
 #}
 {{ include('header.html.twig') }}
+{{ csrf_meta() }}
 
 <div class="container-fluid" style="margin-top: 10px;">
     <div class="row">
@@ -340,6 +341,7 @@
 
 <script {{ csp_nonce_attr() }} type="text/javascript">
 $(document).ready(function() {
+    var csrfToken = $('meta[name="csrf-token"]').attr('content') || '';
     var restoreEventSource = null;
     var restoreLog = [];
     var restoreFinished = false;
@@ -462,7 +464,7 @@ $(document).ready(function() {
         $('#backupProgressModal').modal('show');
 
         $.ajax({
-            url: 'plugins/system_updater/process_backup.php?action=start&format=json',
+            url: 'plugins/system_updater/process_backup.php?action=start&format=json&_csrf_token=' + encodeURIComponent(csrfToken),
             type: 'GET',
             dataType: 'json',
             cache: false,
@@ -657,7 +659,7 @@ $(document).ready(function() {
         $('#btn-update-core, #btn-reinstall-core').prop('disabled', true);
         $('#coreUpdateProgressModal').modal('show');
 
-        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0');
+        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0') + '&_csrf_token=' + encodeURIComponent(csrfToken);
         coreUpdateEventSource = new EventSource(sseUrl);
 
         coreUpdateEventSource.addEventListener('start', function(e) {
@@ -799,7 +801,7 @@ $(document).ready(function() {
         $('#restoreProgressModal').modal('show');
         
         // Start SSE connection
-        var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type);
+        var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type) + '&_csrf_token=' + encodeURIComponent(csrfToken);
         
         restoreEventSource = new EventSource(sseUrl);
         

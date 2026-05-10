@@ -534,7 +534,7 @@ class admin_updater extends fs_controller
      */
     private function actionUpdatePlugin($pluginName)
     {
-        if (!$this->validateCsrf()) {
+        if (!$this->requireCsrf()) {
             $this->errorMessage = 'Token CSRF inválido. Recarga la página e inténtalo de nuevo.';
             $this->new_error_msg($this->errorMessage);
             return;
@@ -769,7 +769,7 @@ class admin_updater extends fs_controller
      */
     private function actionEnableMaintenance()
     {
-        if (!$this->validateCsrf()) {
+        if (!$this->requireCsrf()) {
             header('Location: ' . $this->url() . '&error=csrf');
             exit;
         }
@@ -807,7 +807,7 @@ class admin_updater extends fs_controller
      */
     private function actionDisableMaintenance()
     {
-        if (!$this->validateCsrf()) {
+        if (!$this->requireCsrf()) {
             header('Location: ' . $this->url() . '&error=csrf');
             exit;
         }

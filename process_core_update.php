@@ -87,6 +87,9 @@ $progressCallback = function ($step, $message, $percent) {
 
 switch ($action) {
     case 'start':
+        require_once __DIR__ . '/lib/csrf_guard.php';
+        ensure_request_csrf();
+
         send_sse('start', ['message' => 'Iniciando ' . $operationLabel . ' del núcleo...', 'percent' => 0]);
         save_progress('init', 'Inicializando...', 0);
 

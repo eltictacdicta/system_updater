@@ -129,6 +129,9 @@ $progressCallback = function($step, $message, $percent) {
 // Procesar según la acción
 switch ($action) {
     case 'start':
+        require_once __DIR__ . '/lib/csrf_guard.php';
+        ensure_request_csrf();
+
         // Iniciar restauración
         send_sse('start', ['message' => 'Iniciando proceso de restauración...', 'percent' => 0]);
         
