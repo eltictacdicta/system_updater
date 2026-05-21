@@ -93,15 +93,14 @@ switch ($action) {
         send_sse('start', ['message' => 'Iniciando ' . $operationLabel . ' del núcleo...', 'percent' => 0]);
         save_progress('init', 'Inicializando...', 0);
 
-        $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
-        if (empty($stealthStatus['ready'])) {
-            $errorMsg = 'Activa primero el modo stealth desde admin_stealth para mantener una ruta de acceso del administrador durante el mantenimiento.';
+        if (system_updater_maintenance_stealth_required()) {
+            $errorMsg = system_updater_maintenance_stealth_required_message();
             save_progress('error', $errorMsg, 0, $errorMsg);
             send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
             exit;
         }
 
-        if (!fs_maintenance_mode::writeLock([
+        if (!system_updater_begin_maintenance([
             'message' => 'Actualización del núcleo en curso.',
             'source' => 'system_updater.core_update',
             'retry_after' => 300,
@@ -137,7 +136,7 @@ switch ($action) {
             save_progress('error', $errorMsg, 0, $errorMsg);
             send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
         } finally {
-            fs_maintenance_mode::clearLock();
+            system_updater_end_maintenance();
         }
 
         @unlink($progressFile);

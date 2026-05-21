@@ -155,16 +155,15 @@ switch ($action) {
         
         send_sse('init', ['message' => 'Backup encontrado. Iniciando restauración...', 'percent' => 3]);
 
-        $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
-        if (empty($stealthStatus['ready'])) {
-            $error = 'Activa primero el modo stealth desde admin_stealth para mantener una ruta de acceso del administrador durante el mantenimiento.';
+        if (system_updater_maintenance_stealth_required()) {
+            $error = system_updater_maintenance_stealth_required_message();
             save_progress('error', $error, 0, $error);
             send_sse('error', ['message' => $error, 'percent' => 0]);
             @unlink($progressFile);
             exit;
         }
 
-        if (!fs_maintenance_mode::writeLock([
+        if (!system_updater_begin_maintenance([
             'message' => 'Restauración del sistema en curso.',
             'source' => 'system_updater.restore',
             'retry_after' => 300,
@@ -213,7 +212,7 @@ switch ($action) {
             save_progress('error', $errorMsg, 0, $errorMsg);
             send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
         } finally {
-            fs_maintenance_mode::clearLock();
+            system_updater_end_maintenance();
         }
         
         // Limpiar archivo de progreso

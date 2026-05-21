@@ -262,6 +262,23 @@ class admin_updater extends fs_controller
      */
     private function buildMaintenanceStatus()
     {
+        if (!system_updater_maintenance_mode_available()) {
+            return [
+                'available' => false,
+                'active' => false,
+                'forced' => false,
+                'message' => '',
+                'lock_file' => '',
+                'state' => null,
+                'stealth' => [
+                    'enabled' => false,
+                    'param_name' => '',
+                    'param_value' => '',
+                    'ready' => false,
+                ],
+            ];
+        }
+
         $state = fs_maintenance_mode::readLockState();
         $forced = fs_maintenance_mode::isForced();
         $active = $forced;
@@ -278,6 +295,7 @@ class admin_updater extends fs_controller
         }
 
         return [
+            'available' => true,
             'active' => $active,
             'forced' => $forced,
             'message' => fs_maintenance_mode::message(),
@@ -289,13 +307,16 @@ class admin_updater extends fs_controller
 
     private function isStealthAccessReady()
     {
-        $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
-        return !empty($stealthStatus['ready']);
+        if (!system_updater_maintenance_mode_available()) {
+            return true;
+        }
+
+        return !system_updater_maintenance_stealth_required();
     }
 
     private function getMaintenanceStealthRequiredMessage()
     {
-        return 'Activa primero el modo stealth desde admin_stealth para mantener una ruta de acceso del administrador durante el mantenimiento.';
+        return system_updater_maintenance_stealth_required_message();
     }
 
     /**
@@ -540,13 +561,13 @@ class admin_updater extends fs_controller
             return;
         }
 
-        if (!$this->isStealthAccessReady()) {
+        if (system_updater_maintenance_stealth_required()) {
             $this->errorMessage = $this->getMaintenanceStealthRequiredMessage();
             $this->new_error_msg($this->errorMessage);
             return;
         }
 
-        if (!fs_maintenance_mode::writeLock([
+        if (!system_updater_begin_maintenance([
             'message' => 'Actualización del plugin ' . $pluginName . ' en curso.',
             'source' => 'system_updater.plugin_update',
             'plugin' => $pluginName,
@@ -583,7 +604,7 @@ class admin_updater extends fs_controller
             $this->errorMessage = "No se pudo encontrar la actualización para $pluginName.";
             $this->new_error_msg($this->errorMessage);
         } finally {
-            fs_maintenance_mode::clearLock();
+            system_updater_end_maintenance();
         }
     }
 
@@ -774,6 +795,11 @@ class admin_updater extends fs_controller
             exit;
         }
 
+        if (!system_updater_maintenance_mode_available()) {
+            header('Location: ' . $this->url());
+            exit;
+        }
+
         if (!$this->isStealthAccessReady()) {
             header('Location: ' . $this->url() . '&error=maintenance-stealth-required');
             exit;
@@ -789,7 +815,7 @@ class admin_updater extends fs_controller
             $retryAfter = 300;
         }
 
-        if (fs_maintenance_mode::writeLock([
+        if (system_updater_begin_maintenance([
             'message' => $message,
             'source' => 'system_updater.manual',
             'retry_after' => $retryAfter,
@@ -812,12 +838,13 @@ class admin_updater extends fs_controller
             exit;
         }
 
-        if (fs_maintenance_mode::clearLock()) {
-            header('Location: ' . $this->url() . '&success=maintenance-disabled');
+        if (!system_updater_maintenance_mode_available()) {
+            header('Location: ' . $this->url());
             exit;
         }
 
-        header('Location: ' . $this->url() . '&error=maintenance-failed');
+        system_updater_end_maintenance();
+        header('Location: ' . $this->url() . '&success=maintenance-disabled');
         exit;
     }
 

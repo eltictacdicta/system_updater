@@ -21,6 +21,60 @@ if (!defined('FS_MAINTENANCE_MODE_AVAILABLE')) {
     define('FS_MAINTENANCE_MODE_AVAILABLE', $maintenanceModeAvailable && class_exists('fs_maintenance_mode', false));
 }
 
+/**
+ * Indica si la instalación actual expone el modo mantenimiento del core.
+ */
+function system_updater_maintenance_mode_available(): bool
+{
+    return defined('FS_MAINTENANCE_MODE_AVAILABLE') && FS_MAINTENANCE_MODE_AVAILABLE;
+}
+
+/**
+ * Comprueba si falta configurar el acceso stealth requerido por el core moderno.
+ */
+function system_updater_maintenance_stealth_required(): bool
+{
+    if (!system_updater_maintenance_mode_available()) {
+        return false;
+    }
+
+    $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
+
+    return empty($stealthStatus['ready']);
+}
+
+/**
+ * Activa el modo mantenimiento cuando el core lo soporta.
+ */
+function system_updater_begin_maintenance(array $state = []): bool
+{
+    if (!system_updater_maintenance_mode_available()) {
+        return true;
+    }
+
+    return fs_maintenance_mode::writeLock($state);
+}
+
+/**
+ * Desactiva el modo mantenimiento cuando el core lo soporta.
+ */
+function system_updater_end_maintenance(): void
+{
+    if (!system_updater_maintenance_mode_available()) {
+        return;
+    }
+
+    fs_maintenance_mode::clearLock();
+}
+
+/**
+ * Mensaje estándar cuando falta el acceso stealth en cores modernos.
+ */
+function system_updater_maintenance_stealth_required_message(): string
+{
+    return 'Activa primero el modo stealth desde admin_stealth para mantener una ruta de acceso del administrador durante el mantenimiento.';
+}
+
 if (!class_exists('fs_maintenance_mode', false)) {
     /**
      * Stub for installations without the maintenance mode feature.
@@ -103,7 +157,7 @@ if (!class_exists('fs_maintenance_mode', false)) {
                 'enabled' => false,
                 'param_name' => '',
                 'param_value' => '',
-                'ready' => true,
+                'ready' => false,
             ];
         }
     }

@@ -47,6 +47,7 @@
 </div>
 {% endif %}
 
+{% if fsc.maintenanceStatus and fsc.maintenanceStatus.available %}
 <div class="row" style="margin: 10px;">
     <div class="col-md-12">
         <div class="panel panel-{% if fsc.maintenanceStatus and fsc.maintenanceStatus.active %}warning{% else %}default{% endif %}">
@@ -103,6 +104,7 @@
         </div>
     </div>
 </div>
+{% endif %}
 
 <div class="row" style="margin: 10px;">
     {# Panel de Actualizaciones #}
@@ -339,7 +341,7 @@
     </div>
 </div>
 
-<script {{ csp_nonce_attr() }} type="text/javascript">
+<script type="text/javascript">
 $(document).ready(function() {
     var csrfToken = $('meta[name="csrf-token"]').attr('content') || '';
     var restoreEventSource = null;
@@ -960,9 +962,9 @@ $(document).ready(function() {
 </script>
 
 <!-- Resumable.js para subida por chunks -->
-<script {{ csp_nonce_attr() }} type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
+<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
 
-<script {{ csp_nonce_attr() }}>
+<script type="text/javascript">
 $(document).ready(function() {
     // ========================================
     // BACKUP UPLOAD FUNCTIONALITY
