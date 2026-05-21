@@ -17,8 +17,6 @@ namespace FacturaScripts\Plugins\system_updater;
 use FSFramework\Event\FSEventDispatcher;
 use FSFramework\Event\TwigInitEvent;
 
-require_once __DIR__ . '/lib/twig_compat.php';
-
 /**
  * Clase de inicialización del plugin
  */
@@ -63,6 +61,7 @@ class Init
 
         $dispatcher = FSEventDispatcher::getInstance();
         $dispatcher->addListener(TwigInitEvent::NAME, static function (TwigInitEvent $event): void {
+            require_once __DIR__ . '/lib/twig_compat.php';
             system_updater_register_twig_compat($event->getTwig());
         });
     }
@@ -125,4 +124,8 @@ class Init
 $requestedPage = filter_input(INPUT_GET, 'page');
 if ($requestedPage && Init::hasController($requestedPage)) {
     // El framework cargará el controlador a través de Init::loadController()
+}
+
+if (!class_exists('FSFramework\\Plugins\\system_updater\\Init', false)) {
+    class_alias(__NAMESPACE__ . '\\Init', 'FSFramework\\Plugins\\system_updater\\Init');
 }

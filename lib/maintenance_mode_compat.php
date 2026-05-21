@@ -157,7 +157,7 @@ if (!class_exists('fs_maintenance_mode', false)) {
                 'enabled' => false,
                 'param_name' => '',
                 'param_value' => '',
-                'ready' => false,
+                'ready' => true,
             ];
         }
     }
