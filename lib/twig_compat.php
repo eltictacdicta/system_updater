@@ -78,6 +78,12 @@ function system_updater_csrf_field(): string
  */
 function system_updater_register_twig_compat(\Twig\Environment $twig): void
 {
+    // El núcleo moderno registra csrf_* y csp_nonce_* en Html::registerCsrfFunctions()
+    // después del evento TwigInitEvent. Solo aportamos fallbacks en instalaciones legacy.
+    if (class_exists(\FSFramework\Security\CsrfManager::class)) {
+        return;
+    }
+
     $fallbacks = [
         'csp_nonce_attr' => static function (): string {
             return '';
