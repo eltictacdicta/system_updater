@@ -5,7 +5,7 @@
  */
 #}
 {{ include('header.html.twig') }}
-{{ csrf_meta() }}
+{{ fsc.csrf_meta_html|raw }}
 
 <div class="container-fluid" style="margin-top: 10px;">
     <div class="row">
@@ -60,7 +60,7 @@
                         {% if fsc.maintenanceStatus and fsc.maintenanceStatus.active %}
                         <form method="post" action="{{ fsc.url()|raw }}">
                             <input type="hidden" name="action" value="disable_maintenance">
-                            {{ csrf_field() }}
+                            {{ fsc.csrf_field_html|raw }}
                             <button type="submit" class="btn btn-default" {% if fsc.maintenanceStatus.forced %}disabled title="Desactiva primero FS_FORCE_MAINTENANCE en config.php"{% else %}data-confirm-message="¿Desactivar el modo mantenimiento?"{% endif %}>
                                 <i class="fa fa-play"></i> Desactivar mantenimiento
                             </button>
@@ -69,7 +69,7 @@
                         {% set stealthReady = fsc.maintenanceStatus and fsc.maintenanceStatus.stealth and fsc.maintenanceStatus.stealth.ready %}
                         <form method="post" action="{{ fsc.url()|raw }}">
                             <input type="hidden" name="action" value="enable_maintenance">
-                            {{ csrf_field() }}
+                            {{ fsc.csrf_field_html|raw }}
                             {% if not stealthReady %}
                             <div class="alert alert-warning">
                                 <i class="fa fa-eye-slash"></i>
@@ -341,7 +341,7 @@
     </div>
 </div>
 
-<script {{ csp_nonce_attr() }} type="text/javascript">
+<script{{ fsc.script_nonce_attr|raw }} type="text/javascript">
 $(document).ready(function() {
     var csrfToken = $('meta[name="csrf-token"]').attr('content') || '';
     var restoreEventSource = null;
@@ -962,9 +962,9 @@ $(document).ready(function() {
 </script>
 
 <!-- Resumable.js para subida por chunks -->
-<script {{ csp_nonce_attr() }} type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
+<script{{ fsc.script_nonce_attr|raw }} type="text/javascript" src="https://cdn.jsdelivr.net/npm/resumablejs@1.1.0/resumable.min.js"></script>
 
-<script {{ csp_nonce_attr() }} type="text/javascript">
+<script{{ fsc.script_nonce_attr|raw }} type="text/javascript">
 $(document).ready(function() {
     // ========================================
     // BACKUP UPLOAD FUNCTIONALITY

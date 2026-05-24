@@ -83,6 +83,21 @@ class admin_updater extends fs_controller
     private $plugin_downloader;
 
     /**
+     * @var string Atributo HTML nonce para etiquetas script (retrocompatibilidad CSP).
+     */
+    public $script_nonce_attr = '';
+
+    /**
+     * @var string Meta tag CSRF precalculado para la vista.
+     */
+    public $csrf_meta_html = '';
+
+    /**
+     * @var string Campo oculto CSRF precalculado para la vista.
+     */
+    public $csrf_field_html = '';
+
+    /**
      * Constructor - registra la página en el menú admin
      */
     public function __construct()
@@ -96,6 +111,9 @@ class admin_updater extends fs_controller
      */
     protected function private_core()
     {
+        require_once __DIR__ . '/../lib/twig_compat.php';
+        system_updater_prepare_view_compat($this);
+
         // Cargar dependencias
         require_once __DIR__ . '/../lib/backup_manager.php';
         require_once __DIR__ . '/../lib/core_updater.php';

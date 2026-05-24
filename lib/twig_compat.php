@@ -1,9 +1,9 @@
 <?php
 /**
- * Backwards compatibility layer for Twig functions used by system_updater views.
+ * Backwards compatibility helpers for system_updater views and processors.
  *
- * On older installations that don't register helpers like csp_nonce_attr(),
- * this file provides safe fallbacks so templates render without fatal errors.
+ * Prefer passing these values from controllers into Twig templates instead of
+ * relying on Twig functions that may be unavailable on legacy framework versions.
  *
  * @author Javier Trujillo
  * @license LGPL-3.0-or-later
@@ -73,37 +73,32 @@ function system_updater_csrf_field(): string
 }
 
 /**
- * Registers Twig functions required by system_updater templates when the core
- * has not registered them yet.
+ * Returns the CSP nonce HTML attribute for inline/external script tags, or empty.
  */
-function system_updater_register_twig_compat(\Twig\Environment $twig): void
+function system_updater_script_nonce_attr(): string
 {
-    // El núcleo moderno registra csrf_* y csp_nonce_* en Html::registerCsrfFunctions()
-    // después del evento TwigInitEvent. Solo aportamos fallbacks en instalaciones legacy.
-    if (class_exists(\FSFramework\Security\CsrfManager::class)) {
+    if (!class_exists(\FSFramework\Security\SecurityHeaders::class, false)
+        || !method_exists(\FSFramework\Security\SecurityHeaders::class, 'nonceAttribute')) {
+        return '';
+    }
+
+    $attribute = (string) \FSFramework\Security\SecurityHeaders::nonceAttribute();
+
+    return $attribute !== '' ? ' ' . $attribute : '';
+}
+
+/**
+ * Populates public controller properties used by plugin Twig templates.
+ *
+ * @param object $controller
+ */
+function system_updater_prepare_view_compat($controller): void
+{
+    if (!is_object($controller)) {
         return;
     }
 
-    $fallbacks = [
-        'csp_nonce_attr' => static function (): string {
-            return '';
-        },
-        'csrf_meta' => static function (): string {
-            return system_updater_csrf_meta();
-        },
-        'csrf_field' => static function (): string {
-            return system_updater_csrf_field();
-        },
-        'csrf_available' => static function (): bool {
-            return system_updater_csrf_available();
-        },
-    ];
-
-    foreach ($fallbacks as $name => $callback) {
-        try {
-            $twig->addFunction(new \Twig\TwigFunction($name, $callback, ['is_safe' => ['html']]));
-        } catch (\LogicException $e) {
-            // Function already registered by the core or another plugin.
-        }
-    }
+    $controller->script_nonce_attr = system_updater_script_nonce_attr();
+    $controller->csrf_meta_html = system_updater_csrf_meta();
+    $controller->csrf_field_html = system_updater_csrf_field();
 }
