@@ -166,6 +166,7 @@ switch ($action) {
 
     default:
         send_sse('error', ['message' => 'Acción no válida: ' . $action, 'percent' => 0]);
+        break;
 }
 
 exit;

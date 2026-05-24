@@ -542,6 +542,7 @@ switch ($action) {
                 'already_running' => true,
                 'data' => $existingData,
             ]);
+            break;
         }
 
         $jobId = create_job_id($sessionKey);
@@ -566,6 +567,7 @@ switch ($action) {
                 'launch_mode' => $launchMode,
                 'pid' => $pid,
             ]);
+            break;
         }
 
         save_progress($jobId, $sessionKey, 'queued', 'El servidor no permite lanzar un worker CLI. Se continuará tras cerrar la respuesta HTTP.', 2, null, [
@@ -590,6 +592,7 @@ switch ($action) {
                 'success' => false,
                 'message' => 'Acción no válida fuera de CLI.',
             ], 400);
+            break;
         }
 
         $jobId = sanitize_token(get_request_param('job_id'));
@@ -620,6 +623,7 @@ switch ($action) {
                 'job_id' => $data['job_id'] ?? $jobId,
                 'data' => $data,
             ]);
+            break;
         }
 
         respond_json([
@@ -627,6 +631,7 @@ switch ($action) {
             'job_id' => $jobId,
             'data' => null,
         ]);
+        break;
 
     case 'cleanup':
         $sessionKey = ensure_session_ready();
@@ -642,10 +647,12 @@ switch ($action) {
         }
 
         respond_json(['success' => true, 'job_id' => $jobId]);
+        break;
 
     default:
         respond_json([
             'success' => false,
             'message' => 'Acción no válida: ' . $action,
         ], 400);
+        break;
 }
