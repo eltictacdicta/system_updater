@@ -985,6 +985,8 @@ $(document).ready(function() {
     var $statusText = $('#backup-upload-status');
     
     if ($dropZone.length === 0) return;
+
+    var uploadCsrfToken = $('meta[name="csrf-token"]').attr('content') || '';
     
     // Configurar Resumable.js
     var r = new Resumable({
@@ -996,8 +998,12 @@ $(document).ready(function() {
         fileType: ['zip'],
         maxFiles: 1,
         maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB máximo
+        query: uploadCsrfToken ? {
+            _csrf_token: uploadCsrfToken
+        } : {},
         headers: {
-            'X-Requested-With': 'XMLHttpRequest'
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRF-TOKEN': uploadCsrfToken
         }
     });
     
