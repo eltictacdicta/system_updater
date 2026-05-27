@@ -5,6 +5,24 @@
  * Usa Server-Sent Events (SSE) para evitar timeouts en peticiones largas.
  */
 
+if (!defined('FS_FOLDER')) {
+    define('FS_FOLDER', dirname(dirname(__DIR__)));
+}
+
+if (!file_exists(FS_FOLDER . '/config.php')) {
+    header('Content-Type: text/event-stream');
+    header('Cache-Control: no-cache');
+    echo "event: error\n";
+    echo 'data: ' . json_encode([
+        'message' => 'Error: No se encuentra el archivo config.php.',
+        'percent' => 0,
+    ], JSON_UNESCAPED_UNICODE) . "\n\n";
+    exit;
+}
+
+require_once __DIR__ . '/lib/session_auth.php';
+$sessionId = system_updater_require_authenticated_session();
+
 header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache');
 header('Connection: keep-alive');
@@ -44,40 +62,15 @@ function save_progress($step, $message, $percent, $error = null)
     return $data;
 }
 
-define('FS_FOLDER', dirname(dirname(__DIR__)));
-
-if (file_exists(FS_FOLDER . '/config.php')) {
-    require_once FS_FOLDER . '/config.php';
-} else {
-    send_sse('error', ['message' => 'Error: No se encuentra el archivo config.php.', 'percent' => 0]);
-    exit;
-}
-
 require_once __DIR__ . '/lib/maintenance_mode_compat.php';
-
-if (defined('FS_SESSION_NAME')) {
-    session_name(FS_SESSION_NAME);
-}
-session_start();
-
 require_once __DIR__ . '/lib/core_updater.php';
-
-$is_logged = false;
-if (isset($_SESSION['user_id']) || isset($_SESSION['user_nick']) || isset($_SESSION['_sf2_attributes']['user_nick'])) {
-    $is_logged = true;
-}
-
-if (!$is_logged) {
-    send_sse('error', ['message' => 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.', 'percent' => 0]);
-    exit;
-}
 
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 $createBackup = isset($_GET['create_backup']) && $_GET['create_backup'] === '0' ? false : true;
 $mode = isset($_GET['mode']) && $_GET['mode'] === 'reinstall' ? 'reinstall' : 'update';
 $operationLabel = $mode === 'reinstall' ? 'reinstalación' : 'actualización';
 
-$progressFile = sys_get_temp_dir() . '/fs_core_update_' . session_id() . '.json';
+$progressFile = sys_get_temp_dir() . '/fs_core_update_' . $sessionId . '.json';
 
 $progressCallback = function ($step, $message, $percent) {
     $data = save_progress($step, $message, $percent);

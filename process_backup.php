@@ -34,6 +34,8 @@ if (!defined('FS_FOLDER')) {
     define('FS_FOLDER', dirname(dirname(__DIR__)));
 }
 
+require_once __DIR__ . '/lib/session_auth.php';
+
 function backup_json_encode(array $payload)
 {
     return json_encode($payload, JSON_UNESCAPED_UNICODE);
@@ -377,35 +379,13 @@ function create_job_id($sessionKey)
     return sanitize_token($sessionKey . '_' . $suffix);
 }
 
-function is_logged_in()
-{
-    return isset($_SESSION['user_id'])
-        || isset($_SESSION['user_nick'])
-        || isset($_SESSION['_sf2_attributes']['user_nick']);
-}
-
 function ensure_session_ready()
 {
     if (PHP_SAPI === 'cli') {
         return '';
     }
 
-    if (defined('FS_SESSION_NAME')) {
-        session_name(FS_SESSION_NAME);
-    }
-
-    if (session_status() !== PHP_SESSION_ACTIVE) {
-        session_start();
-    }
-
-    if (!is_logged_in()) {
-        respond_json([
-            'success' => false,
-            'message' => 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.',
-        ], 401);
-    }
-
-    $sessionKey = session_id();
+    $sessionKey = system_updater_require_authenticated_session();
     session_write_close();
 
     return $sessionKey;
