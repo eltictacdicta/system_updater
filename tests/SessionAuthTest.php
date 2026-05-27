@@ -44,4 +44,50 @@ final class SessionAuthTest extends TestCase
             'user_nick' => 'admin',
         ]));
     }
+
+    public function testResolveCookiePathUsesRootForDocumentRootInstall(): void
+    {
+        if (!defined('FS_PATH')) {
+            define('FS_PATH', '');
+        }
+
+        $this->assertSame('/', system_updater_resolve_cookie_path());
+    }
+
+    public function testNormalizeCookiePathValueForSubdirectory(): void
+    {
+        $this->assertSame('/accounts/', system_updater_normalize_cookie_path_value('/accounts'));
+    }
+
+    public function testSessionIsValidRejectsExpiredSymfonySession(): void
+    {
+        if (!class_exists('FSFramework\\Security\\SessionPolicy')) {
+            $this->markTestSkipped('SessionPolicy no disponible.');
+        }
+
+        $expiredLogin = time() - \FSFramework\Security\SessionPolicy::getAbsoluteTimeout() - 60;
+
+        $this->assertFalse(system_updater_session_is_valid([
+            '_sf2_attributes' => [
+                'user_nick' => 'admin',
+                'login_time' => $expiredLogin,
+                'last_activity' => $expiredLogin,
+            ],
+        ]));
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testEnsureFsPathForProcessScriptMatchesIndexRoot(): void
+    {
+        $_SERVER['REQUEST_URI'] = '/plugins/system_updater/process_core_update.php?action=start';
+
+        system_updater_ensure_fs_path();
+
+        $this->assertTrue(defined('FS_PATH'));
+        $this->assertSame('', FS_PATH);
+        $this->assertSame('/', system_updater_resolve_cookie_path());
+    }
 }

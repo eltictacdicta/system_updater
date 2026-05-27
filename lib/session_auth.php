@@ -54,7 +54,7 @@ function system_updater_ensure_fs_path(): void
 
     if ($path !== '' && preg_match('#^(.*)/plugins/system_updater/process_[^/]+\.php$#', $path, $matches) === 1) {
         $base = (string) $matches[1];
-        define('FS_PATH', $base === '' ? '/' : rtrim($base, '/') . '/');
+        define('FS_PATH', $base === '' ? '' : rtrim($base, '/') . '/');
 
         return;
     }
@@ -101,19 +101,162 @@ function system_updater_session_has_user(array $session): bool
 /**
  * @return array<string, mixed>
  */
-function system_updater_read_session_snapshot(): array
+function system_updater_flatten_session(array $session): array
 {
+    $flat = $session;
+    unset($flat['_sf2_attributes']);
+
+    if (isset($session['_sf2_attributes']) && is_array($session['_sf2_attributes'])) {
+        foreach ($session['_sf2_attributes'] as $key => $value) {
+            if (!array_key_exists($key, $flat)) {
+                $flat[$key] = $value;
+            }
+        }
+    }
+
+    return $flat;
+}
+
+function system_updater_session_is_valid(array $session): bool
+{
+    $flat = system_updater_flatten_session($session);
+    $nick = trim((string) ($flat['user_nick'] ?? ''));
+
+    if ($nick === '') {
+        return false;
+    }
+
+    if (!class_exists('FSFramework\\Security\\SessionPolicy')) {
+        return true;
+    }
+
+    $loginTime = (int) ($flat['login_time'] ?? 0);
+    $lastActivity = (int) ($flat['last_activity'] ?? $loginTime);
+
+    return !\FSFramework\Security\SessionPolicy::isExpired($loginTime, $lastActivity);
+}
+
+function system_updater_resolve_cookie_path(): string
+{
+    $preferredPath = defined('FS_PATH') ? (string) FS_PATH : null;
+    if ($preferredPath !== null && trim($preferredPath) === '' && empty($_SERVER['REQUEST_URI'])) {
+        return '/';
+    }
+
+    return system_updater_normalize_cookie_path($preferredPath, $_SERVER);
+}
+
+/**
+ * @param array<string, mixed> $server
+ */
+function system_updater_normalize_cookie_path(?string $preferredPath, array $server): string
+{
+    $candidate = trim((string) $preferredPath);
+    if ($candidate !== '') {
+        return system_updater_normalize_cookie_path_value($candidate);
+    }
+
+    $scriptName = trim((string) ($server['SCRIPT_NAME'] ?? ''));
+    if ($scriptName !== '') {
+        return system_updater_normalize_cookie_path_value((string) dirname($scriptName));
+    }
+
+    $requestUri = filter_var((string) ($server['REQUEST_URI'] ?? '/'), FILTER_SANITIZE_URL);
+    $parsedPath = parse_url($requestUri, PHP_URL_PATH);
+    if (is_string($parsedPath) && $parsedPath !== '') {
+        if (str_ends_with($parsedPath, '/index.php')) {
+            $parsedPath = substr($parsedPath, 0, -10);
+        } else {
+            $parsedPath = (string) dirname($parsedPath);
+        }
+
+        return system_updater_normalize_cookie_path_value($parsedPath);
+    }
+
+    return '/';
+}
+
+function system_updater_normalize_cookie_path_value(string $path): string
+{
+    $normalized = trim(str_replace('\\', '/', $path));
+    if ($normalized === '' || $normalized === '.' || $normalized === '/') {
+        return '/';
+    }
+
+    $normalized = '/' . ltrim($normalized, '/');
+
+    return str_ends_with($normalized, '/') ? $normalized : $normalized . '/';
+}
+
+function system_updater_configure_php_session(string $sessionName): void
+{
+    if (defined('FS_SESSION_SAVE_PATH') && trim((string) FS_SESSION_SAVE_PATH) !== '') {
+        session_save_path(trim((string) FS_SESSION_SAVE_PATH));
+    }
+
+    $idleTimeout = class_exists('FSFramework\\Security\\SessionPolicy')
+        ? \FSFramework\Security\SessionPolicy::getIdleTimeout()
+        : (defined('FS_SESSION_LIFETIME') ? (int) FS_SESSION_LIFETIME : 7200);
+
+    $secure = class_exists('FSFramework\\Security\\SecureRequestDetector')
+        ? \FSFramework\Security\SecureRequestDetector::isSecure()
+        : (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+            || (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+
+    session_set_cookie_params([
+        'lifetime' => $idleTimeout,
+        'path' => system_updater_resolve_cookie_path(),
+        'domain' => '',
+        'secure' => $secure,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+
+    session_name($sessionName);
+}
+
+/**
+ * Bind the existing browser session before Symfony SessionManager boots.
+ */
+function system_updater_native_session_start(): bool
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return true;
+    }
+
     foreach (system_updater_resolve_session_names() as $sessionName) {
         $sessionId = isset($_COOKIE[$sessionName]) ? trim((string) $_COOKIE[$sessionName]) : '';
         if ($sessionId === '') {
             continue;
         }
 
-        if (defined('FS_SESSION_SAVE_PATH') && trim((string) FS_SESSION_SAVE_PATH) !== '') {
-            session_save_path(trim((string) FS_SESSION_SAVE_PATH));
+        system_updater_configure_php_session($sessionName);
+        session_id($sessionId);
+
+        if (@session_start()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function system_updater_read_session_snapshot(): array
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return is_array($_SESSION ?? null) ? $_SESSION : [];
+    }
+
+    foreach (system_updater_resolve_session_names() as $sessionName) {
+        $sessionId = isset($_COOKIE[$sessionName]) ? trim((string) $_COOKIE[$sessionName]) : '';
+        if ($sessionId === '') {
+            continue;
         }
 
-        session_name($sessionName);
+        system_updater_configure_php_session($sessionName);
         session_id($sessionId);
 
         if (PHP_VERSION_ID >= 70100) {
@@ -138,16 +281,33 @@ function system_updater_read_session_snapshot(): array
 
 function system_updater_is_logged_in(): bool
 {
+    $activeSession = session_status() === PHP_SESSION_ACTIVE && is_array($_SESSION ?? null)
+        ? $_SESSION
+        : [];
+
+    if ($activeSession !== []
+        && system_updater_session_has_user($activeSession)
+        && system_updater_session_is_valid($activeSession)) {
+        return true;
+    }
+
+    $snapshot = system_updater_read_session_snapshot();
+    if (system_updater_session_has_user($snapshot) && system_updater_session_is_valid($snapshot)) {
+        return true;
+    }
+
     if (class_exists('fs_session_manager', false)) {
         return fs_session_manager::isLoggedIn();
     }
 
-    return system_updater_session_has_user(system_updater_read_session_snapshot());
+    return false;
 }
 
 function system_updater_start_authenticated_session(): string
 {
     system_updater_bootstrap_framework();
+
+    system_updater_native_session_start();
 
     $sessionManagerFile = FS_FOLDER . '/base/fs_session_manager.php';
     if (file_exists($sessionManagerFile)) {
