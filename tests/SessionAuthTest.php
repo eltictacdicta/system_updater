@@ -47,9 +47,11 @@ final class SessionAuthTest extends TestCase
 
     public function testResolveCookiePathUsesRootForDocumentRootInstall(): void
     {
-        if (!defined('FS_PATH')) {
-            define('FS_PATH', '');
+        if (defined('FS_PATH')) {
+            $this->markTestSkipped('FS_PATH ya estaba definido.');
         }
+
+        define('FS_PATH', '');
 
         $this->assertSame('/', system_updater_resolve_cookie_path());
     }
@@ -57,6 +59,15 @@ final class SessionAuthTest extends TestCase
     public function testNormalizeCookiePathValueForSubdirectory(): void
     {
         $this->assertSame('/accounts/', system_updater_normalize_cookie_path_value('/accounts'));
+    }
+
+    public function testSessionIsValidAcceptsLegacyNickWithoutTimestamps(): void
+    {
+        $this->assertTrue(system_updater_session_is_valid([
+            '_sf2_attributes' => [
+                'user_nick' => 'admin',
+            ],
+        ]));
     }
 
     public function testSessionIsValidRejectsExpiredSymfonySession(): void

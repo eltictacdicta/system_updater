@@ -131,17 +131,26 @@ function system_updater_session_is_valid(array $session): bool
     }
 
     $loginTime = (int) ($flat['login_time'] ?? 0);
-    $lastActivity = (int) ($flat['last_activity'] ?? $loginTime);
+    $lastActivity = (int) ($flat['last_activity'] ?? 0);
+
+    if ($loginTime <= 0 && $lastActivity <= 0) {
+        return true;
+    }
+
+    if ($lastActivity <= 0) {
+        $lastActivity = $loginTime;
+    }
 
     return !\FSFramework\Security\SessionPolicy::isExpired($loginTime, $lastActivity);
 }
 
 function system_updater_resolve_cookie_path(): string
 {
-    $preferredPath = defined('FS_PATH') ? (string) FS_PATH : null;
-    if ($preferredPath !== null && trim($preferredPath) === '' && empty($_SERVER['REQUEST_URI'])) {
+    if (defined('FS_PATH') && trim((string) FS_PATH) === '') {
         return '/';
     }
+
+    $preferredPath = defined('FS_PATH') ? (string) FS_PATH : null;
 
     return system_updater_normalize_cookie_path($preferredPath, $_SERVER);
 }
@@ -279,20 +288,45 @@ function system_updater_read_session_snapshot(): array
     return [];
 }
 
+function system_updater_request_has_valid_csrf(): bool
+{
+    $token = trim((string) (
+        $_GET['_csrf_token']
+        ?? $_POST['_csrf_token']
+        ?? $_POST['_token']
+        ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')
+    ));
+
+    if ($token === '' || !class_exists('FSFramework\\Security\\CsrfManager')) {
+        return false;
+    }
+
+    return \FSFramework\Security\CsrfManager::isValid($token);
+}
+
 function system_updater_is_logged_in(): bool
 {
-    $activeSession = session_status() === PHP_SESSION_ACTIVE && is_array($_SESSION ?? null)
-        ? $_SESSION
-        : [];
+    $sessionsToCheck = [];
 
-    if ($activeSession !== []
-        && system_updater_session_has_user($activeSession)
-        && system_updater_session_is_valid($activeSession)) {
-        return true;
+    if (session_status() === PHP_SESSION_ACTIVE && is_array($_SESSION ?? null)) {
+        $sessionsToCheck[] = $_SESSION;
     }
 
     $snapshot = system_updater_read_session_snapshot();
-    if (system_updater_session_has_user($snapshot) && system_updater_session_is_valid($snapshot)) {
+    if ($snapshot !== []) {
+        $sessionsToCheck[] = $snapshot;
+    }
+
+    foreach ($sessionsToCheck as $session) {
+        if (system_updater_session_has_user($session) && system_updater_session_is_valid($session)) {
+            return true;
+        }
+    }
+
+    // La página admin_updater solo emite CSRF a usuarios autenticados; si el token cuadra
+    // con la misma FSSESS del navegador, la petición SSE es de esa sesión aunque Symfony
+    // no haya rehidratado user_nick en este script standalone.
+    if (system_updater_request_has_valid_csrf()) {
         return true;
     }
 
