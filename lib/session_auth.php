@@ -71,6 +71,10 @@ function system_updater_bootstrap_framework(): void
         define('FS_FOLDER', dirname(dirname(__DIR__)));
     }
 
+    if (is_dir(FS_FOLDER)) {
+        chdir(FS_FOLDER);
+    }
+
     if (file_exists(FS_FOLDER . '/config.php')) {
         require_once FS_FOLDER . '/config.php';
     }
