@@ -341,23 +341,13 @@ function system_updater_start_authenticated_session(): string
 {
     system_updater_bootstrap_framework();
 
-    system_updater_native_session_start();
-
-    $sessionManagerFile = FS_FOLDER . '/base/fs_session_manager.php';
-    if (file_exists($sessionManagerFile)) {
-        require_once $sessionManagerFile;
-        fs_session_manager::initialize();
-    } else {
+    if (!system_updater_native_session_start()) {
         foreach (system_updater_resolve_session_names() as $sessionName) {
             if (!empty($_COOKIE[$sessionName])) {
-                if (defined('FS_SESSION_SAVE_PATH') && trim((string) FS_SESSION_SAVE_PATH) !== '') {
-                    session_save_path(trim((string) FS_SESSION_SAVE_PATH));
-                }
-
-                session_name($sessionName);
+                system_updater_configure_php_session($sessionName);
 
                 if (session_status() !== PHP_SESSION_ACTIVE) {
-                    session_start();
+                    @session_start();
                 }
 
                 break;
@@ -366,7 +356,7 @@ function system_updater_start_authenticated_session(): string
 
         if (session_status() !== PHP_SESSION_ACTIVE) {
             session_name(system_updater_resolve_session_name());
-            session_start();
+            @session_start();
         }
     }
 

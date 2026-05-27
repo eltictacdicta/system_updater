@@ -3,6 +3,10 @@
  * Procesador de actualización del núcleo con progreso en tiempo real.
  *
  * Usa Server-Sent Events (SSE) para evitar timeouts en peticiones largas.
+ *
+ * Auth: CSRF token (session-bound, solo emitido a admins) es la prueba de
+ * autenticación para el action=start. El check de user_nick en sesión es un
+ * fallback para actions sin CSRF (progress/status).
  */
 
 if (!defined('FS_FOLDER')) {
@@ -21,7 +25,19 @@ if (!file_exists(FS_FOLDER . '/config.php')) {
 }
 
 require_once __DIR__ . '/lib/session_auth.php';
-$sessionId = system_updater_require_authenticated_session();
+require_once __DIR__ . '/lib/csrf_guard.php';
+
+$action = isset($_GET['action']) ? $_GET['action'] : '';
+
+// Para action=start, el CSRF token vinculado a sesión es suficiente autenticación.
+// Para progress/status sin CSRF, verificamos sesión de usuario.
+if ($action === 'start') {
+    system_updater_start_authenticated_session();
+    ensure_request_csrf();
+    $sessionId = session_id();
+} else {
+    $sessionId = system_updater_require_authenticated_session();
+}
 
 header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache');
@@ -65,7 +81,6 @@ function save_progress($step, $message, $percent, $error = null)
 require_once __DIR__ . '/lib/maintenance_mode_compat.php';
 require_once __DIR__ . '/lib/core_updater.php';
 
-$action = isset($_GET['action']) ? $_GET['action'] : '';
 $createBackup = isset($_GET['create_backup']) && $_GET['create_backup'] === '0' ? false : true;
 $mode = isset($_GET['mode']) && $_GET['mode'] === 'reinstall' ? 'reinstall' : 'update';
 $operationLabel = $mode === 'reinstall' ? 'reinstalación' : 'actualización';
@@ -80,9 +95,6 @@ $progressCallback = function ($step, $message, $percent) {
 
 switch ($action) {
     case 'start':
-        require_once __DIR__ . '/lib/csrf_guard.php';
-        ensure_request_csrf();
-
         send_sse('start', ['message' => 'Iniciando ' . $operationLabel . ' del núcleo...', 'percent' => 0]);
         save_progress('init', 'Inicializando...', 0);
 
