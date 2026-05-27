@@ -26,7 +26,17 @@ if (!file_exists(FS_FOLDER . '/config.php')) {
 }
 
 require_once __DIR__ . '/lib/session_auth.php';
-$sessionId = system_updater_require_authenticated_session();
+require_once __DIR__ . '/lib/csrf_guard.php';
+
+$action = isset($_GET['action']) ? $_GET['action'] : '';
+
+if ($action === 'start') {
+    system_updater_start_authenticated_session();
+    ensure_request_csrf();
+    $sessionId = session_id();
+} else {
+    $sessionId = system_updater_require_authenticated_session();
+}
 
 // Configurar headers para SSE
 header('Content-Type: text/event-stream');
@@ -59,8 +69,6 @@ if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
     exit;
 }
 
-// Obtener parámetros
-$action = isset($_GET['action']) ? $_GET['action'] : '';
 $file = isset($_GET['file']) ? $_GET['file'] : '';
 $restoreType = isset($_GET['type']) ? $_GET['type'] : 'complete';
 
@@ -113,9 +121,6 @@ $progressCallback = function($step, $message, $percent) {
 // Procesar según la acción
 switch ($action) {
     case 'start':
-        require_once __DIR__ . '/lib/csrf_guard.php';
-        ensure_request_csrf();
-
         // Iniciar restauración
         send_sse('start', ['message' => 'Iniciando proceso de restauración...', 'percent' => 0]);
         

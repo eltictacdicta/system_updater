@@ -379,13 +379,19 @@ function create_job_id($sessionKey)
     return sanitize_token($sessionKey . '_' . $suffix);
 }
 
-function ensure_session_ready()
+function ensure_session_ready($require_user_check = true)
 {
     if (PHP_SAPI === 'cli') {
         return '';
     }
 
-    $sessionKey = system_updater_require_authenticated_session();
+    if ($require_user_check) {
+        $sessionKey = system_updater_require_authenticated_session();
+    } else {
+        system_updater_start_authenticated_session();
+        $sessionKey = session_id();
+    }
+
     session_write_close();
 
     return $sessionKey;
@@ -509,9 +515,10 @@ $action = get_request_param('action', '');
 switch ($action) {
     case 'start':
         require_once __DIR__ . '/lib/csrf_guard.php';
+        system_updater_start_authenticated_session();
         ensure_request_csrf();
 
-        $sessionKey = ensure_session_ready();
+        $sessionKey = ensure_session_ready(false);
 
         $existingData = null;
         if (has_active_job($sessionKey, $existingData)) {
