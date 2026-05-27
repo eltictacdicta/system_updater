@@ -107,6 +107,31 @@ class admin_updater extends fs_controller
     }
 
     /**
+     * Resumable.js envía parámetros en la query string; promover el token CSRF al POST
+     * para que la validación estándar del framework lo reconozca.
+     */
+    protected function validateCsrf(?string $tokenId = null): bool
+    {
+        if ($this->request->getMethod() === 'POST' && $this->isChunkUpload()) {
+            $hasBodyToken = $this->request->request->has(\FSFramework\Security\CsrfManager::FIELD_NAME)
+                || $this->request->request->has('_token');
+            $hasHeaderToken = !empty($this->request->headers->get(\FSFramework\Security\CsrfManager::HEADER_NAME));
+
+            if (!$hasBodyToken && !$hasHeaderToken) {
+                $queryToken = $this->request->query->get(\FSFramework\Security\CsrfManager::FIELD_NAME);
+                if (empty($queryToken)) {
+                    $queryToken = $this->request->query->get('_token');
+                }
+                if (!empty($queryToken)) {
+                    $this->request->request->set(\FSFramework\Security\CsrfManager::FIELD_NAME, $queryToken);
+                }
+            }
+        }
+
+        return parent::validateCsrf($tokenId);
+    }
+
+    /**
      * Lógica principal del controlador (usuario autenticado)
      */
     protected function private_core()
@@ -1018,6 +1043,11 @@ class admin_updater extends fs_controller
      */
     public function getBackupPath()
     {
+        if ($this->backup_manager === null) {
+            require_once __DIR__ . '/../lib/backup_manager.php';
+            $this->backup_manager = new backup_manager();
+        }
+
         return $this->backup_manager->get_backup_path();
     }
 
