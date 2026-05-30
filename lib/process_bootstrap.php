@@ -16,6 +16,8 @@ if (!defined('FS_FOLDER')) {
     define('FS_FOLDER', dirname(dirname(__DIR__)));
 }
 
+require_once __DIR__ . '/session_auth.php';
+
 function system_updater_shutdown_on_missing_config(): void
 {
     if (headers_sent()) {
@@ -54,7 +56,6 @@ function system_updater_process_init(array $options = []): array
     }
 
     require_once FS_FOLDER . '/config.php';
-    require_once __DIR__ . '/session_auth.php';
 
     $mode = (string) ($options['mode'] ?? 'sse');
 
