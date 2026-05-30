@@ -103,11 +103,13 @@ class admin_plugin_store extends fs_controller
 
         switch ($action) {
             case 'download':
-                $pluginId = $this->getQueryParam('plugin_id');
+                if (!$this->requireCsrf()) {
+                    return;
+                }
+                $pluginId = $this->getPostParam('plugin_id') ?: $this->getQueryParam('plugin_id');
                 if ($pluginId) {
                     if ($this->downloader->download($pluginId)) {
                         $this->successMessage = 'Plugin descargado correctamente';
-                        // Activar plugin
                         $plugins = $this->downloader->downloads();
                         foreach ($plugins as $p) {
                             if ($p['id'] == $pluginId) {
@@ -125,11 +127,13 @@ class admin_plugin_store extends fs_controller
                 break;
 
             case 'download_private':
-                $pluginId = $this->getQueryParam('plugin_id');
+                if (!$this->requireCsrf()) {
+                    return;
+                }
+                $pluginId = $this->getPostParam('plugin_id') ?: $this->getQueryParam('plugin_id');
                 if ($pluginId) {
                     if ($this->downloader->download_private($pluginId)) {
                         $this->successMessage = 'Plugin privado descargado correctamente';
-                        // Activar plugin
                         $plugins = $this->downloader->private_downloads();
                         foreach ($plugins as $p) {
                             if ($p['id'] == $pluginId) {
@@ -148,6 +152,9 @@ class admin_plugin_store extends fs_controller
                 break;
 
             case 'save_private_config':
+                if (!$this->requireCsrf()) {
+                    return;
+                }
                 $token = $this->getPostParam('github_token');
                 $url = $this->getPostParam('private_plugins_url');
 
@@ -162,6 +169,9 @@ class admin_plugin_store extends fs_controller
                 break;
 
             case 'test_private_connection':
+                if (!$this->requireCsrf()) {
+                    return;
+                }
                 $result = $this->downloader->test_private_connection();
                 if ($result['success']) {
                     $this->successMessage = $result['message'];
@@ -174,6 +184,9 @@ class admin_plugin_store extends fs_controller
                 break;
 
             case 'delete_private_config':
+                if (!$this->requireCsrf()) {
+                    return;
+                }
                 $this->downloader->delete_private_config();
                 $this->successMessage = 'Configuración de plugins privados eliminada';
                 $this->new_message($this->successMessage);
@@ -181,6 +194,9 @@ class admin_plugin_store extends fs_controller
                 break;
 
             case 'refresh':
+                if (!$this->requireCsrf()) {
+                    return;
+                }
                 $this->downloader->refresh();
                 $this->successMessage = 'Caché actualizada. Lista de plugins recargada.';
                 $this->new_message($this->successMessage);

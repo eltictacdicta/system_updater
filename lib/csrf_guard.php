@@ -78,26 +78,26 @@ function ensure_request_csrf(): void
         return;
     }
 
-    // Primero intentar validación via CsrfManager (Symfony session)
-    $valid = false;
-    $diagInfo = '';
-
-    try {
-        $valid = \FSFramework\Security\CsrfManager::isValid((string) $token);
-    } catch (\Throwable $e) {
-        $diagInfo = $e->getMessage();
-    }
-
-    if ($valid) {
-        return;
-    }
-
-    // Fallback: validar leyendo el token directamente de $_SESSION (sin Symfony)
+    // Validar primero leyendo el token directamente de $_SESSION (sin Symfony)
+    // Esto evita que CsrfManager::getManager() inicialice SessionManager::getInstance(),
+    // lo cual crea un PhpBridgeSessionStorage con AttributeBag que puede sobrescribir
+    // $_SESSION['_sf2_attributes'] y corromper el token CSRF del framework principal.
     if (session_status() === PHP_SESSION_ACTIVE && !empty($_SESSION)) {
         $stored = system_updater_csrf_read_stored_token();
         if ($stored !== '' && system_updater_csrf_verify_token($token, $stored)) {
             return;
         }
+    }
+
+    // Fallback: intentar validación via CsrfManager (Symfony session)
+    $diagInfo = '';
+
+    try {
+        if (\FSFramework\Security\CsrfManager::isValid((string) $token)) {
+            return;
+        }
+    } catch (\Throwable $e) {
+        $diagInfo = $e->getMessage();
     }
 
     $sessionStatus = session_status() === PHP_SESSION_ACTIVE ? 'active' : 'inactive';

@@ -740,14 +740,14 @@ class backup_manager
 
             // PostgreSQL backup
             $command = sprintf(
-                'PGPASSWORD=%s pg_dump --host=%s --port=%s --username=%s %s 2>&1 | gzip > %s',
-                escapeshellarg($dbPass),
+                'pg_dump --host=%s --port=%s --username=%s %s 2>&1 | gzip > %s',
                 escapeshellarg($dbHost),
                 escapeshellarg($dbPort),
                 escapeshellarg($dbUser),
                 escapeshellarg($dbName),
                 escapeshellarg($filePath)
             );
+            putenv('PGPASSWORD=' . $dbPass);
         } else {
             if (!$this->shell_command_available('mysqldump') || !$this->shell_command_available('gzip')) {
                 return $this->create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
@@ -768,6 +768,10 @@ class backup_manager
         $output = array();
         $returnVar = 0;
         exec($command, $output, $returnVar);
+
+        if ($dbType === 'POSTGRESQL') {
+            putenv('PGPASSWORD');
+        }
 
         if ($returnVar !== 0 || !file_exists($filePath) || filesize($filePath) === 0) {
             $this->errors[] = "Error al crear la copia de la base de datos: " . implode("\n", $output);
@@ -1749,18 +1753,21 @@ class backup_manager
         if ($this->shell_functions_available()) {
             // Use shell command for faster restore
             $command = sprintf(
-                'gunzip -c %s | mysql --host=%s --port=%s --user=%s --password=%s %s 2>&1',
+                'gunzip -c %s | mysql --host=%s --port=%s --user=%s %s 2>&1',
                 escapeshellarg($backupPath),
                 escapeshellarg($dbHost),
                 escapeshellarg($dbPort),
                 escapeshellarg($dbUser),
-                escapeshellarg($dbPass),
                 escapeshellarg($dbName)
             );
+
+            putenv('MYSQL_PWD=' . $dbPass);
 
             $output = array();
             $returnVar = 0;
             exec($command, $output, $returnVar);
+
+            putenv('MYSQL_PWD');
 
             if ($returnVar !== 0) {
                 $importError = implode("\n", $output);

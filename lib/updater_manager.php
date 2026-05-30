@@ -631,6 +631,11 @@ class updater_manager
      */
     private function isGitAvailable()
     {
+        if (file_exists(__DIR__ . '/SharedUtils.php')) {
+            require_once __DIR__ . '/SharedUtils.php';
+            return \SystemUpdaterUtils::isGitAvailable();
+        }
+
         if (!$this->shellFunctionsAvailable()) {
             return false;
         }
@@ -762,6 +767,11 @@ class updater_manager
      */
     private function shellFunctionsAvailable()
     {
+        if (file_exists(__DIR__ . '/SharedUtils.php')) {
+            require_once __DIR__ . '/SharedUtils.php';
+            return \SystemUpdaterUtils::shellFunctionsAvailable();
+        }
+
         if (!function_exists('exec')) {
             return false;
         }

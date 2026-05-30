@@ -150,13 +150,19 @@
                             <span class="glyphicon glyphicon-gift" aria-hidden="true"></span>&nbsp; Obtener
                         </a>
                         {% elseif plugin.estable is defined and not plugin.estable %}
-                        <a href="#" class="btn btn-xs btn-primary" onclick="descargar_plugin_publico_inestable('{{ plugin.id }}', '{{ plugin.nombre|e('js') }}'); return false;">
-                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                        </a>
+                        <form method="post" action="{{ fsc.url()|raw }}&tab=public&action=download&plugin_id={{ plugin.id }}" style="display:inline;" onsubmit="return descargar_plugin_publico_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
+                            {{ csrf_field() }}
+                            <button type="submit" class="btn btn-xs btn-primary">
+                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                            </button>
+                        </form>
                         {% else %}
-                        <a href="{{ fsc.url()|raw }}&tab=public&action=download&plugin_id={{ plugin.id }}" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
-                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                        </a>
+                        <form method="post" action="{{ fsc.url()|raw }}&tab=public&action=download&plugin_id={{ plugin.id }}" style="display:inline;">
+                            {{ csrf_field() }}
+                            <button type="submit" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
+                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                            </button>
+                        </form>
                         {% endif %}
                     </td>
                     <td>
@@ -187,6 +193,7 @@
                     </div>
                     <div class="panel-body">
                         <form method="post" action="{{ fsc.url()|raw }}&action=save_private_config">
+                            {{ csrf_field() }}
                             <div class="form-group">
                                 <label>Token de GitHub</label>
                                 <input type="password" name="github_token" class="form-control" value="{{ fsc.privateConfig.github_token|default('') }}" placeholder="ghp_xxxx...">
@@ -203,12 +210,18 @@
 
                         {% if fsc.privateEnabled %}
                         <hr>
-                        <a href="{{ fsc.url()|raw }}&action=test_private_connection" class="btn btn-info btn-sm btn-block">
-                            <i class="fa fa-plug"></i> Probar conexión
-                        </a>
-                        <a href="{{ fsc.url()|raw }}&action=delete_private_config" class="btn btn-danger btn-sm btn-block" style="margin-top: 5px;" onclick="return confirm('¿Eliminar configuración?');">
-                            <i class="fa fa-trash"></i> Eliminar config
-                        </a>
+                        <form method="post" action="{{ fsc.url()|raw }}&action=test_private_connection" style="margin-bottom: 5px;">
+                            {{ csrf_field() }}
+                            <button type="submit" class="btn btn-info btn-sm btn-block">
+                                <i class="fa fa-plug"></i> Probar conexión
+                            </button>
+                        </form>
+                        <form method="post" action="{{ fsc.url()|raw }}&action=delete_private_config" onsubmit="return confirm('¿Eliminar configuración?');">
+                            {{ csrf_field() }}
+                            <button type="submit" class="btn btn-danger btn-sm btn-block">
+                                <i class="fa fa-trash"></i> Eliminar config
+                            </button>
+                        </form>
                         {% endif %}
                     </div>
                 </div>
@@ -308,13 +321,19 @@
                                             </a>
                                             {% endif %}
                                         {% elseif plugin.estable is defined and not plugin.estable %}
-                                        <a href="#" class="btn btn-xs btn-warning" onclick="descargar_plugin_privado_inestable('{{ plugin.id }}', '{{ plugin.nombre|e('js') }}'); return false;">
-                                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                                        </a>
+                                        <form method="post" action="{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id={{ plugin.id }}" style="display:inline;" onsubmit="return descargar_plugin_privado_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
+                                            {{ csrf_field() }}
+                                            <button type="submit" class="btn btn-xs btn-warning">
+                                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                                            </button>
+                                        </form>
                                         {% else %}
-                                        <a href="{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id={{ plugin.id }}" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
-                                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                                        </a>
+                                        <form method="post" action="{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id={{ plugin.id }}" style="display:inline;">
+                                            {{ csrf_field() }}
+                                            <button type="submit" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
+                                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                                            </button>
+                                        </form>
                                         {% endif %}
                                     </td>
                                     <td>

@@ -25,16 +25,21 @@ if (PHP_SAPI === 'cli' && isset($argv) && is_array($argv)) {
     }
 }
 
+if (!defined('FS_FOLDER')) {
+    define('FS_FOLDER', dirname(dirname(__DIR__)));
+}
+
 @set_time_limit(0);
 @ini_set('max_execution_time', '0');
 @ini_set('memory_limit', '512M');
 @ignore_user_abort(true);
 
-if (!defined('FS_FOLDER')) {
-    define('FS_FOLDER', dirname(dirname(__DIR__)));
+$autoloadFile = FS_FOLDER . '/vendor/autoload.php';
+if (file_exists($autoloadFile)) {
+    require_once $autoloadFile;
 }
 
-require_once __DIR__ . '/lib/session_auth.php';
+require_once __DIR__ . '/lib/process_bootstrap.php';
 
 function backup_json_encode(array $payload)
 {
@@ -305,6 +310,10 @@ function has_active_job($sessionKey, &$data = null)
 
 function shell_functions_available()
 {
+    if (file_exists(__DIR__ . '/lib/SharedUtils.php') && class_exists('SystemUpdaterUtils')) {
+        return \SystemUpdaterUtils::shellFunctionsAvailable();
+    }
+
     $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
     foreach (['exec', 'escapeshellarg'] as $function) {
         if (in_array($function, $disabled, true) || !function_exists($function)) {

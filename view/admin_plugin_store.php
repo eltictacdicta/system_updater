@@ -109,10 +109,13 @@ $activeTab = filter_input(INPUT_GET, 'tab') ?: 'public';
                                         id="public">
                                         <div class="row" style="margin-bottom: 10px;">
                                             <div class="col-md-12 text-right">
-                                                <a href="<?php echo $fsc->url(); ?>&action=refresh"
-                                                    class="btn btn-default btn-sm">
-                                                    <i class="fa fa-refresh"></i> Actualizar Lista
-                                                </a>
+                                                <form method="post" action="<?php echo $fsc->url(); ?>" style="display:inline;">
+                                                    <?php echo fs_session_manager::csrfField(); ?>
+                                                    <input type="hidden" name="action" value="refresh">
+                                                    <button type="submit" class="btn btn-default btn-sm">
+                                                        <i class="fa fa-refresh"></i> Actualizar Lista
+                                                    </button>
+                                                </form>
                                             </div>
                                         </div>
 
@@ -177,11 +180,15 @@ $activeTab = filter_input(INPUT_GET, 'tab') ?: 'public';
                                                             </span>
                                                             <?php endif; ?>
                                                             <?php else: ?>
-                                                            <a href="<?php echo $fsc->url(); ?>&action=download&plugin_id=<?php echo $plugin['id']; ?>"
-                                                                class="btn btn-sm btn-primary"
-                                                                onclick="this.innerHTML='<i class=\'fa fa-spinner fa-spin\'></i>'; return confirm('¿Descargar e instalar <?php echo htmlspecialchars($plugin['nombre']); ?>?');">
-                                                                <i class="fa fa-download"></i> Instalar
-                                                            </a>
+                                                            <form method="post" action="<?php echo $fsc->url(); ?>&tab=public" style="display:inline;">
+                                                                <?php echo fs_session_manager::csrfField(); ?>
+                                                                <input type="hidden" name="action" value="download">
+                                                                <input type="hidden" name="plugin_id" value="<?php echo $plugin['id']; ?>">
+                                                                <button type="submit" class="btn btn-sm btn-primary"
+                                                                    onclick="this.innerHTML='<i class=\'fa fa-spinner fa-spin\'></i>'; return confirm('¿Descargar e instalar <?php echo htmlspecialchars($plugin['nombre']); ?>?');">
+                                                                    <i class="fa fa-download"></i> Instalar
+                                                                </button>
+                                                            </form>
                                                             <?php endif; ?>
                                                         </div>
                                                     </div>
@@ -204,6 +211,7 @@ $activeTab = filter_input(INPUT_GET, 'tab') ?: 'public';
                                                         </h4>
                                                     </div>
                                                     <form method="post" action="<?php echo $fsc->url(); ?>&tab=private">
+                                                        <?php echo fs_session_manager::csrfField(); ?>
                                                         <input type="hidden" name="action" value="save_private_config">
                                                         <div class="box-body">
                                                             <div class="form-group">
@@ -234,15 +242,21 @@ $activeTab = filter_input(INPUT_GET, 'tab') ?: 'public';
                                                                 <i class="fa fa-save"></i> Guardar
                                                             </button>
                                                             <?php if ($fsc->privateEnabled): ?>
-                                                            <a href="<?php echo $fsc->url(); ?>&action=test_private_connection&tab=private"
-                                                                class="btn btn-default">
-                                                                <i class="fa fa-plug"></i> Probar Conexión
-                                                            </a>
-                                                            <a href="<?php echo $fsc->url(); ?>&action=delete_private_config&tab=private"
-                                                                class="btn btn-danger"
-                                                                onclick="return confirm('¿Eliminar configuración de plugins privados?');">
-                                                                <i class="fa fa-trash"></i> Eliminar
-                                                            </a>
+                                                            <form method="post" action="<?php echo $fsc->url(); ?>&tab=private" style="display:inline;">
+                                                                <?php echo fs_session_manager::csrfField(); ?>
+                                                                <input type="hidden" name="action" value="test_private_connection">
+                                                                <button type="submit" class="btn btn-default">
+                                                                    <i class="fa fa-plug"></i> Probar Conexión
+                                                                </button>
+                                                            </form>
+                                                            <form method="post" action="<?php echo $fsc->url(); ?>&tab=private" style="display:inline;">
+                                                                <?php echo fs_session_manager::csrfField(); ?>
+                                                                <input type="hidden" name="action" value="delete_private_config">
+                                                                <button type="submit" class="btn btn-danger"
+                                                                    onclick="return confirm('¿Eliminar configuración de plugins privados?');">
+                                                                    <i class="fa fa-trash"></i> Eliminar
+                                                                </button>
+                                                            </form>
                                                             <?php endif; ?>
                                                         </div>
                                                     </form>
@@ -313,11 +327,15 @@ $activeTab = filter_input(INPUT_GET, 'tab') ?: 'public';
                                                             </span>
                                                             <?php endif; ?>
                                                             <?php else: ?>
-                                                            <a href="<?php echo $fsc->url(); ?>&action=download_private&plugin_id=<?php echo $plugin['id']; ?>&tab=private"
-                                                                class="btn btn-sm btn-primary"
-                                                                onclick="this.innerHTML='<i class=\'fa fa-spinner fa-spin\'></i>'; return confirm('¿Descargar e instalar <?php echo htmlspecialchars($plugin['nombre']); ?>?');">
-                                                                <i class="fa fa-download"></i> Instalar
-                                                            </a>
+                                                            <form method="post" action="<?php echo $fsc->url(); ?>&tab=private" style="display:inline;">
+                                                                <?php echo fs_session_manager::csrfField(); ?>
+                                                                <input type="hidden" name="action" value="download_private">
+                                                                <input type="hidden" name="plugin_id" value="<?php echo $plugin['id']; ?>">
+                                                                <button type="submit" class="btn btn-sm btn-primary"
+                                                                    onclick="this.innerHTML='<i class=\'fa fa-spinner fa-spin\'></i>'; return confirm('¿Descargar e instalar <?php echo htmlspecialchars($plugin['nombre']); ?>?');">
+                                                                    <i class="fa fa-download"></i> Instalar
+                                                                </button>
+                                                            </form>
                                                             <?php endif; ?>
                                                         </div>
                                                     </div>

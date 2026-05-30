@@ -278,7 +278,6 @@ protected function fetchRemoteContents($url, $timeout = 10)
             'enabled' => false
         ];
 
-        // Intentar cargar desde fs_var
         if (file_exists($this->fsRoot . '/model/fs_var.php')) {
             require_once $this->fsRoot . '/model/fs_var.php';
             $fs_var = new fs_var();
@@ -291,7 +290,69 @@ protected function fetchRemoteContents($url, $timeout = 10)
             }
         }
 
+        $this->decrypt_token();
+
         return $this->private_config;
+    }
+
+    private function decrypt_token(): void
+    {
+        $token = trim((string) ($this->private_config['github_token'] ?? ''));
+        if ($token === '') {
+            return;
+        }
+
+        if (!class_exists(\FSFramework\Security\EncryptionService::class)) {
+            return;
+        }
+
+        try {
+            $decrypted = \FSFramework\Security\EncryptionService::decrypt($token);
+            if ($decrypted !== false) {
+                $this->private_config['github_token'] = $decrypted;
+                return;
+            }
+        } catch (\Throwable) {
+        }
+
+        if (!class_exists(\FSFramework\Security\SecretManager::class)) {
+            return;
+        }
+
+        try {
+            $secret = \FSFramework\Security\SecretManager::getSecret();
+            $this->private_config['github_token'] = \FSFramework\Security\EncryptionService::encrypt($token, $secret);
+            $this->persist_config();
+        } catch (\Throwable) {
+        }
+    }
+
+    private function encrypt_token(string $token): string
+    {
+        if ($token === '' || !class_exists(\FSFramework\Security\EncryptionService::class)) {
+            return $token;
+        }
+
+        if (!class_exists(\FSFramework\Security\SecretManager::class)) {
+            return $token;
+        }
+
+        try {
+            return \FSFramework\Security\EncryptionService::encrypt($token, \FSFramework\Security\SecretManager::getSecret());
+        } catch (\Throwable) {
+            return $token;
+        }
+    }
+
+    private function persist_config(): void
+    {
+        if (!file_exists($this->fsRoot . '/model/fs_var.php')) {
+            return;
+        }
+
+        require_once $this->fsRoot . '/model/fs_var.php';
+        $fs_var = new fs_var();
+        $fs_var->simple_save('private_plugins_config', json_encode($this->private_config));
     }
 
     /**
@@ -310,18 +371,22 @@ protected function fetchRemoteContents($url, $timeout = 10)
         require_once $this->fsRoot . '/model/fs_var.php';
         $fs_var = new fs_var();
 
+        $rawToken = trim((string) $github_token);
+        $encryptedToken = $this->encrypt_token($rawToken);
+
         $this->private_config = [
-            'github_token' => trim((string) $github_token),
+            'github_token' => $encryptedToken,
             'private_plugins_url' => $this->normalizeUrl($private_plugins_url),
-            'enabled' => !empty($github_token) && !empty($private_plugins_url)
+            'enabled' => !empty($rawToken) && !empty($private_plugins_url)
         ];
 
         $result = $fs_var->simple_save('private_plugins_config', json_encode($this->private_config));
 
-        // Limpiar cache
         if ($this->cache) {
             $this->cache->delete('private_download_list');
         }
+
+        $this->private_config['github_token'] = $rawToken;
 
         return $result;
     }
@@ -811,6 +876,11 @@ protected function fetchRemoteContents($url, $timeout = 10)
      */
     private function isGitAvailable()
     {
+        if (file_exists(__DIR__ . '/SharedUtils.php')) {
+            require_once __DIR__ . '/SharedUtils.php';
+            return \SystemUpdaterUtils::isGitAvailable();
+        }
+
         if (!$this->shellFunctionsAvailable()) {
             return false;
         }
@@ -818,8 +888,10 @@ protected function fetchRemoteContents($url, $timeout = 10)
         $output = [];
         $returnVar = 1;
         @exec('git --version 2>&1', $output, $returnVar);
+
         return $returnVar === 0;
     }
+
 
     /**
      * Clona un repositorio Git si las funciones shell están disponibles.
@@ -863,6 +935,11 @@ protected function fetchRemoteContents($url, $timeout = 10)
      */
     private function shellFunctionsAvailable()
     {
+        if (file_exists(__DIR__ . '/SharedUtils.php')) {
+            require_once __DIR__ . '/SharedUtils.php';
+            return \SystemUpdaterUtils::shellFunctionsAvailable();
+        }
+
         if (!function_exists('exec')) {
             return false;
         }

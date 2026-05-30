@@ -360,15 +360,11 @@ class core_updater
      */
     private function isGitAvailable()
     {
-        if (!$this->shellFunctionsAvailable()) {
+        if (!file_exists(__DIR__ . '/SharedUtils.php')) {
             return false;
         }
-
-        $output = [];
-        $returnVar = 1;
-        @exec('git --version 2>&1', $output, $returnVar);
-
-        return $returnVar === 0;
+        require_once __DIR__ . '/SharedUtils.php';
+        return \SystemUpdaterUtils::isGitAvailable();
     }
 
     /**
@@ -468,17 +464,18 @@ class core_updater
      */
     private function shellFunctionsAvailable()
     {
-        if (!function_exists('exec')) {
-            return false;
+        if (!file_exists(__DIR__ . '/SharedUtils.php')) {
+            if (!function_exists('exec')) {
+                return false;
+            }
+            $disabled = (string) ini_get('disable_functions');
+            if ($disabled === '') {
+                return true;
+            }
+            $disabledFunctions = array_map('trim', explode(',', $disabled));
+            return !in_array('exec', $disabledFunctions, true);
         }
-
-        $disabled = (string) ini_get('disable_functions');
-        if ($disabled === '') {
-            return true;
-        }
-
-        $disabledFunctions = array_map('trim', explode(',', $disabled));
-        return !in_array('exec', $disabledFunctions, true);
+        return \SystemUpdaterUtils::shellFunctionsAvailable();
     }
 
     /**
