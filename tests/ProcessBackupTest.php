@@ -6,48 +6,38 @@ use PHPUnit\Framework\TestCase;
 
 class ProcessBackupTest extends TestCase
 {
-    protected function setUp(): void
+    public function testProcessBackupFileExists(): void
     {
-        if (!defined('SYSTEM_UPDATER_PROCESS_BACKUP_BOOTSTRAP_ONLY')) {
-            define('SYSTEM_UPDATER_PROCESS_BACKUP_BOOTSTRAP_ONLY', true);
-        }
-
-        require_once FS_FOLDER . '/plugins/system_updater/process_backup.php';
+        $file = FS_FOLDER . '/plugins/system_updater/process_backup.php';
+        $this->assertFileExists($file);
     }
 
-    public function testShouldAttemptQueueRecoveryForStalledQueuedJob(): void
+    public function testProcessBackupHasNoSyntaxErrors(): void
     {
-        $data = [
-            'job_id' => 'backup_job_1',
-            'status' => 'queued',
-            'timestamp' => time() - (FS_BACKUP_QUEUE_RECOVERY_SECONDS + 2),
-            'recovery_attempts' => 0,
-        ];
-
-        $this->assertTrue(should_attempt_queue_recovery($data));
+        $file = FS_FOLDER . '/plugins/system_updater/process_backup.php';
+        $output = [];
+        $status = 0;
+        exec('php -l ' . escapeshellarg($file) . ' 2>&1', $output, $status);
+        $this->assertSame(0, $status, 'process_backup.php has syntax errors: ' . implode("\n", $output));
     }
 
-    public function testShouldNotAttemptQueueRecoveryBeforeGracePeriod(): void
+    public function testProcessBackupUsesSseBootstrap(): void
     {
-        $data = [
-            'job_id' => 'backup_job_2',
-            'status' => 'queued',
-            'timestamp' => time() - (FS_BACKUP_QUEUE_RECOVERY_SECONDS - 1),
-            'recovery_attempts' => 0,
-        ];
-
-        $this->assertFalse(should_attempt_queue_recovery($data));
+        $file = FS_FOLDER . '/plugins/system_updater/process_backup.php';
+        $content = file_get_contents($file);
+        $this->assertStringContainsString("system_updater_process_init(['mode' => 'sse'", $content);
     }
 
-    public function testShouldNotAttemptQueueRecoveryAfterMaxAttempts(): void
+    public function testProcessBackupDoesNotContainWorkerMachinery(): void
     {
-        $data = [
-            'job_id' => 'backup_job_3',
-            'status' => 'queued',
-            'timestamp' => time() - (FS_BACKUP_QUEUE_RECOVERY_SECONDS + 5),
-            'recovery_attempts' => FS_BACKUP_MAX_RECOVERY_ATTEMPTS,
-        ];
-
-        $this->assertFalse(should_attempt_queue_recovery($data));
+        $file = FS_FOLDER . '/plugins/system_updater/process_backup.php';
+        $content = file_get_contents($file);
+        $this->assertStringNotContainsString('launch_cli_worker', $content);
+        $this->assertStringNotContainsString('recover_queued_job', $content);
+        $this->assertStringNotContainsString('should_attempt_queue_recovery', $content);
+        $this->assertStringNotContainsString('has_active_job', $content);
+        $this->assertStringNotContainsString('FS_BACKUP_STALE_SECONDS', $content);
+        $this->assertStringNotContainsString('FS_BACKUP_QUEUE_RECOVERY_SECONDS', $content);
+        $this->assertStringNotContainsString('FS_BACKUP_MAX_RECOVERY_ATTEMPTS', $content);
     }
 }

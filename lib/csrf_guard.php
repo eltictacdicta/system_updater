@@ -23,7 +23,8 @@ function system_updater_csrf_failure_response(string $message): void
 
     $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
     $isSse = strpos($uri, 'process_core_update.php') !== false
-        || strpos($uri, 'process_restore.php') !== false;
+        || strpos($uri, 'process_restore.php') !== false
+        || strpos($uri, 'process_backup.php') !== false;
 
     if ($isSse) {
         if (!headers_sent()) {
@@ -85,19 +86,9 @@ function ensure_request_csrf(): void
     if (session_status() === PHP_SESSION_ACTIVE && !empty($_SESSION)) {
         $stored = system_updater_csrf_read_stored_token();
         if ($stored !== '' && system_updater_csrf_verify_token($token, $stored)) {
+            session_write_close();
             return;
         }
-    }
-
-    // Fallback: intentar validación via CsrfManager (Symfony session)
-    $diagInfo = '';
-
-    try {
-        if (\FSFramework\Security\CsrfManager::isValid((string) $token)) {
-            return;
-        }
-    } catch (\Throwable $e) {
-        $diagInfo = $e->getMessage();
     }
 
     $sessionStatus = session_status() === PHP_SESSION_ACTIVE ? 'active' : 'inactive';
@@ -107,14 +98,13 @@ function ensure_request_csrf(): void
     $hasToken = system_updater_csrf_read_stored_token() !== '' ? 'yes' : 'no';
 
     error_log(sprintf(
-        '[system_updater] CSRF validation failed. session=%s, sid=%s, cookies=[%s], sf2_attrs=%s, stored_token=%s, token_len=%d, diag=%s',
+        '[system_updater] CSRF validation failed. session=%s, sid=%s, cookies=[%s], sf2_attrs=%s, stored_token=%s, token_len=%d',
         $sessionStatus,
         substr($sessionId, 0, 8) . '...',
         implode(',', $cookieNames),
         $hasSf2,
         $hasToken,
-        strlen($token),
-        $diagInfo
+        strlen($token)
     ));
 
     system_updater_csrf_failure_response(
