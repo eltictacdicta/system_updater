@@ -10,6 +10,8 @@
  * @license LGPL-3.0-or-later
  */
 
+@require_once __DIR__ . '/debug_log.php';
+
 $maintenanceModeFile = (defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(__DIR__))) . '/base/fs_maintenance_mode.php';
 $maintenanceModeAvailable = file_exists($maintenanceModeFile);
 
@@ -19,6 +21,19 @@ if ($maintenanceModeAvailable && !class_exists('fs_maintenance_mode', false)) {
 
 if (!defined('FS_MAINTENANCE_MODE_AVAILABLE')) {
     define('FS_MAINTENANCE_MODE_AVAILABLE', $maintenanceModeAvailable && class_exists('fs_maintenance_mode', false));
+}
+
+if (function_exists('system_updater_debug_log')) {
+    system_updater_debug_log('MM', 'compat loaded', [
+        'file_exists' => $maintenanceModeAvailable,
+        'class_exists' => class_exists('fs_maintenance_mode', false),
+        'FS_MAINTENANCE_MODE_AVAILABLE' => defined('FS_MAINTENANCE_MODE_AVAILABLE') ? FS_MAINTENANCE_MODE_AVAILABLE : null,
+        'fs_maintenance_mode_methods' => class_exists('fs_maintenance_mode', false)
+            ? array_values(array_filter(get_class_methods('fs_maintenance_mode'), static function (string $m): bool {
+                return strpos($m, 'tealth') !== false || strpos($m, 'ock') !== false;
+            }))
+            : [],
+    ]);
 }
 
 /**
@@ -35,10 +50,23 @@ function system_updater_maintenance_mode_available(): bool
 function system_updater_maintenance_stealth_required(): bool
 {
     if (!system_updater_maintenance_mode_available()) {
+        if (function_exists('system_updater_debug_log')) {
+            system_updater_debug_log('MM', 'stealth_required: maintenance mode unavailable, returning false');
+        }
         return false;
     }
 
+    if (function_exists('system_updater_debug_log')) {
+        system_updater_debug_log('MM', 'stealth_required: calling fs_maintenance_mode::stealthAccessStatus');
+    }
     $stealthStatus = fs_maintenance_mode::stealthAccessStatus();
+    if (function_exists('system_updater_debug_log')) {
+        system_updater_debug_log('MM', 'stealth_required: status received', [
+            'ready' => !empty($stealthStatus['ready']),
+            'enabled' => !empty($stealthStatus['enabled']),
+            'has_param_value' => !empty($stealthStatus['param_value']),
+        ]);
+    }
 
     return empty($stealthStatus['ready']);
 }
@@ -49,10 +77,24 @@ function system_updater_maintenance_stealth_required(): bool
 function system_updater_begin_maintenance(array $state = []): bool
 {
     if (!system_updater_maintenance_mode_available()) {
+        if (function_exists('system_updater_debug_log')) {
+            system_updater_debug_log('MM', 'begin_maintenance: maintenance mode unavailable, returning true');
+        }
         return true;
     }
 
-    return fs_maintenance_mode::writeLock($state);
+    if (function_exists('system_updater_debug_log')) {
+        system_updater_debug_log('MM', 'begin_maintenance: calling fs_maintenance_mode::writeLock', [
+            'lock_path' => method_exists('fs_maintenance_mode', 'lockFilePath')
+                ? (string) fs_maintenance_mode::lockFilePath()
+                : '(no lockFilePath method)',
+        ]);
+    }
+    $result = fs_maintenance_mode::writeLock($state);
+    if (function_exists('system_updater_debug_log')) {
+        system_updater_debug_log('MM', 'begin_maintenance: writeLock returned', ['success' => $result]);
+    }
+    return $result;
 }
 
 /**
