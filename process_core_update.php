@@ -27,6 +27,12 @@ $ctx = system_updater_debug_wrap('process_bootstrap+init', static function () {
 $sessionId = $ctx['session_id'];
 $action = $ctx['action'];
 $progressFile = $ctx['progress_file'];
+
+// Send an immediate keepalive so the browser (and any proxy) confirms the
+// SSE stream is live, even if bootstrap took a moment.  Lines starting with
+// ':' are SSE comment lines — the browser ignores them.
+system_updater_send_sse_keepalive();
+
 system_updater_debug_log('CTX', 'process_init returned', [
     'action' => (string) ($action ?? ''),
     'session_id_prefix' => substr((string) ($sessionId ?? ''), 0, 8),
@@ -53,59 +59,90 @@ $progressCallback = function ($step, $message, $percent) use ($progressFile) {
 
 switch ($action) {
     case 'start':
-        system_updater_send_sse('start', ['message' => 'Iniciando ' . $operationLabel . ' del núcleo...', 'percent' => 0]);
-        system_updater_save_progress($progressFile, 'init', 'Inicializando...', 0);
-
-        $stealthRequired = system_updater_debug_wrap('maintenance_stealth_required', static function () {
-            return system_updater_maintenance_stealth_required();
-        });
-        if ($stealthRequired) {
-            $errorMsg = system_updater_maintenance_stealth_required_message();
-            system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
-            system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
-            exit;
-        }
-
-        $maintenanceBegun = system_updater_debug_wrap('begin_maintenance', static function () {
-            return system_updater_begin_maintenance([
-                'message' => 'Actualización del núcleo en curso.',
-                'source' => 'system_updater.core_update',
-                'retry_after' => 300,
-            ]);
-        });
-        if (!$maintenanceBegun) {
-            $errorMsg = 'No se pudo activar el modo mantenimiento antes de iniciar la actualización del núcleo.';
-            system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
-            system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
-            exit;
-        }
-
         try {
-            $updater = new core_updater(FS_FOLDER);
-            system_updater_send_sse('init', ['message' => 'Verificando entorno de ' . $operationLabel . '...', 'percent' => 2]);
+            system_updater_send_sse('start', ['message' => 'Iniciando ' . $operationLabel . ' del núcleo...', 'percent' => 0]);
+            system_updater_save_progress($progressFile, 'init', 'Inicializando...', 0);
+            system_updater_send_sse_keepalive();
 
-            $result = $updater->update_core($createBackup, $progressCallback);
-
-            if (!empty($result['success'])) {
-                system_updater_save_progress($progressFile, 'complete', $result['message'], 100);
-                system_updater_send_sse('complete', [
-                    'message' => $result['message'],
-                    'percent' => 100,
-                    'installed_version' => $result['installed_version'] ?? '',
-                    'redirect' => 'index.php?page=admin_updater&success=core-updated',
-                ]);
-            } else {
-                $errors = $result['errors'] ?? $updater->get_errors();
-                $errorMsg = !empty($errors) ? implode('; ', $errors) : 'Error desconocido durante la actualización del núcleo';
+            $stealthRequired = system_updater_debug_wrap('maintenance_stealth_required', static function () {
+                return system_updater_maintenance_stealth_required();
+            });
+            if ($stealthRequired) {
+                $errorMsg = system_updater_maintenance_stealth_required_message();
                 system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
                 system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+                exit;
+            }
+
+            $maintenanceBegun = system_updater_debug_wrap('begin_maintenance', static function () {
+                return system_updater_begin_maintenance([
+                    'message' => 'Actualización del núcleo en curso.',
+                    'source' => 'system_updater.core_update',
+                    'retry_after' => 300,
+                ]);
+            });
+            if (!$maintenanceBegun) {
+                $errorMsg = 'No se pudo activar el modo mantenimiento antes de iniciar la actualización del núcleo.';
+                system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
+                system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+                exit;
+            }
+
+            system_updater_send_sse_keepalive();
+
+            try {
+                $updater = new core_updater(FS_FOLDER);
+                system_updater_send_sse('init', ['message' => 'Verificando entorno de ' . $operationLabel . '...', 'percent' => 2]);
+                system_updater_send_sse_keepalive();
+
+                $result = $updater->update_core($createBackup, $progressCallback);
+
+                if (!empty($result['success'])) {
+                    system_updater_save_progress($progressFile, 'complete', $result['message'], 100);
+                    system_updater_send_sse('complete', [
+                        'message' => $result['message'],
+                        'percent' => 100,
+                        'installed_version' => $result['installed_version'] ?? '',
+                        'redirect' => 'index.php?page=admin_updater&success=core-updated',
+                    ]);
+                } else {
+                    $errors = $result['errors'] ?? $updater->get_errors();
+                    $errorMsg = !empty($errors) ? implode('; ', $errors) : 'Error desconocido durante la actualización del núcleo';
+                    system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
+                    system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+                }
+            } catch (\Throwable $e) {
+                $errorMsg = 'Excepción: ' . $e->getMessage();
+                system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
+                system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
+            } finally {
+                system_updater_end_maintenance();
             }
         } catch (\Throwable $e) {
-            $errorMsg = 'Excepción: ' . $e->getMessage();
-            system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
-            system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
-        } finally {
-            system_updater_end_maintenance();
+            $errorMsg = 'Excepción no controlada en process_core_update: ' . $e->getMessage();
+            @error_log('[system_updater][process_core_update] ' . $errorMsg . ' in ' . $e->getFile() . ':' . $e->getLine());
+            if (function_exists('system_updater_debug_log')) {
+                system_updater_debug_log('OUTER_THROW', $e->getMessage(), [
+                    'class' => get_class($e),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ]);
+            }
+            if (!headers_sent()) {
+                @header('Content-Type: text/event-stream');
+            }
+            if (ob_get_level() > 0) {
+                while (ob_get_level() > 0) {
+                    @ob_end_clean();
+                }
+            }
+            echo "event: error\n";
+            echo 'data: ' . json_encode([
+                'message' => $errorMsg,
+                'percent' => 0,
+            ], JSON_UNESCAPED_UNICODE) . "\n\n";
+            @ob_flush();
+            @flush();
         }
 
         @unlink($progressFile);

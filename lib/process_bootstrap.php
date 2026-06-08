@@ -72,15 +72,27 @@ function system_updater_process_init(array $options = []): array
         @ini_set('zlib.output_compression', 'Off');
         @ini_set('output_buffering', 'Off');
         @ini_set('output_handler', '');
+        @ini_set('implicit_flush', 'On');
 
-        while (ob_get_level()) {
-            ob_end_clean();
+        // Disable Apache mod_deflate for this request (defensive; also done in .htaccess)
+        if (function_exists('apache_setenv')) {
+            @apache_setenv('no-gzip', '1');
         }
 
+        // Clean all output buffers — Plesk/FastCGI may auto-start one
+        while (ob_get_level()) {
+            @ob_end_clean();
+        }
+
+        // SSE headers — order matters for reverse proxies and buffering intermediaries
         header('Content-Type: text/event-stream');
-        header('Cache-Control: no-cache');
+        header('Cache-Control: no-cache, no-transform');
         header('Connection: keep-alive');
         header('X-Accel-Buffering: no');
+        // Signal mod_deflate / gzip proxies not to re-encode the stream
+        header('Content-Encoding: identity');
+        // Prevent browsers from sniffing the content type
+        header('X-Content-Type-Options: nosniff');
     }
 
     $action = (string) ($_GET['action'] ?? '');
@@ -105,6 +117,14 @@ function system_updater_process_init(array $options = []): array
         . $sessionId
         . '.json';
 
+    // Release session lock — SSE scripts are long-lived and must not block
+    // other requests from the same user.  CSRF validation already read and
+    // closed the session on the 'start' action; for 'progress'/'status'
+    // the session is still open after system_updater_require_authenticated_session().
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+
     return [
         'session_id' => $sessionId,
         'action' => $action,
@@ -122,6 +142,22 @@ function system_updater_send_sse(string $event, array $data): void
 {
     echo "event: {$event}\n";
     echo 'data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) . "\n\n";
+
+    // Flush any output buffer layer, then push to the web server
+    while (ob_get_level() > 0) {
+        @ob_flush();
+    }
+    @flush();
+}
+
+/**
+ * Envía un comentario SSE keepalive (:: prefix = comment, browsers ignore it).
+ * Keeps the connection alive through proxies, load balancers, and FastCGI timeouts.
+ */
+function system_updater_send_sse_keepalive(): void
+{
+    // SSE spec: lines starting with ':' are ignored by the browser
+    echo ": keepalive " . time() . "\n\n";
 
     if (function_exists('ob_flush')) {
         @ob_flush();

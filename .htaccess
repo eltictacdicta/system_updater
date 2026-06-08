@@ -1,0 +1,39 @@
+# =============================================================================
+# SSE endpoint configuration for system_updater process scripts
+# =============================================================================
+# Process scripts use Server-Sent Events (SSE) for real-time progress updates.
+# Standard web server settings can buffer, compress, or kill these long-lived
+# connections. This file ensures they work correctly on Plesk/Apache/FastCGI.
+
+# Prevent mod_deflate from buffering SSE output.
+# text/event-stream is not in the default DEFLATE filter list, but some
+# Plesk configurations enable compression for all text/* responses.
+<IfModule mod_deflate.c>
+    SetEnvIfNoCase Request_URI "process_.*\.php$" no-gzip dont-vary
+</IfModule>
+
+# Disable mod_security (OWASP CRS) for process scripts.
+# SSE streams with long query strings and continuous output trigger false positives.
+<IfModule mod_security2.c>
+    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery)\.php$">
+        SecRuleEngine Off
+    </FilesMatch>
+</IfModule>
+<IfModule security2_module>
+    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery)\.php$">
+        SecRuleEngine Off
+    </FilesMatch>
+</IfModule>
+
+# Override root .htaccess caching headers for SSE process scripts.
+# Root .htaccess sets Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+# for ALL .php files.  SSE needs "no-cache" specifically — "no-store" causes some
+# reverse proxies (nginx, Cloudflare) to reject the stream, and "no-transform"
+# prevents intermediary re-encoding.
+<IfModule mod_headers.c>
+    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery)\.php$">
+        Header set Cache-Control "no-cache, no-transform"
+        Header set X-Accel-Buffering "no"
+        Header set Connection "keep-alive"
+    </FilesMatch>
+</IfModule>
