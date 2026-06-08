@@ -263,7 +263,7 @@ class backup_manager
         } elseif (defined('FS_FOLDER')) {
             $this->fsRoot = FS_FOLDER;
         } else {
-            $this->fsRoot = dirname(dirname(__DIR__));
+            $this->fsRoot = dirname(dirname(dirname(__DIR__)));
         }
 
         // Store backups in /backups/ directory at project root

@@ -52,7 +52,7 @@ function system_updater_csrf_failure_response(string $message): void
 
 function ensure_request_csrf(): void
 {
-    $autoloadFile = dirname(dirname(__DIR__)) . '/vendor/autoload.php';
+    $autoloadFile = dirname(dirname(dirname(__DIR__))) . '/vendor/autoload.php';
     if (!file_exists($autoloadFile)) {
         return;
     }
@@ -119,15 +119,27 @@ function ensure_request_csrf(): void
 function system_updater_csrf_read_stored_token(): string
 {
     $tokenId = 'fs_form';
-    $sessionKey = '_csrf/' . $tokenId;
+
+    // Symfony SessionTokenStorage prefixes the key with the request scheme
+    // (https- or http-) when the request is secure or not.  We must check
+    // both namespaced and plain variants to cover HTTP and HTTPS setups.
+    $candidates = [
+        '_csrf/https-' . $tokenId,
+        '_csrf/http-' . $tokenId,
+        '_csrf/' . $tokenId,
+    ];
 
     $attrs = $_SESSION['_sf2_attributes'] ?? [];
-    if (isset($attrs[$sessionKey]) && is_string($attrs[$sessionKey])) {
-        return $attrs[$sessionKey];
+    foreach ($candidates as $sessionKey) {
+        if (isset($attrs[$sessionKey]) && is_string($attrs[$sessionKey])) {
+            return $attrs[$sessionKey];
+        }
     }
 
-    if (isset($_SESSION[$sessionKey]) && is_string($_SESSION[$sessionKey])) {
-        return $_SESSION[$sessionKey];
+    foreach ($candidates as $sessionKey) {
+        if (isset($_SESSION[$sessionKey]) && is_string($_SESSION[$sessionKey])) {
+            return $_SESSION[$sessionKey];
+        }
     }
 
     return '';

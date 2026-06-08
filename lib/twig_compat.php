@@ -18,7 +18,7 @@ function system_updater_ensure_legacy_session_manager(): void
         return;
     }
 
-    $file = (defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(__DIR__))) . '/base/fs_session_manager.php';
+    $file = (defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(dirname(__DIR__)))) . '/base/fs_session_manager.php';
     if (file_exists($file)) {
         require_once $file;
     }

@@ -24,14 +24,12 @@ if (!function_exists('system_updater_debug_log')) {
         }
         $line .= "\n";
 
-        $folder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(__DIR__));
+        $folder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
         $logDir = $folder . '/tmp';
         $logFile = $logDir . '/system_updater_debug.log';
         if (is_dir($logDir) && is_writable($logDir)) {
             @file_put_contents($logFile, $line, FILE_APPEND | LOCK_EX);
         }
-
-        @error_log('[system_updater] ' . trim($line));
     }
 }
 

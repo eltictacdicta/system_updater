@@ -12,7 +12,7 @@ function system_updater_resolve_session_name(): string
         return trim((string) FS_SESSION_NAME);
     }
 
-    $seed = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(__DIR__));
+    $seed = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
     $seed = str_replace('\\', '/', $seed);
 
     return 'FSSESS_' . substr(sha1($seed), 0, 12);
@@ -59,7 +59,7 @@ function system_updater_ensure_fs_path(): void
         return;
     }
 
-    $config2File = (defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(__DIR__))) . '/base/config2.php';
+    $config2File = (defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(dirname(__DIR__)))) . '/base/config2.php';
     if (file_exists($config2File)) {
         require_once $config2File;
     }
@@ -68,7 +68,7 @@ function system_updater_ensure_fs_path(): void
 function system_updater_bootstrap_framework(): void
 {
     if (!defined('FS_FOLDER')) {
-        define('FS_FOLDER', dirname(dirname(__DIR__)));
+        define('FS_FOLDER', dirname(dirname(dirname(__DIR__))));
     }
 
     if (is_dir(FS_FOLDER)) {

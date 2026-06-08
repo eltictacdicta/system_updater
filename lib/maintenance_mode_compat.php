@@ -12,7 +12,7 @@
 
 @require_once __DIR__ . '/debug_log.php';
 
-$maintenanceModeFile = (defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(__DIR__))) . '/base/fs_maintenance_mode.php';
+$maintenanceModeFile = (defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(dirname(__DIR__)))) . '/base/fs_maintenance_mode.php';
 $maintenanceModeAvailable = file_exists($maintenanceModeFile);
 
 if ($maintenanceModeAvailable && !class_exists('fs_maintenance_mode', false)) {
@@ -23,18 +23,7 @@ if (!defined('FS_MAINTENANCE_MODE_AVAILABLE')) {
     define('FS_MAINTENANCE_MODE_AVAILABLE', $maintenanceModeAvailable && class_exists('fs_maintenance_mode', false));
 }
 
-if (function_exists('system_updater_debug_log')) {
-    system_updater_debug_log('MM', 'compat loaded', [
-        'file_exists' => $maintenanceModeAvailable,
-        'class_exists' => class_exists('fs_maintenance_mode', false),
-        'FS_MAINTENANCE_MODE_AVAILABLE' => defined('FS_MAINTENANCE_MODE_AVAILABLE') ? FS_MAINTENANCE_MODE_AVAILABLE : null,
-        'fs_maintenance_mode_methods' => class_exists('fs_maintenance_mode', false)
-            ? array_values(array_filter(get_class_methods('fs_maintenance_mode'), static function (string $m): bool {
-                return strpos($m, 'tealth') !== false || strpos($m, 'ock') !== false;
-            }))
-            : [],
-    ]);
-}
+
 
 /**
  * Indica si la instalación actual expone el modo mantenimiento del core.

@@ -13,18 +13,18 @@
  */
 
 if (!defined('FS_FOLDER')) {
-    define('FS_FOLDER', dirname(dirname(__DIR__)));
+    define('FS_FOLDER', dirname(dirname(dirname(__DIR__))));
 }
 
 require_once __DIR__ . '/session_auth.php';
 
-function system_updater_shutdown_on_missing_config(): void
+function system_updater_shutdown_on_missing_config(string $mode = 'sse'): void
 {
     if (headers_sent()) {
         return;
     }
 
-    $isSse = defined('SYSTEM_UPDATER_SSE_MODE') && SYSTEM_UPDATER_SSE_MODE;
+    $isSse = ($mode === 'sse') || (defined('SYSTEM_UPDATER_SSE_MODE') && SYSTEM_UPDATER_SSE_MODE);
     if ($isSse) {
         header('Content-Type: text/event-stream');
         header('Cache-Control: no-cache');
@@ -51,13 +51,13 @@ function system_updater_shutdown_on_missing_config(): void
  */
 function system_updater_process_init(array $options = []): array
 {
+    $mode = (string) ($options['mode'] ?? 'sse');
+
     if (!file_exists(FS_FOLDER . '/config.php')) {
-        system_updater_shutdown_on_missing_config();
+        system_updater_shutdown_on_missing_config($mode);
     }
 
     require_once FS_FOLDER . '/config.php';
-
-    $mode = (string) ($options['mode'] ?? 'sse');
 
     @set_time_limit(0);
     @ini_set('max_execution_time', '0');

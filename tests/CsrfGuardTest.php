@@ -25,6 +25,33 @@ final class CsrfGuardTest extends TestCase
      * @runInSeparateProcess
      * @preserveGlobalState disabled
      */
+    public function testReadStoredTokenFromHttpsWithPrefix(): void
+    {
+        $_SESSION['_sf2_attributes']['_csrf/https-fs_form'] = 'https_stored_token';
+
+        $result = system_updater_csrf_read_stored_token();
+
+        $this->assertSame('https_stored_token', $result);
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testReadStoredTokenPrefersHttpsOverPlain(): void
+    {
+        $_SESSION['_sf2_attributes']['_csrf/https-fs_form'] = 'https_token';
+        $_SESSION['_sf2_attributes']['_csrf/fs_form'] = 'plain_token';
+
+        $result = system_updater_csrf_read_stored_token();
+
+        $this->assertSame('https_token', $result);
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
     public function testReadStoredTokenFromLegacyKey(): void
     {
         $_SESSION['_csrf/fs_form'] = 'legacy_stored_token';

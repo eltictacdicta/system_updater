@@ -64,7 +64,7 @@ class plugin_downloader
      */
     public function __construct()
     {
-        $this->fsRoot = defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(__DIR__));
+        $this->fsRoot = defined('FS_FOLDER') ? FS_FOLDER : dirname(dirname(dirname(__DIR__)));
 
         // Cargar cache si está disponible
         if (file_exists($this->fsRoot . '/base/fs_cache.php')) {
