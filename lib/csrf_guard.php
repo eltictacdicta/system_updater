@@ -29,7 +29,12 @@ function system_updater_csrf_failure_response(string $message): void
     if ($isSse) {
         if (!headers_sent()) {
             header('Content-Type: text/event-stream');
-            header('Cache-Control: no-cache');
+            header('Cache-Control: no-cache, no-transform');
+            header('Connection: keep-alive');
+            header('X-Accel-Buffering: no');
+            header('Content-Encoding: identity');
+            header('X-Content-Type-Options: nosniff');
+            header('Referrer-Policy: no-referrer');
         }
 
         echo "event: error\n";
@@ -54,12 +59,18 @@ function ensure_request_csrf(): void
 {
     $autoloadFile = dirname(dirname(dirname(__DIR__))) . '/vendor/autoload.php';
     if (!file_exists($autoloadFile)) {
+        system_updater_csrf_failure_response(
+            'Error: Configuración del servidor incompleta. Contacta al administrador.'
+        );
         return;
     }
 
     require_once $autoloadFile;
 
     if (!class_exists(\FSFramework\Security\CsrfManager::class)) {
+        system_updater_csrf_failure_response(
+            'Error: Configuración del servidor incompleta. Contacta al administrador.'
+        );
         return;
     }
 
@@ -92,23 +103,24 @@ function ensure_request_csrf(): void
     }
 
     $sessionStatus = session_status() === PHP_SESSION_ACTIVE ? 'active' : 'inactive';
-    $sessionId = session_id() ?: 'none';
-    $cookieNames = array_keys(array_filter($_COOKIE, fn($k) => str_starts_with($k, 'FSSESS'), ARRAY_FILTER_USE_KEY));
     $hasSf2 = isset($_SESSION['_sf2_attributes']) ? 'yes' : 'no';
     $hasToken = system_updater_csrf_read_stored_token() !== '' ? 'yes' : 'no';
 
+    $uri = (string) ($_SERVER['REQUEST_URI'] ?? 'unknown');
     error_log(sprintf(
-        '[system_updater] CSRF validation failed. session=%s, sid=%s, cookies=[%s], sf2_attrs=%s, stored_token=%s, token_len=%d',
+        '[system_updater] CSRF validation failed. uri=%s, session=%s, sf2=%s, stored=%s',
+        strtok($uri, '?'),
         $sessionStatus,
-        substr($sessionId, 0, 8) . '...',
-        implode(',', $cookieNames),
         $hasSf2,
-        $hasToken,
-        strlen($token)
+        $hasToken
     ));
 
+    $debugSuffix = !empty(getenv('SYSTEM_UPDATER_DEBUG'))
+        ? ' [session=' . $sessionStatus . ', sf2=' . $hasSf2 . ', stored=' . $hasToken . ', token_len=' . strlen($token) . ']'
+        : '';
+
     system_updater_csrf_failure_response(
-        'Error: Token CSRF inválido. Recarga la página e inténtalo de nuevo. [session=' . $sessionStatus . ', sf2=' . $hasSf2 . ', stored=' . $hasToken . ']'
+        'Error: Token CSRF inválido. Recarga la página e inténtalo de nuevo.' . $debugSuffix
     );
 }
 
