@@ -91,10 +91,19 @@ Genera token (64 chars hex)
   ↓
 Guarda en $_SESSION['system_updater']['csrf_tokens']['system_updater_csrf']
   ↓
+session_write_close() → Fuerza escritura en disco
+  ↓
 Retorna token a la vista
 ```
 
-**Nota:** La sesión se guardará automáticamente al final del request. No es necesario cerrar y reabrir explícitamente.
+**IMPORTANTE:** Se ejecuta `session_write_close()` inmediatamente después de guardar el token para forzar a PHP a escribir el archivo de sesión en disco. Esto es crítico porque:
+
+1. El controller genera el token y lo guarda en `$_SESSION`
+2. Sin `session_write_close()`, PHP puede retrasar la escritura del archivo de sesión hasta el final del request
+3. El script SSE se ejecuta en un request paralelo y necesita leer el token desde el archivo de sesión
+4. Si el archivo no existe todavía, la validación CSRF falla
+
+El `session_write_close()` asegura que el archivo de sesión esté disponible inmediatamente para el script SSE.
 
 ### 2. Validación del Token (Script SSE)
 ```

@@ -86,8 +86,14 @@ function system_updater_csrf_generate(string $tokenId = 'system_updater_csrf'): 
         'created_at' => time(),
     ];
 
-    // Session will be saved automatically at the end of the request
-    // No need to explicitly close and reopen
+    // CRITICAL: Force session to disk immediately.
+    // Without this, the token exists in $_SESSION but the session file
+    // may not be written before the request ends, causing the SSE script
+    // to fail validation when it tries to read the session.
+    // The session will be restarted automatically on the next call.
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
 
     return $token;
 }
