@@ -3,127 +3,157 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\Test;
 
 require_once dirname(__DIR__) . '/lib/csrf_guard.php';
 
 final class CsrfGuardTest extends TestCase
 {
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
-    public function testReadStoredTokenFromSf2Attributes(): void
+    protected function setUp(): void
     {
-        $_SESSION['_sf2_attributes']['_csrf/fs_form'] = 'expected_stored_token';
-
-        $result = system_updater_csrf_read_stored_token();
-
-        $this->assertSame('expected_stored_token', $result);
+        parent::setUp();
+        $_SESSION = [];
+        $_GET = [];
+        $_POST = [];
+        unset($_SERVER['HTTP_X_SU_CSRF_TOKEN']);
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
-    public function testReadStoredTokenFromHttpsWithPrefix(): void
+    #[Test]
+    public function readFromRequestGetsTokenFromGet(): void
     {
-        $_SESSION['_sf2_attributes']['_csrf/https-fs_form'] = 'https_stored_token';
+        $_GET['su_csrf_token'] = 'token_from_get';
 
-        $result = system_updater_csrf_read_stored_token();
-
-        $this->assertSame('https_stored_token', $result);
+        $this->assertSame('token_from_get', system_updater_csrf_read_from_request());
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
-    public function testReadStoredTokenPrefersHttpsOverPlain(): void
+    #[Test]
+    public function readFromRequestGetsTokenFromPost(): void
     {
-        $_SESSION['_sf2_attributes']['_csrf/https-fs_form'] = 'https_token';
-        $_SESSION['_sf2_attributes']['_csrf/fs_form'] = 'plain_token';
+        $_POST['su_csrf_token'] = 'token_from_post';
 
-        $result = system_updater_csrf_read_stored_token();
-
-        $this->assertSame('https_token', $result);
+        $this->assertSame('token_from_post', system_updater_csrf_read_from_request());
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
-    public function testReadStoredTokenFromLegacyKey(): void
+    #[Test]
+    public function readFromRequestGetsTokenFromHeader(): void
     {
-        $_SESSION['_csrf/fs_form'] = 'legacy_stored_token';
+        $_SERVER['HTTP_X_SU_CSRF_TOKEN'] = 'token_from_header';
 
-        $result = system_updater_csrf_read_stored_token();
-
-        $this->assertSame('legacy_stored_token', $result);
+        $this->assertSame('token_from_header', system_updater_csrf_read_from_request());
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
-    public function testReadStoredTokenEmptyWhenMissing(): void
+    #[Test]
+    public function readFromRequestPrefersGetOverPost(): void
     {
-        // No session keys set
-        $result = system_updater_csrf_read_stored_token();
+        $_GET['su_csrf_token'] = 'get_token';
+        $_POST['su_csrf_token'] = 'post_token';
 
-        $this->assertSame('', $result);
+        $this->assertSame('get_token', system_updater_csrf_read_from_request());
     }
 
-    public function testVerifyTokenExactMatch(): void
+    #[Test]
+    public function readFromRequestReturnsEmptyWhenMissing(): void
     {
-        $this->assertTrue(system_updater_csrf_verify_token('abc123', 'abc123'));
+        $this->assertSame('', system_updater_csrf_read_from_request());
     }
 
-    public function testVerifyTokenSymfonyRandomizedFormat(): void
+    #[Test]
+    public function ensureRequestCsrfPassesWithValidToken(): void
     {
-        // Build a valid Symfony 7 randomized CSRF token (checksum.key.xored format)
-        $storedToken = 'stored_token_for_xor_test';
-
-        // Generate a random key and compute xored = storedToken XOR repeatingKey
-        $key = random_bytes(32);
-
-        // Repeat key to match storedToken length for XOR
-        $repeatingKey = $key;
-        while (strlen($repeatingKey) < strlen($storedToken)) {
-            $repeatingKey .= $key;
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            @session_start();
         }
-        $repeatingKey = substr($repeatingKey, 0, strlen($storedToken));
+        $_SESSION = [];
 
-        $xored = $storedToken ^ $repeatingKey;
+        $token = system_updater_csrf_generate();
+        $_GET['su_csrf_token'] = $token;
 
-        // Base64url encode (Symfony convention: rtrim padding, tr +/ → -_)
-        $keyEncoded = rtrim(strtr(base64_encode($key), '+/', '-_'), '=');
-        $xoredEncoded = rtrim(strtr(base64_encode($xored), '+/', '-_'), '=');
+        // Should return without exiting
+        ensure_request_csrf();
 
-        $submittedToken = 'dummy_checksum.' . $keyEncoded . '.' . $xoredEncoded;
-
-        $this->assertTrue(
-            system_updater_csrf_verify_token($submittedToken, $storedToken),
-            'Randomized-format CSRF token should verify against its stored value'
-        );
+        // If we reach here, the function returned normally (no exit)
+        $this->assertTrue(true);
     }
 
-    public function testVerifyTokenMismatchRejected(): void
+    #[Test]
+    public function ensureRequestCsrfPassesWithPostToken(): void
     {
-        $this->assertFalse(system_updater_csrf_verify_token('token_a', 'token_b'));
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            @session_start();
+        }
+        $_SESSION = [];
+
+        $token = system_updater_csrf_generate();
+        $_POST['su_csrf_token'] = $token;
+
+        ensure_request_csrf();
+
+        $this->assertTrue(true);
     }
 
-    public function testVerifyTokenMalformedRejected(): void
+    #[Test]
+    public function ensureRequestCsrfPassesWithHeaderToken(): void
     {
-        // Non-3-part dotted string — should fall through to direct hash_equals comparison
-        $this->assertFalse(system_updater_csrf_verify_token('just-one-part', 'stored_value'));
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            @session_start();
+        }
+        $_SESSION = [];
+
+        $token = system_updater_csrf_generate();
+        $_SERVER['HTTP_X_SU_CSRF_TOKEN'] = $token;
+
+        ensure_request_csrf();
+
+        $this->assertTrue(true);
     }
 
-    /**
-     * Additional triangulation: a 2-part dotted string is also malformed
-     * (neither 3-part Symfony format nor exact match).
-     */
-    public function testVerifyTokenTwoPartDottedRejected(): void
+    #[Test]
+    public function validateRejectsTokenFromDifferentSession(): void
     {
-        $this->assertFalse(system_updater_csrf_verify_token('two.parts', 'stored_value'));
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            @session_start();
+        }
+        $_SESSION = [];
+
+        // Generate a token, then clear session (simulating a different session)
+        system_updater_csrf_generate();
+        $_SESSION = [];
+
+        $this->assertFalse(system_updater_csrf_validate('any_token_value'));
+    }
+
+    #[Test]
+    public function guardDoesNotReferenceCoreSessionKeys(): void
+    {
+        // Verify the guard file does not contain references to core session internals
+        $guardCode = file_get_contents(dirname(__DIR__) . '/lib/csrf_guard.php');
+
+        $this->assertStringNotContainsString('_sf2_attributes', $guardCode);
+        $this->assertStringNotContainsString("'_csrf'", $guardCode);
+        $this->assertStringNotContainsString('CsrfManager', $guardCode);
+        $this->assertStringNotContainsString('system_updater_csrf_decode_token', $guardCode);
+        $this->assertStringNotContainsString('system_updater_csrf_search_in_array', $guardCode);
+        $this->assertStringNotContainsString('system_updater_csrf_find_value_in_session', $guardCode);
+    }
+
+    #[Test]
+    public function guardFileIsUnderLineBudget(): void
+    {
+        $guardFile = dirname(__DIR__) . '/lib/csrf_guard.php';
+        $lineCount = count(file($guardFile));
+
+        $this->assertLessThan(150, $lineCount, 'csrf_guard.php must be under 150 lines');
+    }
+
+    #[Test]
+    public function failureResponseFunctionExists(): void
+    {
+        $this->assertTrue(function_exists('system_updater_csrf_failure_response'));
+    }
+
+    #[Test]
+    public function ensureRequestCsrfFunctionExists(): void
+    {
+        $this->assertTrue(function_exists('ensure_request_csrf'));
     }
 }

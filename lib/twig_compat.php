@@ -5,9 +5,16 @@
  * Prefer passing these values from controllers into Twig templates instead of
  * relying on Twig functions that may be unavailable on legacy framework versions.
  *
+ * CSRF strategy:
+ * - Core csrf_field()/csrf_meta() → for controller POST forms (via index.php).
+ * - Plugin system_updater_csrf_field()/system_updater_csrf_meta() → for SSE
+ *   process scripts that bypass index.php (independent token system).
+ *
  * @author Javier Trujillo
  * @license LGPL-3.0-or-later
  */
+
+require_once __DIR__ . '/csrf_token.php';
 
 /**
  * Ensures the legacy session manager is available for CSRF fallbacks.
@@ -39,9 +46,10 @@ function system_updater_csrf_available(): bool
 }
 
 /**
- * Generates a CSRF meta tag using the modern or legacy token source.
+ * Generates a core CSRF meta tag using the modern or legacy token source.
+ * Used for controller POST forms that go through index.php.
  */
-function system_updater_csrf_meta(): string
+function system_updater_core_csrf_meta(): string
 {
     if (class_exists(\FSFramework\Security\CsrfManager::class)) {
         return \FSFramework\Security\CsrfManager::metaTag();
@@ -56,9 +64,10 @@ function system_updater_csrf_meta(): string
 }
 
 /**
- * Generates a CSRF hidden field using the modern or legacy token source.
+ * Generates a core CSRF hidden field using the modern or legacy token source.
+ * Used for controller POST forms that go through index.php.
  */
-function system_updater_csrf_field(): string
+function system_updater_core_csrf_field(): string
 {
     if (class_exists(\FSFramework\Security\CsrfManager::class)) {
         return \FSFramework\Security\CsrfManager::field();
@@ -90,6 +99,9 @@ function system_updater_script_nonce_attr(): string
 /**
  * Populates public controller properties used by plugin Twig templates.
  *
+ * Provides both core CSRF tokens (for controller POST forms) and plugin
+ * CSRF tokens (for SSE process scripts).
+ *
  * @param object $controller
  */
 function system_updater_prepare_view_compat($controller): void
@@ -99,6 +111,15 @@ function system_updater_prepare_view_compat($controller): void
     }
 
     $controller->script_nonce_attr = system_updater_script_nonce_attr();
-    $controller->csrf_meta_html = system_updater_csrf_meta();
-    $controller->csrf_field_html = system_updater_csrf_field();
+    $controller->csrf_meta_html = system_updater_core_csrf_meta();
+    $controller->csrf_field_html = system_updater_core_csrf_field();
+
+    // Plugin-specific CSRF token for SSE process scripts
+    // Reuse existing token if present, only generate if missing
+    $storedToken = system_updater_csrf_get_stored();
+    if ($storedToken === null) {
+        $storedToken = system_updater_csrf_generate();
+    }
+    $controller->su_csrf_token = $storedToken;
+    $controller->su_csrf_meta_html = system_updater_csrf_meta();
 }

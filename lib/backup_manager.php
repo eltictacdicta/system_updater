@@ -753,13 +753,15 @@ class backup_manager
                 return $this->create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
             }
 
-            // MySQL backup
+            // MySQL backup - use --defaults-extra-file to avoid exposing password in process list
+            $defaultsFile = $this->create_mysql_defaults_file($dbHost, $dbPort, $dbUser, $dbPass);
+            if ($defaultsFile === false) {
+                return $this->create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
+            }
+
             $command = sprintf(
-                'mysqldump --single-transaction --routines --triggers --host=%s --port=%s --user=%s --password=%s %s 2>&1 | gzip > %s',
-                escapeshellarg($dbHost),
-                escapeshellarg($dbPort),
-                escapeshellarg($dbUser),
-                escapeshellarg($dbPass),
+                'mysqldump --defaults-extra-file=%s --single-transaction --routines --triggers %s 2>&1 | gzip > %s',
+                escapeshellarg($defaultsFile),
                 escapeshellarg($dbName),
                 escapeshellarg($filePath)
             );
@@ -768,6 +770,11 @@ class backup_manager
         $output = array();
         $returnVar = 0;
         exec($command, $output, $returnVar);
+
+        // Clean up defaults file if it was created
+        if (isset($defaultsFile) && file_exists($defaultsFile)) {
+            @unlink($defaultsFile);
+        }
 
         if ($dbType === 'POSTGRESQL') {
             putenv('PGPASSWORD');
@@ -1750,31 +1757,39 @@ class backup_manager
         $importError = null;
 
         // Check if shell functions are available
+        $shellRestoreAttempted = false;
         if ($this->shell_functions_available()) {
             // Use shell command for faster restore
-            $command = sprintf(
-                'gunzip -c %s | mysql --host=%s --port=%s --user=%s %s 2>&1',
-                escapeshellarg($backupPath),
-                escapeshellarg($dbHost),
-                escapeshellarg($dbPort),
-                escapeshellarg($dbUser),
-                escapeshellarg($dbName)
-            );
+            // Use --defaults-extra-file to avoid exposing password in process list
+            $defaultsFile = $this->create_mysql_defaults_file($dbHost, $dbPort, $dbUser, $dbPass);
+            if ($defaultsFile !== false) {
+                $shellRestoreAttempted = true;
+                $command = sprintf(
+                    'gunzip -c %s | mysql --defaults-extra-file=%s %s 2>&1',
+                    escapeshellarg($backupPath),
+                    escapeshellarg($defaultsFile),
+                    escapeshellarg($dbName)
+                );
 
-            putenv('MYSQL_PWD=' . $dbPass);
+                $output = array();
+                $returnVar = 0;
+                exec($command, $output, $returnVar);
 
-            $output = array();
-            $returnVar = 0;
-            exec($command, $output, $returnVar);
+                // Clean up defaults file
+                if (file_exists($defaultsFile)) {
+                    @unlink($defaultsFile);
+                }
 
-            putenv('MYSQL_PWD');
-
-            if ($returnVar !== 0) {
-                $importError = implode("\n", $output);
-            } else {
-                $importSuccess = true;
+                if ($returnVar !== 0) {
+                    $importError = implode("\n", $output);
+                } else {
+                    $importSuccess = true;
+                }
             }
-        } else {
+        }
+        
+        // Fallback to native restore if shell restore was not attempted or failed
+        if (!$shellRestoreAttempted) {
             // Use PHP-native restore method
             $restoreResult = $this->restore_database_native($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress);
             if ($restoreResult['success']) {
@@ -2666,5 +2681,39 @@ class backup_manager
             $tempTable = '_' . $table . '_backup_temp';
             $this->mysqlHelper->dropTableIfExists($mysqli, $tempTable);
         }
+    }
+
+    /**
+     * Crea un archivo temporal de configuración MySQL (--defaults-extra-file)
+     * para evitar exponer la contraseña en el command line.
+     *
+     * @param string $host Host de la base de datos
+     * @param string $port Puerto de la base de datos
+     * @param string $user Usuario de la base de datos
+     * @param string $pass Contraseña de la base de datos
+     * @return string|false Ruta al archivo creado o false si falla
+     */
+    private function create_mysql_defaults_file($host, $port, $user, $pass)
+    {
+        $tempFile = tempnam(sys_get_temp_dir(), 'mysql_defaults_');
+        if ($tempFile === false) {
+            return false;
+        }
+
+        $content = "[client]\n";
+        $content .= "host=" . $host . "\n";
+        $content .= "port=" . $port . "\n";
+        $content .= "user=" . $user . "\n";
+        $content .= "password=" . $pass . "\n";
+
+        if (file_put_contents($tempFile, $content) === false) {
+            @unlink($tempFile);
+            return false;
+        }
+
+        // Set restrictive permissions (owner read/write only)
+        @chmod($tempFile, 0600);
+
+        return $tempFile;
     }
 }

@@ -101,4 +101,32 @@ final class SessionAuthTest extends TestCase
         $this->assertSame('', FS_PATH);
         $this->assertSame('/', system_updater_resolve_cookie_path());
     }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testPrimeFsPathBeforeConfigAvoidsPluginSubdirectory(): void
+    {
+        $_SERVER['REQUEST_URI'] = '/plugins/system_updater/process_backup.php?action=start';
+        $_SERVER['SCRIPT_NAME'] = '/plugins/system_updater/process_backup.php';
+
+        system_updater_prime_fs_path_from_request();
+
+        $this->assertTrue(defined('FS_PATH'));
+        $this->assertSame('', FS_PATH);
+        $this->assertSame('/', system_updater_resolve_cookie_path());
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testCookiePathUsesAppRootWhenConfigDefinedPluginPath(): void
+    {
+        define('FS_PATH', '/plugins/system_updater/');
+        $_SERVER['REQUEST_URI'] = '/plugins/system_updater/process_core_update.php?action=start';
+
+        $this->assertSame('/', system_updater_resolve_cookie_path());
+    }
 }

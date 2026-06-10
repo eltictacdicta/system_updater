@@ -8,14 +8,16 @@
 
 function system_updater_resolve_session_name(): string
 {
-    if (defined('FS_SESSION_NAME') && trim((string) FS_SESSION_NAME) !== '') {
-        return trim((string) FS_SESSION_NAME);
+    // El plugin usa su propia sesión independiente del framework
+    // para evitar conflictos con las sesiones del framework
+    if (defined('SYSTEM_UPDATER_SESSION_NAME') && trim((string) SYSTEM_UPDATER_SESSION_NAME) !== '') {
+        return trim((string) SYSTEM_UPDATER_SESSION_NAME);
     }
 
     $seed = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
     $seed = str_replace('\\', '/', $seed);
 
-    return 'FSSESS_' . substr(sha1($seed), 0, 12);
+    return 'SU_SESS_' . substr(sha1($seed . '_system_updater'), 0, 12);
 }
 
 /**
@@ -23,39 +25,90 @@ function system_updater_resolve_session_name(): string
  */
 function system_updater_resolve_session_names(): array
 {
+    // La sesión del plugin tiene prioridad
     $names = [system_updater_resolve_session_name()];
 
+    // Luego las sesiones del framework como fallback
+    $fsSessionName = 'FSSESS_' . substr(sha1(str_replace('\\', '/', defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__))))), 0, 12);
+    if (!in_array($fsSessionName, $names, true)) {
+        $names[] = $fsSessionName;
+    }
+
     $iniName = trim((string) ini_get('session.name'));
-    if ($iniName !== '') {
+    if ($iniName !== '' && !in_array($iniName, $names, true)) {
         $names[] = $iniName;
     }
 
-    $names[] = 'PHPSESSID';
-
-    $normalized = [];
-    foreach ($names as $name) {
-        $candidate = trim((string) $name);
-        if ($candidate !== '' && !in_array($candidate, $normalized, true)) {
-            $normalized[] = $candidate;
-        }
+    if (!in_array('PHPSESSID', $names, true)) {
+        $names[] = 'PHPSESSID';
     }
 
-    return $normalized;
+    return $names;
 }
 
-function system_updater_ensure_fs_path(): void
+/**
+ * Resolves the application base path for standalone process/recovery scripts.
+ *
+ * Must run before config.php/config2.php so FS_PATH matches index.php (cookie path "/")
+ * instead of the plugin subdirectory derived from SCRIPT_NAME.
+ * 
+ * Returns '/' for root installs (not empty string) to avoid ambiguity.
+ */
+function system_updater_resolve_app_fs_path_from_request(): string
+{
+    $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+    $path = is_string(parse_url($requestUri, PHP_URL_PATH)) ? parse_url($requestUri, PHP_URL_PATH) : '';
+
+    if ($path !== '' && preg_match('#^(.*)/plugins/system_updater/(?:process_[^/]+\.php|recovery\.php)$#', $path, $matches) === 1) {
+        $base = (string) $matches[1];
+
+        // Return '/' for root installs, not empty string
+        return $base === '' ? '/' : rtrim($base, '/') . '/';
+    }
+
+    // Return '/' as default, not empty string
+    return '/';
+}
+
+function system_updater_is_standalone_process_request(): bool
+{
+    $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+    $path = is_string(parse_url($requestUri, PHP_URL_PATH)) ? parse_url($requestUri, PHP_URL_PATH) : '';
+
+    return $path !== ''
+        && preg_match('#/plugins/system_updater/(?:process_[^/]+\.php|recovery\.php)$#', $path) === 1;
+}
+
+/**
+ * Define FS_PATH for process scripts before config.php loads config2.php.
+ */
+function system_updater_prime_fs_path_from_request(): void
 {
     if (defined('FS_PATH')) {
         return;
     }
 
-    $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '');
-    $path = is_string(parse_url($requestUri, PHP_URL_PATH)) ? parse_url($requestUri, PHP_URL_PATH) : '';
+    if (!system_updater_is_standalone_process_request()) {
+        return;
+    }
 
-    if ($path !== '' && preg_match('#^(.*)/plugins/system_updater/process_[^/]+\.php$#', $path, $matches) === 1) {
-        $base = (string) $matches[1];
-        define('FS_PATH', $base === '' ? '' : rtrim($base, '/') . '/');
+    define('FS_PATH', system_updater_resolve_app_fs_path_from_request());
+}
 
+function system_updater_ensure_fs_path(): void
+{
+    if (!defined('FS_PATH')) {
+        $primedPath = system_updater_resolve_app_fs_path_from_request();
+        if (system_updater_is_standalone_process_request()) {
+            define('FS_PATH', $primedPath);
+
+            return;
+        }
+    } elseif (system_updater_is_standalone_process_request()) {
+        // config2.php may have set FS_PATH from SCRIPT_NAME (/plugins/system_updater/).
+        // Cookie path must match index.php; callers cannot redefine the constant.
+        return;
+    } else {
         return;
     }
 
@@ -146,10 +199,13 @@ function system_updater_session_is_valid(array $session): bool
 
 function system_updater_resolve_cookie_path(): string
 {
-    if (defined('FS_PATH') && trim((string) FS_PATH) === '') {
-        return '/';
+    // Standalone SSE/AJAX scripts must share the same cookie scope as index.php.
+    // This ensures the SU_SESS_* cookie is sent to both controller and SSE scripts.
+    if (system_updater_is_standalone_process_request()) {
+        return system_updater_resolve_app_fs_path_from_request();
     }
 
+    // For controller requests, use FS_PATH if defined
     $preferredPath = defined('FS_PATH') ? (string) FS_PATH : null;
 
     return system_updater_normalize_cookie_path($preferredPath, $_SERVER);
@@ -233,14 +289,35 @@ function system_updater_native_session_start(): bool
         return true;
     }
 
-    foreach (system_updater_resolve_session_names() as $sessionName) {
-        $sessionId = isset($_COOKIE[$sessionName]) ? trim((string) $_COOKIE[$sessionName]) : '';
-        if ($sessionId === '') {
+    // El plugin usa su propia sesión independiente (SU_SESS_*)
+    // para evitar conflictos con las sesiones del framework
+    $sessionName = system_updater_resolve_session_name();
+    $sessionId = isset($_COOKIE[$sessionName]) ? trim((string) $_COOKIE[$sessionName]) : '';
+    
+    if ($sessionId !== '') {
+        // Configurar sesión del plugin
+        system_updater_configure_php_session($sessionName);
+        session_id($sessionId);
+
+        if (@session_start()) {
+            return true;
+        }
+    }
+
+    // Si no hay cookie de sesión del plugin, intentar con las sesiones del framework
+    // como fallback para mantener compatibilidad
+    foreach (system_updater_resolve_session_names() as $fallbackName) {
+        if ($fallbackName === $sessionName) {
+            continue; // Ya lo intentamos
+        }
+        
+        $fallbackId = isset($_COOKIE[$fallbackName]) ? trim((string) $_COOKIE[$fallbackName]) : '';
+        if ($fallbackId === '') {
             continue;
         }
 
-        system_updater_configure_php_session($sessionName);
-        session_id($sessionId);
+        system_updater_configure_php_session($fallbackName);
+        session_id($fallbackId);
 
         if (@session_start()) {
             return true;

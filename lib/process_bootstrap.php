@@ -17,6 +17,7 @@ if (!defined('FS_FOLDER')) {
 }
 
 require_once __DIR__ . '/session_auth.php';
+system_updater_prime_fs_path_from_request();
 
 function system_updater_shutdown_on_missing_config(string $mode = 'sse'): void
 {

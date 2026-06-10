@@ -6,6 +6,7 @@
 #}
 {{ include('header.html.twig') }}
 {{ fsc.csrf_meta_html|raw }}
+{{ fsc.su_csrf_meta_html|raw }}
 
 <div class="container-fluid" style="margin-top: 10px;">
     <div class="row">
@@ -344,6 +345,7 @@
 <script{{ fsc.script_nonce_attr|raw }} type="text/javascript">
 $(document).ready(function() {
     var csrfToken = $('meta[name="csrf-token"]').attr('content') || '';
+    var suCsrfToken = $('meta[name="su-csrf-token"]').attr('content') || '';
     var restoreEventSource = null;
     var restoreLog = [];
     var restoreFinished = false;
@@ -457,8 +459,8 @@ $(document).ready(function() {
         }
         $('#backupProgressModal').modal('show');
 
-        var sseUrl = 'plugins/system_updater/process_backup.php?action=start&_csrf_token=' + encodeURIComponent(csrfToken);
-        var backupEventSource = new EventSource(sseUrl);
+        var sseUrl = 'plugins/system_updater/process_backup.php?action=start&su_csrf_token=' + encodeURIComponent(suCsrfToken);
+        var backupEventSource = new EventSource(sseUrl, { withCredentials: true });
 
         backupEventSource.addEventListener('start', function(e) {
             var data = JSON.parse(e.data);
@@ -583,8 +585,8 @@ $(document).ready(function() {
         $('#btn-update-core, #btn-reinstall-core').prop('disabled', true);
         $('#coreUpdateProgressModal').modal('show');
 
-        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0') + '&_csrf_token=' + encodeURIComponent(csrfToken);
-        coreUpdateEventSource = new EventSource(sseUrl);
+        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0') + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
+        coreUpdateEventSource = new EventSource(sseUrl, { withCredentials: true });
 
         coreUpdateEventSource.addEventListener('start', function(e) {
             var data = JSON.parse(e.data);
@@ -725,9 +727,9 @@ $(document).ready(function() {
         $('#restoreProgressModal').modal('show');
         
         // Start SSE connection
-        var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type) + '&_csrf_token=' + encodeURIComponent(csrfToken);
+        var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type) + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
         
-        restoreEventSource = new EventSource(sseUrl);
+        restoreEventSource = new EventSource(sseUrl, { withCredentials: true });
         
         restoreEventSource.addEventListener('start', function(e) {
             var data = JSON.parse(e.data);
