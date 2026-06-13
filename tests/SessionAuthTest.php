@@ -13,10 +13,10 @@ final class SessionAuthTest extends TestCase
         }
     }
 
-    public function testResolveSessionNameUsesFsFolderHashWhenConstantMissing(): void
+    public function testResolveSessionNameUsesPluginScopedHashWhenConstantMissing(): void
     {
         $seed = str_replace('\\', '/', FS_FOLDER);
-        $expected = 'FSSESS_' . substr(sha1($seed), 0, 12);
+        $expected = 'SU_SESS_' . substr(sha1($seed . '_system_updater'), 0, 12);
 
         $this->assertSame($expected, system_updater_resolve_session_name());
     }
@@ -124,7 +124,9 @@ final class SessionAuthTest extends TestCase
      */
     public function testCookiePathUsesAppRootWhenConfigDefinedPluginPath(): void
     {
-        define('FS_PATH', '/plugins/system_updater/');
+        if (!defined('FS_PATH')) {
+            define('FS_PATH', '/plugins/system_updater/');
+        }
         $_SERVER['REQUEST_URI'] = '/plugins/system_updater/process_core_update.php?action=start';
 
         $this->assertSame('/', system_updater_resolve_cookie_path());

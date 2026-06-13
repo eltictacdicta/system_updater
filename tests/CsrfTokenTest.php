@@ -77,8 +77,14 @@ final class CsrfTokenTest extends TestCase
 
         $token = system_updater_csrf_generate();
 
-        // Simulate expiry by backdating created_at
+        // Simulate expiry by backdating created_at. csrf_generate() calls
+        // session_write_close() at the end (intentional, to persist the token
+        // before SSE scripts read it), so we must reopen the session to mutate
+        // $_SESSION and then close it again for csrf_ensure_session() in
+        // csrf_validate() to read the backdated value from disk.
+        system_updater_csrf_ensure_session();
         $_SESSION['system_updater']['csrf_tokens']['system_updater_csrf']['created_at'] = time() - SYSTEM_UPDATER_CSRF_TTL - 1;
+        @session_write_close();
 
         $this->assertFalse(system_updater_csrf_validate($token));
         // Expired entry should be cleaned up
