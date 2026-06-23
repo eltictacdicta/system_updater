@@ -1634,16 +1634,76 @@ class backup_manager
     }
 
     /**
+     * Resolve a database backup from a standalone dump or a unified package.
+     *
+     * @param string $backupFile Backup filename or path (.sql.gz or _complete.zip)
+     * @return array{path: string, temp_dir: string|null}|false
+     */
+    public function resolve_database_backup_source($backupFile)
+    {
+        $backupPath = $this->get_backup_file_path($backupFile);
+        if (!$backupPath) {
+            $this->errors[] = "Archivo de backup no encontrado: " . $backupFile;
+            return false;
+        }
+
+        if (substr($backupPath, -7) === '.sql.gz') {
+            return array(
+                'path' => $backupPath,
+                'temp_dir' => null,
+            );
+        }
+
+        if (strpos(basename($backupPath), '_complete.zip') === false) {
+            $this->errors[] = "El archivo no es un backup de base de datos válido: " . $backupFile;
+            return false;
+        }
+
+        $tempDir = $this->backupPath . '/temp_db_restore_' . time();
+        if (!$this->extract_unified_package($backupPath, $tempDir)) {
+            $this->delete_directory($tempDir);
+            return false;
+        }
+
+        $metadata = $this->read_package_metadata($tempDir);
+        $dbBackup = $tempDir . '/database/' . ($metadata['database_file'] ?? '');
+        if (!file_exists($dbBackup)) {
+            $dbBackup = false;
+            $dbDir = $tempDir . '/database';
+            if (is_dir($dbDir)) {
+                foreach (scandir($dbDir) as $f) {
+                    if (substr($f, -7) === '.sql.gz') {
+                        $dbBackup = $dbDir . '/' . $f;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!$dbBackup || !file_exists($dbBackup)) {
+            $this->errors[] = "No se encontró backup de base de datos dentro del paquete: " . $backupFile;
+            $this->delete_directory($tempDir);
+            return false;
+        }
+
+        return array(
+            'path' => $dbBackup,
+            'temp_dir' => $tempDir,
+        );
+    }
+
+    /**
      * Restore only database from a backup.
      * First drops all tables to ensure a clean restore.
      *
-     * @param string $backupFile The database backup (sql.gz)
+     * @param string $backupFile The database backup (.sql.gz or _complete.zip)
      * @param callable|null $progressCallback Optional callback function($step, $message, $percent) for progress updates
      * @return array Result with success status
      */
     public function restore_database($backupFile, $progressCallback = null)
     {
         $result = array('success' => false);
+        $tempDir = null;
 
         $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
@@ -1653,13 +1713,34 @@ class backup_manager
 
         $reportProgress('db_start', 'Preparando restauración de base de datos...', 55);
 
-        $backupPath = $this->get_backup_file_path($backupFile);
-        if (!$backupPath) {
-            $this->errors[] = "Archivo de backup no encontrado: " . $backupFile;
-            $reportProgress('db_error', 'Archivo de backup no encontrado', 55);
+        $resolved = $this->resolve_database_backup_source($backupFile);
+        if (!$resolved) {
+            $reportProgress('db_error', 'Archivo de backup no encontrado o inválido', 55);
             return $result;
         }
 
+        $backupPath = $resolved['path'];
+        $tempDir = $resolved['temp_dir'];
+
+        try {
+            return $this->execute_database_restore($backupPath, $reportProgress, $result);
+        } finally {
+            if ($tempDir) {
+                $this->delete_directory($tempDir);
+            }
+        }
+    }
+
+    /**
+     * Execute database restore from a resolved SQL dump path.
+     *
+     * @param string $backupPath
+     * @param callable $reportProgress
+     * @param array $result
+     * @return array
+     */
+    private function execute_database_restore($backupPath, $reportProgress, $result)
+    {
         $dbHost = defined('FS_DB_HOST') ? FS_DB_HOST : 'localhost';
         $dbType = $this->get_database_type();
         $dbPort = $this->get_database_port($dbType);
@@ -2446,6 +2527,18 @@ class backup_manager
         }
 
         // Convert to indexed array and sort by timestamp descending
+        foreach ($grouped as $baseName => $group) {
+            $grouped[$baseName]['can_restore_complete'] = ($group['complete'] !== null);
+            $grouped[$baseName]['can_restore_files'] = ($group['files'] !== null || $group['complete'] !== null);
+            $grouped[$baseName]['can_restore_database'] = ($group['database'] !== null || $group['complete'] !== null);
+            $grouped[$baseName]['database_restore_file'] = null;
+            if ($group['database']) {
+                $grouped[$baseName]['database_restore_file'] = $group['database']['name'];
+            } elseif ($group['complete']) {
+                $grouped[$baseName]['database_restore_file'] = $group['complete']['name'];
+            }
+        }
+
         $result = array_values($grouped);
         usort($result, function ($a, $b) {
             return $b['timestamp'] - $a['timestamp'];

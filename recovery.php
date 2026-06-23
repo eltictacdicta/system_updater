@@ -214,9 +214,18 @@ $backups = $backupManager->list_backups_grouped();
                                     <?php if ($group['complete']): ?>
                                         <a href="#"
                                             class="btn btn-danger btn-sm restore-btn"
-                                            data-file="<?php echo htmlspecialchars($group['complete']['name']); ?>">
+                                            data-file="<?php echo htmlspecialchars($group['complete']['name']); ?>"
+                                            data-type="complete">
                                             <i class="fa fa-undo"></i> Restaurar Todo
                                         </a>
+                                        <?php if (!empty($group['can_restore_database']) && !empty($group['database_restore_file'])): ?>
+                                        <a href="#"
+                                            class="btn btn-warning btn-sm restore-btn"
+                                            data-file="<?php echo htmlspecialchars($group['database_restore_file']); ?>"
+                                            data-type="database">
+                                            <i class="fa fa-database"></i> Restaurar BD
+                                        </a>
+                                        <?php endif; ?>
                                     <?php else: ?>
                                         <span class="text-muted">Solo backup completo soportado en recuperación</span>
                                     <?php endif; ?>
@@ -395,10 +404,16 @@ $backups = $backupManager->list_backups_grouped();
                 e.preventDefault();
 
                 var file = jQuery(this).data('file');
+                var type = jQuery(this).data('type') || 'complete';
 
                 if (file) {
-                    if (confirm('¡ADVERTENCIA! Esto sobrescribirá TODOS los archivos y la base de datos. ¿Estás seguro?')) {
-                        startRestore(file, 'complete');
+                    var confirmMessage = '¡ADVERTENCIA! Esto sobrescribirá TODOS los archivos y la base de datos. ¿Estás seguro?';
+                    if (type === 'database') {
+                        confirmMessage = '¿Restaurar SOLO la base de datos? Los archivos del sistema no se modificarán.';
+                    }
+
+                    if (confirm(confirmMessage)) {
+                        startRestore(file, type);
                     }
                 } else {
                     alert('Error: No se pudo determinar el archivo de backup');

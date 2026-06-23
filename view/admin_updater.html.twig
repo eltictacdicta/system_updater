@@ -303,6 +303,11 @@
                                         <button type="button" class="btn btn-warning btn-restore" data-action="restore_complete" data-file="{{ group.complete.name }}" title="Restaurar todo">
                                             <i class="fa fa-undo"></i>
                                         </button>
+                                        {% if group.can_restore_database and group.database_restore_file %}
+                                        <button type="button" class="btn btn-default btn-restore" data-action="restore_database" data-file="{{ group.database_restore_file }}" title="Restaurar solo base de datos">
+                                            <i class="fa fa-database"></i>
+                                        </button>
+                                        {% endif %}
                                         {% endif %}
                                         
                                         {% if not group.complete %}
