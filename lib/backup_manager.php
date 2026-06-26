@@ -211,6 +211,8 @@ class backup_manager
 {
     const BACKUP_DIR = 'backups';
     const VERSION = '2.3.1';
+    const HOST_SLUG_MAX_LEN = 63;
+    const HOST_HEADER_MAX_LEN = 253;
 
     /**
      * @var string
@@ -270,6 +272,74 @@ class backup_manager
         $this->backupPath = $this->fsRoot . DIRECTORY_SEPARATOR . self::BACKUP_DIR;
         $this->mysqlHelper = new BackupMysqlHelper($this->errors);
         $this->ensureBackupDirectoryExists();
+    }
+
+    /**
+     * Sanitize a raw host string into a slug safe for filenames and DNS labels.
+     *
+     * Rules:
+     *  - lowercased
+     *  - any char outside [a-z0-9-] becomes a dash
+     *  - consecutive dashes collapse to a single dash
+     *  - leading and trailing dashes are trimmed
+     *  - capped at 63 chars (DNS label limit) AFTER trimming
+     *  - empty result falls back to "unknown"
+     *
+     * @param string $raw
+     * @return string
+     */
+    private static function slugify_host(string $raw): string
+    {
+        $slug = strtolower((string) $raw);
+        $slug = preg_replace('/[^a-z0-9-]+/', '-', $slug);
+        if ($slug === null) {
+            $slug = '';
+        }
+        $slug = preg_replace('/-+/', '-', $slug);
+        if ($slug === null) {
+            $slug = '';
+        }
+        $slug = trim($slug, '-');
+        if ($slug === '') {
+            return 'unknown';
+        }
+        if (strlen($slug) > self::HOST_SLUG_MAX_LEN) {
+            $slug = substr($slug, 0, self::HOST_SLUG_MAX_LEN);
+        }
+        return $slug;
+    }
+
+    /**
+     * Resolve the host slug used as a filename prefix for new backups.
+     *
+     * Chain: $_SERVER['HTTP_HOST'] -> $_SERVER['SERVER_NAME'] -> gethostname() -> 'unknown'.
+     * Each candidate must match `/^[a-zA-Z0-9.\-:]{1,' . self::HOST_HEADER_MAX_LEN . '}$/`
+     * (i.e. 1-253 chars; defends against
+     * Host header injection like `../../etc/passwd` and oversized strings);
+     * candidates that fail the guard fall through to the next link.
+     * The surviving candidate is then run through {@see self::slugify_host()}.
+     *
+     * @return string
+     */
+    private function resolve_host_slug(): string
+    {
+        $sources = array(
+            isset($_SERVER['HTTP_HOST']) ? (string) $_SERVER['HTTP_HOST'] : '',
+            isset($_SERVER['SERVER_NAME']) ? (string) $_SERVER['SERVER_NAME'] : '',
+            function_exists('gethostname') ? (string) gethostname() : '',
+        );
+
+        foreach ($sources as $raw) {
+            if ($raw === '' || !preg_match('/^[a-zA-Z0-9.\-:]{1,' . self::HOST_HEADER_MAX_LEN . '}$/', $raw)) {
+                continue;
+            }
+            $slug = self::slugify_host($raw);
+            if ($slug !== 'unknown') {
+                return $slug;
+            }
+        }
+
+        return 'unknown';
     }
 
     /**
@@ -544,7 +614,7 @@ class backup_manager
         };
 
         $timestamp = date('Y-m-d_H-i-s');
-        $baseName = $customName ? $customName : 'backup_' . $timestamp;
+        $baseName = $customName ? $customName : $this->resolve_host_slug() . '_' . $timestamp;
 
         $reportProgress('init', 'Obteniendo información del sistema...', 5);
 
@@ -711,7 +781,7 @@ class backup_manager
     public function create_database_backup($customName = '')
     {
         $timestamp = date('Y-m-d_H-i-s');
-        $fileName = ($customName ? $customName : 'db_backup_' . $timestamp) . '.sql.gz';
+        $fileName = ($customName ? $customName : $this->resolve_host_slug() . '_' . $timestamp) . '.sql.gz';
         $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
 
         // Get DB credentials - compatible with older and newer versions
@@ -973,7 +1043,7 @@ class backup_manager
         };
 
         $timestamp = date('Y-m-d_H-i-s');
-        $fileName = ($customName ? $customName : 'db_backup_' . $timestamp) . '.sql.gz';
+        $fileName = ($customName ? $customName : $this->resolve_host_slug() . '_' . $timestamp) . '.sql.gz';
         $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
 
         // Get DB credentials
@@ -1169,10 +1239,11 @@ class backup_manager
         }
 
         $timestamp = date('Y-m-d_H-i-s');
-        $fileName = ($customName ? $customName : 'files_backup_' . $timestamp) . '.zip';
+        $fileName = ($customName ? $customName : $this->resolve_host_slug() . '_' . $timestamp) . '.zip';
         $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
 
         $zip = new ZipArchive();
+
         $result = $zip->open($filePath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
 
         if ($result !== true) {
@@ -1240,7 +1311,7 @@ class backup_manager
         }
 
         $timestamp = date('Y-m-d_H-i-s');
-        $fileName = ($customName ? $customName : 'files_backup_' . $timestamp) . '.zip';
+        $fileName = ($customName ? $customName : $this->resolve_host_slug() . '_' . $timestamp) . '.zip';
         $filePath = $this->backupPath . DIRECTORY_SEPARATOR . $fileName;
 
         $reportProgress('files_init', 'Preparando backup de archivos...', 52);
