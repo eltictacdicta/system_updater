@@ -52,6 +52,15 @@ class Init
      */
     public function init(): void
     {
+        if (!class_exists(\FSFramework\Core\Plugin\PluginInstallProviderRegistry::class)) {
+            return;
+        }
+
+        require_once __DIR__ . '/lib/CatalogPluginInstallProvider.php';
+
+        if (class_exists('CatalogPluginInstallProvider', false)) {
+            \FSFramework\Core\Plugin\PluginInstallProviderRegistry::register(new \CatalogPluginInstallProvider());
+        }
     }
 
     /**

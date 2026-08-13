@@ -861,6 +861,10 @@ class updater_manager
      */
     private function normalizeVersion($version)
     {
+        if (function_exists('fs_normalize_plugin_version')) {
+            return fs_normalize_plugin_version((string) $version);
+        }
+
         $version = trim((string) $version);
         if ($version === '') {
             return '';

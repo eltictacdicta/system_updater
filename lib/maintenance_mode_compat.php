@@ -34,7 +34,9 @@ function system_updater_maintenance_mode_available(): bool
 }
 
 /**
- * Comprueba si falta configurar el acceso stealth requerido por el core moderno.
+ * Comprueba si falta configurar el acceso stealth recomendado por el core moderno.
+ *
+ * Ya no bloquea operaciones; sirve para emitir advertencias informativas.
  */
 function system_updater_maintenance_stealth_required(): bool
 {
@@ -58,6 +60,99 @@ function system_updater_maintenance_stealth_required(): bool
     }
 
     return empty($stealthStatus['ready']);
+}
+
+/**
+ * Usuarios con actividad reciente (según last_login / last_login_time).
+ *
+ * @return list<array{nick: string, last_login: string, last_ip: string}>
+ */
+function system_updater_get_recent_active_users(string $excludeNick = '', int $minutesThreshold = 15): array
+{
+    if (!defined('FS_FOLDER') || $minutesThreshold <= 0) {
+        return [];
+    }
+
+    $userModelFile = FS_FOLDER . '/model/fs_user.php';
+    if (!file_exists($userModelFile)) {
+        return [];
+    }
+
+    require_once $userModelFile;
+
+    if (!class_exists('fs_user', false)) {
+        return [];
+    }
+
+    $userModel = new fs_user();
+    if (!method_exists($userModel, 'all_enabled')) {
+        return [];
+    }
+
+    $cutoff = time() - ($minutesThreshold * 60);
+    $activeUsers = [];
+
+    foreach ($userModel->all_enabled() as $user) {
+        $nick = trim((string) ($user->nick ?? ''));
+        if ($nick === '' || ($excludeNick !== '' && $nick === $excludeNick)) {
+            continue;
+        }
+
+        $lastLogin = trim((string) ($user->last_login ?? ''));
+        $lastLoginTime = trim((string) ($user->last_login_time ?? ''));
+        if ($lastLogin === '' || $lastLoginTime === '') {
+            continue;
+        }
+
+        $lastActivity = strtotime($lastLogin . ' ' . $lastLoginTime);
+        if ($lastActivity === false || $lastActivity < $cutoff) {
+            continue;
+        }
+
+        $activeUsers[] = [
+            'nick' => $nick,
+            'last_login' => method_exists($user, 'show_last_login')
+                ? (string) $user->show_last_login()
+                : $lastLogin . ' ' . $lastLoginTime,
+        ];
+    }
+
+    return $activeUsers;
+}
+
+/**
+ * Advertencias informativas antes de operaciones delicadas (restauración, actualización, etc.).
+ *
+ * @return list<array{type: string, level: string, message: string, link?: string, link_label?: string, users?: list<array{nick: string, last_login: string}>}>
+ */
+function system_updater_get_operation_warnings(string $excludeNick = '', int $minutesThreshold = 15): array
+{
+    $warnings = [];
+
+    if (system_updater_maintenance_stealth_required()) {
+        $warnings[] = [
+            'type' => 'stealth',
+            'level' => 'warning',
+            'message' => system_updater_maintenance_stealth_required_message(),
+            'link' => 'index.php?page=admin_stealth',
+            'link_label' => 'Configurar stealth',
+        ];
+    }
+
+    $activeUsers = system_updater_get_recent_active_users($excludeNick, $minutesThreshold);
+    if ($activeUsers !== []) {
+        $nicks = array_map(static fn(array $user): string => $user['nick'], $activeUsers);
+        $warnings[] = [
+            'type' => 'active_users',
+            'level' => 'warning',
+            'message' => count($activeUsers) === 1
+                ? 'Hay otro usuario con actividad reciente: ' . implode(', ', $nicks) . '.'
+                : 'Hay ' . count($activeUsers) . ' usuarios con actividad reciente: ' . implode(', ', $nicks) . '.',
+            'users' => $activeUsers,
+        ];
+    }
+
+    return $warnings;
 }
 
 /**

@@ -74,7 +74,7 @@
                             {% if not stealthReady %}
                             <div class="alert alert-warning">
                                 <i class="fa fa-eye-slash"></i>
-                                Activa primero el modo stealth para garantizar una ruta de acceso del administrador durante el mantenimiento.
+                                El modo stealth no está configurado. Durante el mantenimiento podrías perder la ruta de acceso del administrador si no lo activas antes.
                                 <a href="index.php?page=admin_stealth" class="btn btn-xs btn-warning" style="margin-left: 10px;">
                                     <i class="fa fa-cog"></i> Configurar stealth
                                 </a>
@@ -88,7 +88,7 @@
                                 <label for="retry_after">Retry-After (segundos)</label>
                                 <input type="number" min="60" step="60" class="form-control" id="retry_after" name="retry_after" value="{{ fsc.maintenanceStatus and fsc.maintenanceStatus.state ? fsc.maintenanceStatus.state.retry_after|default(300) : 300 }}">
                             </div>
-                            <button type="submit" class="btn btn-warning" {% if fsc.maintenanceStatus and fsc.maintenanceStatus.forced %}disabled title="Desactiva primero FS_FORCE_MAINTENANCE en config.php"{% elseif not stealthReady %}disabled title="Activa primero el modo stealth desde admin_stealth"{% endif %}>
+                            <button type="submit" class="btn btn-warning btn-enable-maintenance" {% if fsc.maintenanceStatus and fsc.maintenanceStatus.forced %}disabled title="Desactiva primero FS_FORCE_MAINTENANCE en config.php"{% endif %}>
                                 <i class="fa fa-power-off"></i> Activar mantenimiento
                             </button>
                         </form>
@@ -114,21 +114,8 @@
             <div class="panel-heading">
                 <h3 class="panel-title"><i class="fa fa-download"></i> Actualizaciones Disponibles</h3>
             </div>
-            <div class="panel-body">
-                {# Actualización del propio actualizador #}
-                {% if fsc.updates.updater %}
-                <div class="alert alert-danger">
-                    <strong><i class="fa fa-wrench"></i> Nueva versión del actualizador disponible</strong>
-                    <p>Versión actual: {{ fsc.updaterInfo.version }}<br>
-                    Nueva versión: {{ fsc.updates.updater.new_version }}</p>
-                    <p class="small" style="margin-bottom: 10px;">
-                        La actualización se preparará primero y el reemplazo final se realizará desde el cargador externo para evitar sobrescribir el plugin mientras se está ejecutando.
-                    </p>
-                    <a href="{{ fsc.url()|raw }}&action=prepare_updater_update" class="btn btn-danger btn-sm" data-confirm-message="¿Preparar y aplicar la actualización del plugin system_updater? El intercambio final se hará desde updater.php para mantener la estabilidad.">
-                        <i class="fa fa-sync"></i> Actualizar Actualizador
-                    </a>
-                </div>
-                {% elseif fsc.updates.updater_pending %}
+            <div class="panel-body" id="updates-panel-body">
+                {% if fsc.updates.updater_pending %}
                 <div class="alert alert-warning">
                     <strong><i class="fa fa-clock"></i> Hay una actualización del actualizador pendiente de aplicar</strong>
                     <p>Versión preparada: {{ fsc.updates.updater_pending.new_version }}</p>
@@ -136,61 +123,28 @@
                         <i class="fa fa-play"></i> Finalizar Actualización
                     </a>
                 </div>
-                {% else %}
-                <div class="alert alert-success">
-                    <i class="fa fa-check"></i> El plugin actualizador está actualizado (v{{ fsc.updaterInfo.version }})
-                </div>
                 {% endif %}
 
-                {# Actualización del Núcleo #}
-                {% if fsc.updates.core %}
-                <div class="alert alert-warning">
-                    <strong><i class="fa fa-cube"></i> Nueva versión del núcleo disponible</strong>
-                    <p>Versión actual: {{ fsc.plugin_manager.version }}<br>
-                    Nueva versión: {{ fsc.updates.core_new_version }}</p>
-                    <button type="button" class="btn btn-warning btn-sm" id="btn-update-core">
-                        <i class="fa fa-sync"></i> Actualizar Núcleo
-                    </button>
-                </div>
-                {% else %}
-                <div class="alert alert-success clearfix">
-                    <i class="fa fa-check"></i> El núcleo está actualizado (v{{ fsc.plugin_manager.version }})
-                    <button type="button" class="btn btn-danger btn-xs pull-right" id="btn-reinstall-core" style="margin-top: -2px;">
-                        <i class="fa fa-exclamation-triangle"></i> Reinstalar Core
-                    </button>
-                </div>
-                {% endif %}
+                <p class="text-muted" style="margin-bottom: 12px;">
+                    Núcleo local: <strong>v{{ fsc.plugin_manager.version }}</strong>
+                    · Actualizador: <strong>v{{ fsc.updaterInfo.version }}</strong>
+                </p>
 
-                {# Actualizaciones de Plugins #}
-                {% if fsc.updates.plugins|length > 0 %}
-                <h5><i class="fa fa-puzzle-piece"></i> Plugins con actualizaciones:</h5>
-                <table class="table table-sm table-striped">
-                    <thead>
-                        <tr>
-                            <th>Plugin</th>
-                            <th>Actual</th>
-                            <th>Nueva</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for plugin in fsc.updates.plugins %}
-                        <tr>
-                            <td>{{ plugin.name }}</td>
-                            <td>{{ plugin.current_version }}</td>
-                            <td><span class="label label-info">{{ plugin.new_version }}</span></td>
-                            <td>
-                                <a href="{{ fsc.url()|raw }}&action=update_plugin&plugin={{ plugin.name }}" class="btn btn-xs btn-primary" data-confirm-message="¿Actualizar {{ plugin.name|e('html_attr') }}?">
-                                    <i class="fa fa-sync"></i>
-                                </a>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-                {% else %}
-                <p class="text-muted"><i class="fa fa-check"></i> Todos los plugins están actualizados.</p>
-                {% endif %}
+                <p style="margin-bottom: 12px;">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-check-updates">
+                        <i class="fa fa-search"></i> Comprobar actualizaciones
+                    </button>
+                    <span id="updates-check-spinner" style="display: none; margin-left: 10px;">
+                        <i class="fa fa-spinner fa-spin"></i> Consultando repositorios remotos…
+                    </span>
+                </p>
+
+                <div id="updates-check-results">
+                    <p class="text-muted">
+                        <i class="fa fa-info-circle"></i>
+                        Pulsa «Comprobar actualizaciones» para consultar el núcleo, el actualizador y los plugins instalados.
+                    </p>
+                </div>
             </div>
         </div>
     </div>
@@ -361,7 +315,345 @@ $(document).ready(function() {
     var coreUpdateLog = [];
     var coreUpdateFinished = false;
     var pendingCoreAction = null;
+    var pendingChainedPluginUpdates = [];
+    var lastUpdatesSnapshot = null;
     var pendingBackupChain = null;
+    var pendingRiskyOperation = null;
+    var targetCoreVersion = '{{ fsc.plugin_manager.version|e('js') }}';
+    var updaterBaseUrl = '{{ fsc.url()|raw }}';
+    var updatesCheckInProgress = false;
+    var warningsCheckInProgress = false;
+    var coreActionsLocked = false;
+    var stealthReady = {{ (fsc.maintenanceStatus and fsc.maintenanceStatus.stealth and fsc.maintenanceStatus.stealth.ready) ? 'true' : 'false' }};
+
+    function escapeHtml(text) {
+        return $('<div>').text(text == null ? '' : String(text)).html();
+    }
+
+    function escapeAttr(text) {
+        return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function safeUrl(url) {
+        var value = String(url == null ? '' : url);
+        if (/^(https?:)?\/\//i.test(value) || /^[a-z0-9_.\-/?=&%]+$/i.test(value)) {
+            return value.replace(/"/g, '%22');
+        }
+        return '';
+    }
+
+    function renderUpdatesPanel(updates, meta) {
+        var html = '';
+        var updaterVersion = meta && meta.updater_version ? meta.updater_version : '';
+        var coreVersion = meta && meta.core_version ? meta.core_version : '';
+
+        if (updates.updater && updates.updater.available) {
+            html += '<div class="alert alert-danger">';
+            html += '<strong><i class="fa fa-wrench"></i> Nueva versión del actualizador disponible</strong>';
+            html += '<p>Versión actual: ' + escapeHtml(updaterVersion) + '<br>';
+            html += 'Nueva versión: ' + escapeHtml(updates.updater.new_version || '') + '</p>';
+            html += '<p class="small" style="margin-bottom: 10px;">';
+            html += 'La actualización se preparará primero y el reemplazo final se realizará desde el cargador externo para evitar sobrescribir el plugin mientras se está ejecutando.';
+            html += '</p>';
+            html += '<a href="' + updaterBaseUrl + '&action=prepare_updater_update" class="btn btn-danger btn-sm" data-confirm-message="¿Preparar y aplicar la actualización del plugin system_updater? El intercambio final se hará desde updater.php para mantener la estabilidad.">';
+            html += '<i class="fa fa-sync"></i> Actualizar Actualizador</a></div>';
+        } else if (!updates.updater_pending) {
+            html += '<div class="alert alert-success"><i class="fa fa-check"></i> El plugin actualizador está actualizado (v' + escapeHtml(updaterVersion) + ')</div>';
+        }
+
+        if (updates.core) {
+            html += '<div class="alert alert-warning">';
+            html += '<strong><i class="fa fa-cube"></i> Nueva versión del núcleo disponible</strong>';
+            html += '<p>Versión actual: ' + escapeHtml(coreVersion) + '<br>';
+            html += 'Nueva versión: ' + escapeHtml(updates.core_new_version || '') + '</p>';
+            if (updates.has_chained_update_plan && updates.chained_plugin_updates && updates.chained_plugin_updates.length) {
+                html += '<p class="small">Hay ' + updates.chained_plugin_updates.length + ' plugin(s) cuya actualización remota requiere primero el núcleo '
+                    + escapeHtml(updates.core_new_version || '') + '.</p>';
+                html += '<button type="button" class="btn btn-primary btn-sm" id="btn-chained-core-plugins-update" style="margin-right: 8px;">';
+                html += '<i class="fa fa-link"></i> Actualizar núcleo y ' + updates.chained_plugin_updates.length + ' plugin(s)</button>';
+            }
+            html += '<button type="button" class="btn btn-warning btn-sm" id="btn-update-core">';
+            html += '<i class="fa fa-sync"></i> Actualizar solo núcleo</button></div>';
+        } else {
+            html += '<div class="alert alert-success clearfix">';
+            html += '<i class="fa fa-check"></i> El núcleo está actualizado (v' + escapeHtml(coreVersion) + ')';
+            html += '<button type="button" class="btn btn-danger btn-xs pull-right" id="btn-reinstall-core" style="margin-top: -2px;">';
+            html += '<i class="fa fa-exclamation-triangle"></i> Reinstalar Core</button></div>';
+        }
+
+        var plugins = updates.plugins || [];
+        var publicUpdates = updates.ready_plugin_updates || updates.public_plugin_updates || [];
+        var readyPublicCount = publicUpdates.filter(function(plugin) {
+            return (plugin.update_status || 'ready') === 'ready';
+        }).length;
+
+        if (plugins.length > 0) {
+            html += '<h5><i class="fa fa-puzzle-piece"></i> Plugins con actualizaciones:</h5>';
+            if (readyPublicCount > 0) {
+                html += '<form method="post" action="' + updaterBaseUrl + '" style="margin-bottom: 10px;">';
+                html += '<input type="hidden" name="action" value="update_all_public_plugins">';
+                if (csrfToken) {
+                    html += '<input type="hidden" name="_csrf_token" value="' + escapeAttr(csrfToken) + '">';
+                }
+                html += '<button type="submit" class="btn btn-sm btn-primary" data-confirm-message="¿Actualizar todos los plugins públicos compatibles con el núcleo actual?">';
+                html += '<i class="fa fa-sync"></i> Actualizar compatibles ahora (' + readyPublicCount + ')</button></form>';
+            }
+            html += '<table class="table table-sm table-striped"><thead><tr>';
+            html += '<th>Plugin</th><th>Origen</th><th>Actual</th><th>Nueva</th><th>Estado</th><th></th>';
+            html += '</tr></thead><tbody>';
+            plugins.forEach(function(plugin) {
+                var sourceLabel = plugin.source === 'public'
+                    ? '<span class="label label-success">público</span>'
+                    : '<span class="label label-warning">privado</span>';
+                var status = plugin.update_status || 'ready';
+                var statusHtml = '';
+                var actionHtml = '';
+
+                if (status === 'blocked_by_core') {
+                    statusHtml = '<span class="label label-warning">Tras actualizar núcleo</span>';
+                    if (plugin.required_core_version) {
+                        statusHtml += '<br><small class="text-muted">Requiere FSFramework '
+                            + escapeHtml(plugin.required_core_version) + '+</small>';
+                    }
+                    actionHtml = '<span class="text-muted"><i class="fa fa-lock"></i> Pendiente de núcleo</span>';
+                } else if (status === 'incompatible') {
+                    statusHtml = '<span class="label label-danger">Incompatible</span>';
+                    actionHtml = '<span class="text-danger">' + escapeHtml(plugin.message || 'No compatible') + '</span>';
+                } else {
+                    statusHtml = '<span class="label label-success">Listo</span>';
+                    actionHtml = '<a href="' + updaterBaseUrl + '&action=update_plugin&plugin=' + encodeURIComponent(plugin.name)
+                        + '" class="btn btn-xs btn-primary" data-confirm-message="¿Actualizar ' + escapeAttr(plugin.name) + '?">'
+                        + '<i class="fa fa-sync"></i> Actualizar</a>';
+                }
+
+                html += '<tr>';
+                html += '<td>' + escapeHtml(plugin.name) + '</td>';
+                html += '<td>' + sourceLabel + '</td>';
+                html += '<td>' + escapeHtml(plugin.current_version) + '</td>';
+                html += '<td><span class="label label-info">' + escapeHtml(plugin.new_version) + '</span></td>';
+                html += '<td>' + statusHtml + '</td>';
+                html += '<td>' + actionHtml + '</td></tr>';
+            });
+            html += '</tbody></table>';
+        } else {
+            html += '<p class="text-muted"><i class="fa fa-check"></i> Todos los plugins están actualizados.</p>';
+        }
+
+        $('#updates-check-results').html(html);
+
+        if (coreActionsLocked) {
+            $('#btn-update-core, #btn-reinstall-core').prop('disabled', true);
+        }
+
+        if (updates.core && updates.core_new_version) {
+            targetCoreVersion = updates.core_new_version;
+        } else {
+            targetCoreVersion = coreVersion;
+        }
+
+        lastUpdatesSnapshot = updates;
+    }
+
+    function openChainedCorePluginWizard() {
+        if (!lastUpdatesSnapshot || !lastUpdatesSnapshot.chained_plugin_updates
+            || !lastUpdatesSnapshot.chained_plugin_updates.length) {
+            return;
+        }
+
+        pendingChainedPluginUpdates = lastUpdatesSnapshot.chained_plugin_updates.map(function(plugin) {
+            return plugin.name;
+        });
+
+        openCoreActionWizard(false);
+    }
+
+    function updateChainedPlugins(pluginNames) {
+        if (!pluginNames || !pluginNames.length) {
+            return;
+        }
+
+        $('#updates-check-results').prepend(
+            '<div class="alert alert-info" id="chained-plugins-progress">'
+            + '<i class="fa fa-spinner fa-spin"></i> Actualizando plugins tras la actualización del núcleo…'
+            + '</div>'
+        );
+
+        $.ajax({
+            url: updaterBaseUrl + '&action=update_chained_plugins&ajax=1',
+            type: 'POST',
+            dataType: 'json',
+            data: {
+                _csrf_token: csrfToken,
+                plugins: pluginNames
+            },
+            timeout: 300000,
+            success: function(response) {
+                $('#chained-plugins-progress').remove();
+
+                if (response && response.success) {
+                    var message = response.message || 'Plugins actualizados correctamente.';
+                    if (response.failed && response.failed.length) {
+                        message += ' No se pudieron actualizar: ' + response.failed.join(', ') + '.';
+                    }
+                    $('#updates-check-results').prepend(
+                        '<div class="alert alert-success"><i class="fa fa-check"></i> ' + escapeHtml(message) + '</div>'
+                    );
+                } else {
+                    var errorMessage = (response && response.message)
+                        ? response.message
+                        : 'No se pudieron actualizar los plugins encadenados.';
+                    $('#updates-check-results').prepend(
+                        '<div class="alert alert-danger"><i class="fa fa-exclamation-triangle"></i> '
+                        + escapeHtml(errorMessage) + '</div>'
+                    );
+                }
+
+                fetchUpdates();
+            },
+            error: function() {
+                $('#chained-plugins-progress').remove();
+                $('#updates-check-results').prepend(
+                    '<div class="alert alert-danger"><i class="fa fa-exclamation-triangle"></i> '
+                    + 'Error al actualizar los plugins tras el núcleo.</div>'
+                );
+            }
+        });
+    }
+
+    function fetchUpdates() {
+        if (updatesCheckInProgress) {
+            return;
+        }
+
+        updatesCheckInProgress = true;
+        $('#btn-check-updates').prop('disabled', true);
+        $('#updates-check-spinner').show();
+
+        $.ajax({
+            url: updaterBaseUrl + '&action=check_updates&ajax=1&_csrf_token=' + encodeURIComponent(csrfToken),
+            type: 'GET',
+            dataType: 'json',
+            timeout: 120000,
+            success: function(response) {
+                if (response && response.success && response.updates) {
+                    renderUpdatesPanel(response.updates, response.meta || {});
+                    return;
+                }
+
+                var message = (response && response.message) ? response.message : 'No se pudieron comprobar las actualizaciones.';
+                $('#updates-check-results').html(
+                    '<div class="alert alert-danger"><i class="fa fa-exclamation-triangle"></i> ' + escapeHtml(message) + '</div>'
+                );
+            },
+            error: function(xhr, status) {
+                var message = status === 'timeout'
+                    ? 'La comprobación tardó demasiado. Inténtalo de nuevo o revisa la conectividad con GitHub.'
+                    : 'Error al comprobar actualizaciones. Inténtalo de nuevo.';
+                $('#updates-check-results').html(
+                    '<div class="alert alert-danger"><i class="fa fa-exclamation-triangle"></i> ' + escapeHtml(message) + '</div>'
+                );
+            },
+            complete: function() {
+                updatesCheckInProgress = false;
+                $('#btn-check-updates').prop('disabled', false);
+                $('#updates-check-spinner').hide();
+            }
+        });
+    }
+
+    $('#btn-check-updates').click(function(e) {
+        e.preventDefault();
+        fetchUpdates();
+    });
+
+    function fetchOperationWarnings(callback, extraParams) {
+        var url = '{{ fsc.url()|raw }}&action=operation_warnings&ajax=1&_csrf_token=' + encodeURIComponent(csrfToken);
+        if (extraParams) {
+            $.each(extraParams, function(key, value) {
+                if (value !== undefined && value !== null && value !== '') {
+                    url += '&' + encodeURIComponent(key) + '=' + encodeURIComponent(value);
+                }
+            });
+        }
+        $.ajax({
+            url: url,
+            type: 'GET',
+            dataType: 'json',
+            timeout: 15000,
+            success: function(response) {
+                callback((response && response.warnings) ? response.warnings : []);
+            },
+            error: function() {
+                callback([{
+                    level: 'warning',
+                    message: 'No se pudieron comprobar las advertencias operativas. Continúa solo si estás seguro.'
+                }]);
+            }
+        });
+    }
+
+    function renderOperationWarnings(warnings) {
+        if (!warnings || !warnings.length) {
+            return '';
+        }
+
+        return warnings.map(function(warning) {
+            var html = '<div class="alert alert-' + (warning.level === 'warning' ? 'warning' : 'info') + '" style="margin-bottom: 10px;">';
+            html += '<i class="fa fa-exclamation-triangle"></i> ' + $('<div>').text(warning.message || '').html();
+            var linkHref = warning.link ? safeUrl(warning.link) : '';
+            if (linkHref && warning.link_label) {
+                html += ' <a href="' + linkHref + '" class="btn btn-xs btn-default" style="margin-left: 8px;">' + $('<div>').text(warning.link_label).html() + '</a>';
+            }
+            if (warning.users && warning.users.length) {
+                html += '<ul style="margin: 8px 0 0 18px;">';
+                warning.users.forEach(function(user) {
+                    var detail = user.nick;
+                    if (user.last_login) {
+                        detail += ' (' + user.last_login + ')';
+                    }
+                    html += '<li>' + $('<div>').text(detail).html() + '</li>';
+                });
+                html += '</ul>';
+            }
+            html += '</div>';
+            return html;
+        }).join('');
+    }
+
+    function confirmRiskyOperation(title, message, onConfirm, extraParams) {
+        if (warningsCheckInProgress) {
+            return;
+        }
+        warningsCheckInProgress = true;
+        fetchOperationWarnings(function(warnings) {
+            warningsCheckInProgress = false;
+            if (!warnings.length) {
+                if (window.confirm(message)) {
+                    onConfirm();
+                }
+                return;
+            }
+
+            pendingRiskyOperation = onConfirm;
+            $('#operationWarningTitle').text(title);
+            $('#operationWarningMessage').text(message);
+            $('#operationWarningList').html(renderOperationWarnings(warnings));
+            $('#operationWarningModal').modal('show');
+        }, extraParams || null);
+    }
+
+    $('#operationWarningConfirmBtn').click(function() {
+        var callback = pendingRiskyOperation;
+        pendingRiskyOperation = null;
+        $('#operationWarningModal').modal('hide');
+        if (typeof callback === 'function') {
+            callback();
+        }
+    });
+
+    $('#operationWarningModal').on('hidden.bs.modal', function() {
+        pendingRiskyOperation = null;
+    });
 
     function getCoreOperationLabels(isReinstall) {
         if (isReinstall) {
@@ -391,18 +683,33 @@ $(document).ready(function() {
 
     function openCoreActionWizard(isReinstall) {
         var labels = getCoreOperationLabels(isReinstall);
+        var chainedHint = '';
+        if (pendingChainedPluginUpdates.length) {
+            chainedHint = ' Después se actualizarán automáticamente estos plugins: '
+                + pendingChainedPluginUpdates.join(', ') + '.';
+        }
 
-        pendingCoreAction = {
-            isReinstall: isReinstall
-        };
+        confirmRiskyOperation(
+            'Advertencia antes de ' + labels.action + ' el núcleo',
+            'Esta operación puede interrumpir el servicio para otros usuarios.' + chainedHint + ' ¿Deseas continuar?',
+            function() {
+                pendingCoreAction = {
+                    isReinstall: isReinstall
+                };
 
-        $('#coreActionWizardTitle').text('Asistente de ' + labels.nounDisplay.charAt(0).toUpperCase() + labels.nounDisplay.slice(1) + ' del Nucleo');
-        $('#coreActionWizardSummary').text('Elige si quieres ' + labels.action + ' el nucleo directamente o crear una copia de seguridad previa antes de continuar.');
-        $('#coreActionPrimaryTitle').text(labels.actionDisplay + ' ahora');
-        $('#coreActionPrimaryDescription').text('Inicia la ' + labels.noun + ' del nucleo sin crear una copia previa.');
-        $('#coreActionSecondaryTitle').text('Copia de seguridad + ' + labels.actionDisplay.toLowerCase());
-        $('#coreActionSecondaryDescription').text('Crea una copia completa y, al terminar, ejecuta la ' + labels.noun + ' del nucleo.');
-        $('#coreActionWizardModal').modal('show');
+                $('#coreActionWizardTitle').text('Asistente de ' + labels.nounDisplay.charAt(0).toUpperCase() + labels.nounDisplay.slice(1) + ' del Nucleo');
+                $('#coreActionWizardSummary').text('Elige si quieres ' + labels.action + ' el nucleo directamente o crear una copia de seguridad previa antes de continuar.');
+                $('#coreActionPrimaryTitle').text(labels.actionDisplay + ' ahora');
+                $('#coreActionPrimaryDescription').text('Inicia la ' + labels.noun + ' del nucleo sin crear una copia previa.');
+                $('#coreActionSecondaryTitle').text('Copia de seguridad + ' + labels.actionDisplay.toLowerCase());
+                $('#coreActionSecondaryDescription').text('Crea una copia completa y, al terminar, ejecuta la ' + labels.noun + ' del nucleo.');
+                $('#coreActionWizardModal').modal('show');
+            },
+            {
+                context: 'core_update',
+                target_core_version: targetCoreVersion
+            }
+        );
     }
 
     function configureCoreUpdateModal(isReinstall) {
@@ -426,6 +733,7 @@ $(document).ready(function() {
     }
 
     function setCoreActionButtonsEnabled(enabled) {
+        coreActionsLocked = !enabled;
         $('#btn-update-core, #btn-reinstall-core').prop('disabled', !enabled);
     }
 
@@ -587,7 +895,7 @@ $(document).ready(function() {
         $('#coreUpdateDetails').html('<small class="text-muted">Conectando al servidor...</small>');
         $('#coreUpdateCompleteBtn').hide();
         $('#coreUpdateErrorBtn').hide();
-        $('#btn-update-core, #btn-reinstall-core').prop('disabled', true);
+        setCoreActionButtonsEnabled(false);
         $('#coreUpdateProgressModal').modal('show');
 
         var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0') + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
@@ -624,7 +932,16 @@ $(document).ready(function() {
                 $('#coreUpdateCompleteBtn').attr('href', data.redirect);
             }
             $('#coreUpdateCompleteBtn').show();
-                setCoreActionButtonsEnabled(true);
+            setCoreActionButtonsEnabled(true);
+            if (pendingChainedPluginUpdates.length) {
+                var chainedPlugins = pendingChainedPluginUpdates.slice();
+                pendingChainedPluginUpdates = [];
+                addCoreUpdateLogEntry('Iniciando actualización encadenada de plugins: ' + chainedPlugins.join(', '));
+                setTimeout(function() {
+                    $('#coreUpdateProgressModal').modal('hide');
+                    updateChainedPlugins(chainedPlugins);
+                }, 800);
+            }
             coreUpdateEventSource.close();
         });
 
@@ -689,14 +1006,21 @@ $(document).ready(function() {
         $detailsDiv.scrollTop($detailsDiv[0].scrollHeight);
     }
 
-    $('#btn-update-core').click(function(e) {
+    $(document).on('click', '#btn-update-core', function(e) {
         e.preventDefault();
+        pendingChainedPluginUpdates = [];
         openCoreActionWizard(false);
     });
 
-    $('#btn-reinstall-core').click(function(e) {
+    $(document).on('click', '#btn-reinstall-core', function(e) {
         e.preventDefault();
+        pendingChainedPluginUpdates = [];
         openCoreActionWizard(true);
+    });
+
+    $(document).on('click', '#btn-chained-core-plugins-update', function(e) {
+        e.preventDefault();
+        openChainedCorePluginWizard();
     });
 
     $('.btn-core-action-option').click(function(e) {
@@ -847,9 +1171,13 @@ $(document).ready(function() {
             type = 'database';
         }
         
-        if(confirm(msg)) {
-            startRestore(file, type);
-        }
+        confirmRiskyOperation(
+            'Confirmar restauración',
+            msg,
+            function() {
+                startRestore(file, type);
+            }
+        );
     });
 
     // Eliminar
@@ -877,6 +1205,21 @@ $(document).ready(function() {
                 }
             });
         }
+    });
+
+    $('.btn-enable-maintenance').closest('form').on('submit', function(e) {
+        var form = this;
+        e.preventDefault();
+        var maintenanceMessage = stealthReady
+            ? '¿Activar el modo mantenimiento ahora?'
+            : 'El modo stealth no está configurado. Podrías perder la ruta de acceso del administrador. ¿Activar el modo mantenimiento ahora?';
+        confirmRiskyOperation(
+            'Activar modo mantenimiento',
+            maintenanceMessage,
+            function() {
+                form.submit();
+            }
+        );
     });
 
     // Confirmation dialog for elements with data-confirm-message
@@ -1054,6 +1397,29 @@ $(document).ready(function() {
     }
 });
 </script>
+
+<!-- Modal de advertencias antes de operaciones delicadas -->
+<div class="modal fade" id="operationWarningModal" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header" style="background: #f39c12; color: white;">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close" style="color: white; opacity: 0.9;">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+                <h4 class="modal-title" id="operationWarningTitle">Advertencia</h4>
+            </div>
+            <div class="modal-body">
+                <p id="operationWarningMessage"></p>
+                <div id="operationWarningList"></div>
+                <p class="text-muted small" style="margin-bottom: 0;">Puedes continuar bajo tu responsabilidad o cancelar para revisar la configuración.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Cancelar</button>
+                <button type="button" class="btn btn-warning" id="operationWarningConfirmBtn">Continuar de todos modos</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <!-- Modal de Progreso de Restauración -->
 <div class="modal fade" id="restoreProgressModal" tabindex="-1" role="dialog" data-backdrop="static" data-keyboard="false">

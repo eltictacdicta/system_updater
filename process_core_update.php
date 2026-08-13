@@ -64,16 +64,6 @@ switch ($action) {
             system_updater_save_progress($progressFile, 'init', 'Inicializando...', 0);
             system_updater_send_sse_keepalive();
 
-            $stealthRequired = system_updater_debug_wrap('maintenance_stealth_required', static function () {
-                return system_updater_maintenance_stealth_required();
-            });
-            if ($stealthRequired) {
-                $errorMsg = system_updater_maintenance_stealth_required_message();
-                system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
-                system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
-                exit;
-            }
-
             $maintenanceBegun = system_updater_debug_wrap('begin_maintenance', static function () {
                 return system_updater_begin_maintenance([
                     'message' => 'Actualización del núcleo en curso.',
