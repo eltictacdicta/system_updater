@@ -119,6 +119,11 @@ class admin_plugin_store extends fs_controller
         $this->errorMessage = '';
         $this->activeTab = $this->getQueryParam('tab', 'public');
 
+        if ($this->isAjaxRequest()) {
+            $this->handleAjaxActions();
+            return;
+        }
+
         // Procesar acciones
         $this->processActions();
 
@@ -140,19 +145,19 @@ class admin_plugin_store extends fs_controller
                 }
                 $pluginId = $this->getPostParam('plugin_id') ?: $this->getQueryParam('plugin_id');
                 if ($pluginId) {
-                    if ($this->downloader->download($pluginId)) {
-                        $this->successMessage = 'Plugin descargado correctamente';
-                        $plugins = $this->downloader->downloads();
-                        foreach ($plugins as $p) {
-                            if ($p['id'] == $pluginId) {
-                                $this->plugin_manager->enable($p['nombre']);
-                                $this->successMessage = 'Plugin descargado y activado correctamente';
-                                break;
-                            }
-                        }
+                    $pluginName = $this->resolvePublicPluginName((int) $pluginId);
+                    if ($pluginName === null) {
+                        $this->errorMessage = 'Plugin no encontrado en el catálogo.';
+                        $this->new_error_msg($this->errorMessage);
+                        break;
+                    }
+
+                    if ($this->downloadCascadeSync($pluginName)) {
+                        $this->successMessage = 'Plugins descargados correctamente. Puedes activarlos cuando quieras.';
                         $this->new_message($this->successMessage);
                     } else {
-                        $this->errorMessage = implode(', ', $this->downloader->get_errors()) ?: 'Error al descargar el plugin';
+                        $this->errorMessage = $this->errorMessage
+                            ?: (implode(', ', $this->downloader->get_errors()) ?: 'Error al descargar el plugin');
                         $this->new_error_msg($this->errorMessage);
                     }
                 }
@@ -179,23 +184,38 @@ class admin_plugin_store extends fs_controller
                 }
                 $pluginId = $this->getPostParam('plugin_id') ?: $this->getQueryParam('plugin_id');
                 if ($pluginId) {
-                    if ($this->downloader->download_private($pluginId)) {
-                        $this->successMessage = 'Plugin privado descargado correctamente';
-                        $plugins = $this->downloader->private_downloads();
-                        foreach ($plugins as $p) {
-                            if ($p['id'] == $pluginId) {
-                                $this->plugin_manager->enable($p['nombre']);
-                                $this->successMessage = 'Plugin privado descargado y activado correctamente';
-                                break;
-                            }
-                        }
+                    $pluginName = $this->resolvePrivatePluginName((int) $pluginId);
+                    if ($pluginName === null) {
+                        $this->errorMessage = 'Plugin privado no encontrado.';
+                        $this->new_error_msg($this->errorMessage);
+                        break;
+                    }
+
+                    if ($this->downloadCascadeSync($pluginName, true)) {
+                        $this->successMessage = 'Plugins privados descargados correctamente. Puedes activarlos cuando quieras.';
                         $this->new_message($this->successMessage);
                     } else {
-                        $this->errorMessage = implode(', ', $this->downloader->get_errors()) ?: 'Error al descargar el plugin privado';
+                        $this->errorMessage = $this->errorMessage
+                            ?: (implode(', ', $this->downloader->get_errors()) ?: 'Error al descargar el plugin privado');
                         $this->new_error_msg($this->errorMessage);
                     }
                 }
                 $this->activeTab = 'private';
+                break;
+
+            case 'activate':
+                if (!$this->requireCsrf()) {
+                    return;
+                }
+                $pluginName = trim((string) ($this->getPostParam('plugin_name') ?: $this->getQueryParam('plugin_name')));
+                if ($pluginName !== '' && $this->plugin_manager->enable($pluginName)) {
+                    $this->successMessage = 'Plugin activado correctamente.';
+                    $this->new_message($this->successMessage);
+                } else {
+                    $errors = $this->plugin_manager->getPluginActivationErrors();
+                    $this->errorMessage = $errors !== [] ? (string) end($errors) : 'No se pudo activar el plugin.';
+                    $this->new_error_msg($this->errorMessage);
+                }
                 break;
 
             case 'save_private_config':
@@ -450,6 +470,205 @@ class admin_plugin_store extends fs_controller
         } finally {
             system_updater_end_maintenance();
         }
+    }
+
+    private function isAjaxRequest(): bool
+    {
+        return $this->getQueryParam('ajax') === '1'
+            || $this->getPostParam('ajax') === '1'
+            || $this->getQueryParam('ajax') === 1
+            || $this->getPostParam('ajax') === 1;
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function sendJson(array $payload, int $statusCode = 200): void
+    {
+        http_response_code($statusCode);
+        header('Content-Type: application/json; charset=UTF-8');
+        echo json_encode($payload, JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    private function handleAjaxActions(): void
+    {
+        if (!$this->requireCsrf()) {
+            $this->sendJson([
+                'success' => false,
+                'message' => 'Token CSRF inválido. Recarga la página e inténtalo de nuevo.',
+            ], 403);
+        }
+
+        $action = (string) ($this->getQueryParam('action') ?: $this->getPostParam('action'));
+
+        switch ($action) {
+            case 'install_plan':
+                $this->ajaxInstallPlan();
+                return;
+
+            case 'download_step':
+                $this->ajaxDownloadStep();
+                return;
+
+            case 'activate_step':
+                $this->ajaxActivateStep();
+                return;
+        }
+
+        $this->sendJson([
+            'success' => false,
+            'message' => 'Acción AJAX no reconocida.',
+        ], 400);
+    }
+
+    private function ajaxInstallPlan(): void
+    {
+        $pluginName = trim((string) ($this->getPostParam('plugin_name') ?: $this->getQueryParam('plugin_name')));
+        if ($pluginName === '') {
+            $this->sendJson(['success' => false, 'message' => 'Nombre de plugin no indicado.'], 400);
+
+            return;
+        }
+
+        $inspection = $this->plugin_manager->inspectPluginActivation($pluginName);
+        if (!$inspection['success']) {
+            $this->sendJson([
+                'success' => false,
+                'message' => implode(' ', $inspection['errors']) ?: 'No se pudo calcular el plan de instalación.',
+                'errors' => $inspection['errors'],
+            ], 400);
+        }
+
+        $this->sendJson(array_merge(['success' => true], $inspection));
+    }
+
+    private function ajaxDownloadStep(): void
+    {
+        $pluginName = trim((string) ($this->getPostParam('plugin_name') ?: $this->getQueryParam('plugin_name')));
+        $isPrivate = $this->getPostParam('private', $this->getQueryParam('private')) === '1';
+
+        if ($pluginName === '') {
+            $this->sendJson(['success' => false, 'message' => 'Nombre de plugin no indicado.'], 400);
+
+            return;
+        }
+
+        $ok = $isPrivate
+            ? $this->downloadPrivatePluginByName($pluginName)
+            : $this->plugin_manager->downloadPluginFromCatalog($pluginName);
+
+        if (!$ok) {
+            $errors = $this->plugin_manager->getPluginActivationErrors();
+            $this->sendJson([
+                'success' => false,
+                'message' => $errors !== [] ? (string) end($errors) : 'No se pudo descargar el plugin.',
+                'plugin' => $pluginName,
+            ], 500);
+        }
+
+        $this->sendJson([
+            'success' => true,
+            'plugin' => $pluginName,
+            'installed' => $this->isInstalled($pluginName),
+        ]);
+    }
+
+    private function ajaxActivateStep(): void
+    {
+        $targetPlugin = trim((string) ($this->getPostParam('target_plugin') ?: $this->getQueryParam('target_plugin')));
+        $pluginName = trim((string) ($this->getPostParam('plugin_name') ?: $this->getQueryParam('plugin_name')));
+
+        if ($targetPlugin === '' || $pluginName === '') {
+            $this->sendJson(['success' => false, 'message' => 'Parámetros de activación incompletos.'], 400);
+
+            return;
+        }
+
+        if (!$this->plugin_manager->enablePluginCascadeStep($targetPlugin, $pluginName)) {
+            $errors = $this->plugin_manager->getPluginActivationErrors();
+            $this->sendJson([
+                'success' => false,
+                'message' => $errors !== [] ? (string) end($errors) : 'No se pudo activar el plugin.',
+                'target' => $targetPlugin,
+                'plugin' => $pluginName,
+            ], 500);
+        }
+
+        $this->sendJson([
+            'success' => true,
+            'target' => $targetPlugin,
+            'plugin' => $pluginName,
+            'enabled' => $this->isActive($pluginName),
+        ]);
+    }
+
+    private function downloadCascadeSync(string $targetName, bool $private = false): bool
+    {
+        $inspection = $this->plugin_manager->inspectPluginActivation($targetName);
+        if (!$inspection['success']) {
+            $this->errorMessage = implode(' ', $inspection['errors']) ?: 'No se pudo calcular el plan de descarga.';
+
+            return false;
+        }
+
+        foreach ($inspection['missing'] as $pluginName) {
+            $ok = $private
+                ? $this->downloadPrivatePluginByName($pluginName)
+                : $this->plugin_manager->downloadPluginFromCatalog($pluginName);
+
+            if (!$ok) {
+                $errors = $this->plugin_manager->getPluginActivationErrors();
+                $this->errorMessage = $errors !== [] ? (string) end($errors) : 'Error al descargar ' . $pluginName;
+
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function downloadPrivatePluginByName(string $pluginName): bool
+    {
+        foreach ($this->downloader->private_downloads() as $entry) {
+            if (!is_array($entry) || (string) ($entry['nombre'] ?? '') !== $pluginName) {
+                continue;
+            }
+
+            if (empty($entry['id'])) {
+                return false;
+            }
+
+            return $this->downloader->download_private($entry['id']);
+        }
+
+        return $this->plugin_manager->downloadPluginFromCatalog($pluginName);
+    }
+
+    private function resolvePublicPluginName(int $pluginId): ?string
+    {
+        foreach ($this->downloader->downloads() as $plugin) {
+            if ((int) ($plugin['id'] ?? 0) === $pluginId) {
+                $name = trim((string) ($plugin['nombre'] ?? ''));
+
+                return $name !== '' ? $name : null;
+            }
+        }
+
+        return null;
+    }
+
+    private function resolvePrivatePluginName(int $pluginId): ?string
+    {
+        foreach ($this->downloader->private_downloads() as $plugin) {
+            if ((int) ($plugin['id'] ?? 0) === $pluginId) {
+                $name = trim((string) ($plugin['nombre'] ?? ''));
+
+                return $name !== '' ? $name : null;
+            }
+        }
+
+        return null;
     }
 
     /**
