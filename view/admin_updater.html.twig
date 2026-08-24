@@ -134,6 +134,9 @@
                     <button type="button" class="btn btn-primary btn-sm" id="btn-check-updates">
                         <i class="fa fa-search"></i> Comprobar actualizaciones
                     </button>
+                    <button type="button" class="btn btn-default btn-sm" id="btn-resync-schema" title="Re-ejecuta la creación de tablas de los plugins instalados sin descargarlos. Útil cuando un plugin instaló su código pero sus tablas nunca se crearon.">
+                        <i class="fa fa-database"></i> Re-sincronizar esquema
+                    </button>
                     <span id="updates-check-spinner" style="display: none; margin-left: 10px;">
                         <i class="fa fa-spinner fa-spin"></i> Consultando repositorios remotos…
                     </span>
@@ -520,6 +523,58 @@ $(document).ready(function() {
         });
     }
 
+    function resyncPluginSchemas() {
+        $('#updates-check-results').prepend(
+            '<div class="alert alert-info" id="resync-schema-progress">'
+            + '<i class="fa fa-spinner fa-spin"></i> Re-sincronizando esquemas de los plugins instalados…'
+            + '</div>'
+        );
+
+        $.ajax({
+            url: updaterBaseUrl + '&action=resync_plugin_schema&ajax=1',
+            type: 'POST',
+            dataType: 'json',
+            data: {
+                _csrf_token: csrfToken
+            },
+            timeout: 300000,
+            success: function(response) {
+                $('#resync-schema-progress').remove();
+
+                if (response && response.success) {
+                    var message = response.message || 'Esquema sincronizado correctamente.';
+                    if (response.failed && response.failed.length) {
+                        message += ' No se pudieron sincronizar: ' + response.failed.join(', ') + '.';
+                    }
+                    $('#updates-check-results').prepend(
+                        '<div class="alert alert-success"><i class="fa fa-check"></i> ' + escapeHtml(message) + '</div>'
+                    );
+                } else {
+                    var errorMessage = (response && response.message)
+                        ? response.message
+                        : 'No se pudo re-sincronizar el esquema.';
+                    $('#updates-check-results').prepend(
+                        '<div class="alert alert-danger"><i class="fa fa-exclamation-triangle"></i> '
+                        + escapeHtml(errorMessage) + '</div>'
+                    );
+                    if (response && response.failed && response.failed.length) {
+                        $('#updates-check-results').prepend(
+                            '<div class="alert alert-warning"><i class="fa fa-exclamation-triangle"></i> '
+                            + 'Fallaron: ' + escapeHtml(response.failed.join(', ')) + '</div>'
+                        );
+                    }
+                }
+            },
+            error: function() {
+                $('#resync-schema-progress').remove();
+                $('#updates-check-results').prepend(
+                    '<div class="alert alert-danger"><i class="fa fa-exclamation-triangle"></i> '
+                    + 'Error al re-sincronizar el esquema.</div>'
+                );
+            }
+        });
+    }
+
     function fetchUpdates() {
         if (updatesCheckInProgress) {
             return;
@@ -564,6 +619,11 @@ $(document).ready(function() {
     $('#btn-check-updates').click(function(e) {
         e.preventDefault();
         fetchUpdates();
+    });
+
+    $('#btn-resync-schema').click(function(e) {
+        e.preventDefault();
+        resyncPluginSchemas();
     });
 
     function fetchOperationWarnings(callback, extraParams) {

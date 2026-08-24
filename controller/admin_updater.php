@@ -237,6 +237,10 @@ class admin_updater extends fs_controller
                 $this->actionUpdateChainedPlugins();
                 break;
 
+            case 'resync_plugin_schema':
+                $this->actionResyncPluginSchema();
+                break;
+
             case 'create_backup':
                 $this->actionCreateBackup();
                 break;
@@ -750,16 +754,23 @@ class admin_updater extends fs_controller
             return;
         }
 
+        require_once __DIR__ . '/../lib/PluginUpdateOrderer.php';
+
+        // Orden deps-first: dependencias instaladas antes que sus dependientes,
+        // incluyendo dependencias transitivas fuera del lote (PU-04).
+        $pendingNames = array_values(array_filter(
+            array_map(static fn(array $item): string => (string) ($item['name'] ?? ''), $pending),
+            static fn(string $name): bool => $name !== ''
+        ));
+        $orderedNames = PluginUpdateOrderer::order($pendingNames);
+
         $updated = [];
         $failed = [];
 
         try {
-            foreach ($pending as $item) {
-                $name = (string) ($item['name'] ?? '');
-                if ($name === '' || !$this->updateInstalledPlugin($name)) {
-                    if ($name !== '') {
-                        $failed[] = $name;
-                    }
+            foreach ($orderedNames as $name) {
+                if (!$this->updateInstalledPlugin($name)) {
+                    $failed[] = $name;
                     continue;
                 }
 
@@ -824,6 +835,13 @@ class admin_updater extends fs_controller
             exit;
         }
 
+        require_once __DIR__ . '/../lib/PluginUpdateOrderer.php';
+
+        // Orden deps-first con la misma semántica que el lote público (PU-08):
+        // dependencias instaladas transitivas incluidas, ciclos con advertencia
+        // y orden original, dependencias ausentes omitidas.
+        $toUpdate = PluginUpdateOrderer::order($toUpdate);
+
         if (system_updater_maintenance_stealth_required()) {
             // Respuesta JSON: el aviso se muestra en cliente si hace falta.
         }
@@ -873,11 +891,60 @@ class admin_updater extends fs_controller
     }
 
     /**
+     * Re-sincroniza el esquema BD de los plugins instalados (PU-10).
+     *
+     * Devuelve JSON {success, updated, failed, messages}. Con &plugin=X
+     * re-sincroniza un único plugin (resolviendo sus dependencias instaladas).
+     */
+    private function actionResyncPluginSchema()
+    {
+        header('Content-Type: application/json; charset=UTF-8');
+
+        try {
+            if (!$this->requireCsrf()) {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Token CSRF inválido. Recarga la página e inténtalo de nuevo.',
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+
+            require_once __DIR__ . '/../lib/PluginSchemaResyncer.php';
+
+            $plugin = $this->getPostParam('plugin');
+            if (!is_string($plugin) || trim($plugin) === '') {
+                $plugin = $this->getQueryParam('plugin');
+            }
+            $only = is_string($plugin) && trim($plugin) !== '' ? trim($plugin) : null;
+
+            $result = PluginSchemaResyncer::resyncInstalled($this->plugin_manager, $only);
+
+            echo json_encode([
+                'success' => $result['success'],
+                'message' => $result['success']
+                    ? 'Esquema sincronizado correctamente para: ' . implode(', ', $result['updated']) . '.'
+                    : 'No se pudo sincronizar el esquema de: ' . implode(', ', $result['failed']) . '.',
+                'updated' => $result['updated'],
+                'failed' => $result['failed'],
+                'messages' => $result['messages'],
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        } catch (\Throwable $e) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Error al re-sincronizar el esquema: ' . $e->getMessage(),
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+
+    /**
      * @return bool
      */
     private function updateInstalledPlugin(string $pluginName): bool
     {
         require_once __DIR__ . '/../lib/plugin_compatibility_checker.php';
+        require_once __DIR__ . '/../lib/PluginSchemaResyncer.php';
 
         $wasEnabled = $this->plugin_manager->is_plugin_enabled($pluginName);
         $coreVersion = (string) $this->plugin_manager->version;
@@ -888,7 +955,14 @@ class admin_updater extends fs_controller
                 return false;
             }
 
-            if (!$this->plugin_downloader->download((int) $publicEntry['id'])) {
+            // Visibilidad de dependencias en memoria durante download() →
+            // syncPluginDatabaseSchema() para que los XMLs de tablas resuelvan
+            // aunque la dependencia esté desactivada (PU-09).
+            $downloaded = PluginSchemaResyncer::withDependencyVisibility(
+                $pluginName,
+                fn(): bool => $this->plugin_downloader->download((int) $publicEntry['id'])
+            );
+            if (!$downloaded) {
                 return false;
             }
 
@@ -919,7 +993,11 @@ class admin_updater extends fs_controller
                     return false;
                 }
 
-                if (!$this->plugin_downloader->download_private($remote['id'])) {
+                $downloaded = PluginSchemaResyncer::withDependencyVisibility(
+                    $pluginName,
+                    fn(): bool => $this->plugin_downloader->download_private($remote['id'])
+                );
+                if (!$downloaded) {
                     return false;
                 }
 
