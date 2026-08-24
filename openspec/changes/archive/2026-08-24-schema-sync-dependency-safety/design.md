@@ -15,7 +15,7 @@ Fix the three production root causes (invisible XMLs, alphabetical batch order, 
 | Decision | Option / Tradeoff | Decision |
 |---|---|---|
 | **A1 — Orderer algorithm** | DFS (like core `PluginDependencyResolver`, throws on cycle) vs **Kahn's algorithm** (batch-friendly, natural cycle-member detection) | Kahn. Batch has multiple roots; leftover unprocessed nodes = cycle members → append in original batch order, log one `error_log` warning. Self-require edges ignored (no ordering constraint). |
-| **A2 — Orderer API** | Instance with provider injected vs **static pure function with injectable callables** | Static `order(array $names, callable $requirementsFn, ?callable $isInstalledFn = null): array`. Defaults wrap `CatalogPluginInstallProvider` (lazy, `require_once` + `new` when `FS_FOLDER` defined, else `[]`) and `is_dir(FS_FOLDER.'/plugins/'.$name)` (else `true`). Tests inject fakes; production works untouched. |
+| **A2 — Orderer API** | Instance with provider injected vs **static pure function with injectable callables** | Static `order(array $names, ?callable $requirementsFn = null, ?callable $isInstalledFn = null): array`. Defaults wrap `CatalogPluginInstallProvider` (lazy, `require_once` + `new` when `FS_FOLDER` defined, else `[]`) and `is_dir(FS_FOLDER.'/plugins/'.$name)` (else `true`). Tests inject fakes; production works untouched. |
 | **A3 — Missing/unknown deps** | Fail batch vs **skip silently** | Non-installed deps excluded from the graph (spec: "skip missing without blocking"). Unknown batch members (no ini, no catalog entry) are leaves → ordered normally. |
 | **A4 — Dep-visibility point** | Inside `plugin_downloader::syncPluginDatabaseSchema` (covers store installs too, but mutates shared code used by `admin_plugin_store`) vs **inside `admin_updater::updateInstalledPlugin` around `download()`/`download_private()`** | `updateInstalledPlugin` — the single choke point of ALL updater paths (single, batch, chained). `plugin_downloader.php` untouched; store blast radius zero; visibility stays active through `download() → syncPluginDatabaseSchema()` (plugin_downloader.php:321/639). Implemented via `PluginSchemaResyncer::withDependencyVisibility()`. |
 | **A5 — Batch sequencing** | Order only batch members vs **order batch ∪ installed transitive deps and attempt all** | Full sequence (spec PU-04: deps included even when not in batch). Deps are re-installed (same version) then schema-synced — heals the "tables never created" bug. Failures collected in `updated`/`failed`; loop never breaks. |
@@ -54,7 +54,7 @@ Manual resync (PU-10)
 ```php
 final class PluginUpdateOrderer {
     /** @param list<string> $pluginNames @return list<string> deps-first, batch ∪ installed transitive deps */
-    public static function order(array $pluginNames, callable $requirementsFn, ?callable $isInstalledFn = null): array;
+    public static function order(array $pluginNames, ?callable $requirementsFn = null, ?callable $isInstalledFn = null): array;
 }
 
 final class PluginSchemaResyncer {
