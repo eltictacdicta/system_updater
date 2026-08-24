@@ -47,6 +47,6 @@ Chain strategy: stacked-to-main
 ## Phase 4: Docs + final verification (unit 4)
 
 - [x] 4.1 Commit SDD artifacts: `docs(system_updater): record schema sync dependency safety SDD` (`openspec/changes/schema-sync-dependency-safety/`).
-- [ ] 4.2 VERIFY — Full plugin suite green: `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml`.
-- [ ] 4.3 VERIFY — Core suite not broken: `ddev exec php vendor/bin/phpunit --testsuite Base`.
-- [ ] 4.4 VERIFY — Zero core files modified: `git status` in core repo shows no changes outside `plugins/system_updater/`.
+- [x] 4.2 VERIFY — Full plugin suite green: `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml`.
+- [x] 4.3 VERIFY — Core suite not broken: `ddev exec php vendor/bin/phpunit --testsuite Base`.
+- [x] 4.4 VERIFY — Zero core files modified: `git status` in core repo shows no changes outside `plugins/system_updater/`.
