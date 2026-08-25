@@ -257,8 +257,9 @@ class backup_manager
      * Constructor.
      *
      * @param string|null $fsRoot The root directory of FSFramework.
+     * @param string|null $homeDir Optional user-home override (test seam).
      */
-    public function __construct($fsRoot = null)
+    public function __construct($fsRoot = null, $homeDir = null)
     {
         if ($fsRoot !== null) {
             $this->fsRoot = $fsRoot;
@@ -272,11 +273,14 @@ class backup_manager
         //  1. `FS_BACKUP_DIR` override when defined (used verbatim).
         //  2. Sibling of the framework root with a random suffix
         //     (`dirname(FS_FOLDER)/backups-<16hex>`) — outside the webroot.
-        //  3. Automatic fallback to a protected legacy dir inside the
-        //     webroot (`FS_FOLDER/backups-<16hex>`) when the sibling is not
-        //     writable — no manual mkdir/chown/mv required.
+        //  3. Home directory of the web user
+        //     (`<home>/backups-<16hex>`) — outside the webroot, writable in
+        //     shared hosting with no admin step (also solves nginx).
+        //  4. Protected legacy dir inside the webroot
+        //     (`FS_FOLDER/backups-<16hex>`) as last resort — no manual
+        //     mkdir/chown/mv required.
         // `self::BACKUP_DIR` is kept for BC but no longer composed into paths.
-        $this->backupPath = self::resolve_usable_backup_dir($this->fsRoot);
+        $this->backupPath = self::resolve_usable_backup_dir($this->fsRoot, $homeDir);
 
         // When we fell back inside the webroot, exclude the backup dir from
         // file backups (prevent recursive backups) and inform the operator.
@@ -478,15 +482,17 @@ class backup_manager
      *
      * If the state file was lost (e.g. tmp cleaned), we ADOPT an existing
      * suffixed backup dir instead of generating a new one, so backups are
-     * never "lost" between requests.
+     * never "lost" between requests. Adoption looks in every parent that the
+     * resolution chain may have used (sibling, webroot, user home).
      *
      * If the state cannot be persisted at all, we return an empty suffix
      * (fixed legacy name) rather than risk a fresh random dir per request.
      *
-     * @param string $fsFolder
+     * @param string      $fsFolder
+     * @param string|null $homeDir  Optional user-home override (test seam).
      * @return string 16-char hex suffix, or '' when persistence is impossible.
      */
-    private static function load_or_create_backup_suffix(string $fsFolder): string
+    private static function load_or_create_backup_suffix(string $fsFolder, ?string $homeDir = null): string
     {
         $stateFile = self::backup_suffix_state_file($fsFolder);
 
@@ -498,8 +504,13 @@ class backup_manager
         }
 
         // Adopt an existing random dir if the state was lost.
-        foreach (array_unique(array(dirname($fsFolder), $fsFolder)) as $parent) {
-            foreach ((array) glob(rtrim($parent, '/\\') . DIRECTORY_SEPARATOR . 'backups-*') as $existing) {
+        $parents = array_unique(array_filter(array(
+            dirname($fsFolder),
+            $fsFolder,
+            $homeDir !== null && $homeDir !== '' ? $homeDir : null,
+        )));
+        foreach ($parents as $parent) {
+            foreach ((array) glob(rtrim((string) $parent, '/\\') . DIRECTORY_SEPARATOR . 'backups-*') as $existing) {
                 if (!is_dir($existing)) {
                     continue;
                 }
@@ -527,9 +538,10 @@ class backup_manager
      * random suffix so the directory name is not guessable.
      *
      * @param string|null $fsFolder Framework root (FS_FOLDER).
+     * @param string|null $homeDir  Optional user-home override (test seam).
      * @return string
      */
-    public static function resolve_effective_backup_dir(?string $fsFolder = null): string
+    public static function resolve_effective_backup_dir(?string $fsFolder = null, ?string $homeDir = null): string
     {
         if ($fsFolder === null) {
             $fsFolder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
@@ -542,42 +554,103 @@ class backup_manager
             return $base;
         }
 
-        return $base . '-' . self::load_or_create_backup_suffix($fsFolder);
+        return $base . '-' . self::load_or_create_backup_suffix($fsFolder, $homeDir);
     }
 
     /**
-     * Usable backup dir: effective dir when writable, otherwise an automatic
-     * fallback to a protected legacy dir inside the webroot.
+     * Ordered list of backup-dir candidates (from safest to last resort).
      *
-     * Zero-ops contract: no manual mkdir/chown/mv. The only case that still
-     * surfaces a hard error is an explicit `FS_BACKUP_DIR` that cannot be
-     * used (the operator asked for that exact path).
+     *   1. `FS_BACKUP_DIR` override (verbatim, no suffix).
+     *   2. Sibling of the framework root — outside the webroot.
+     *   3. Home directory of the web user — outside the webroot, writable in
+     *      shared hosting without any admin step (solves nginx too).
+     *   4. Protected legacy dir inside the webroot (last resort).
+     *
+     * Every candidate (except the override) gets the random suffix.
      *
      * @param string|null $fsFolder Framework root (FS_FOLDER).
-     * @return string
+     * @param string|null $homeDir  Optional user-home override (test seam).
+     * @return array<int, string>
      */
-    public static function resolve_usable_backup_dir(?string $fsFolder = null): string
+    public static function backup_dir_candidates(?string $fsFolder = null, ?string $homeDir = null): array
     {
         if ($fsFolder === null) {
             $fsFolder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
         }
 
         $override = defined('FS_BACKUP_DIR') ? (string) FS_BACKUP_DIR : null;
-        $preferred = self::resolve_effective_backup_dir($fsFolder);
+        $suffix = self::load_or_create_backup_suffix($fsFolder, $homeDir);
+        $suffixed = $suffix !== '' ? '-' . $suffix : '';
 
-        if (self::is_dir_usable($preferred)) {
-            return $preferred;
+        $candidates = array();
+        if ($override !== null && trim($override) !== '') {
+            $candidates[] = rtrim($override, '/\\');
+        }
+        $candidates[] = dirname($fsFolder) . DIRECTORY_SEPARATOR . 'backups' . $suffixed;
+
+        if ($homeDir === null && function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
+            $pw = posix_getpwuid(posix_geteuid());
+            $homeDir = is_array($pw) && isset($pw['dir']) ? (string) $pw['dir'] : null;
+        }
+        if ($homeDir !== null && $homeDir !== '') {
+            $candidates[] = rtrim($homeDir, '/\\') . DIRECTORY_SEPARATOR . 'backups' . $suffixed;
+        }
+
+        $candidates[] = $fsFolder . DIRECTORY_SEPARATOR . 'backups' . $suffixed;
+        return array_values(array_unique($candidates));
+    }
+
+    /**
+     * Return the first candidate that exists+writable or can be created.
+     *
+     * @param array<int, string> $candidates
+     * @return string|null
+     */
+    public static function resolve_first_usable_dir(array $candidates): ?string
+    {
+        foreach ($candidates as $candidate) {
+            if (self::is_dir_usable($candidate)) {
+                return $candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Usable backup dir: first writable candidate in the chain.
+     *
+     * Zero-ops contract: no manual mkdir/chown/mv. The only case that still
+     * surfaces a hard error is an explicit `FS_BACKUP_DIR` that cannot be
+     * used (the operator asked for that exact path).
+     *
+     * @param string|null $fsFolder Framework root (FS_FOLDER).
+     * @param string|null $homeDir  Optional user-home override (test seam).
+     * @return string
+     */
+    public static function resolve_usable_backup_dir(?string $fsFolder = null, ?string $homeDir = null): string
+    {
+        if ($fsFolder === null) {
+            $fsFolder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
+        }
+
+        $override = defined('FS_BACKUP_DIR') ? (string) FS_BACKUP_DIR : null;
+        $candidates = self::backup_dir_candidates($fsFolder, $homeDir);
+
+        $usable = self::resolve_first_usable_dir($candidates);
+        if ($usable !== null) {
+            return $usable;
         }
 
         // Explicit override that is unusable → keep it so the constructor
         // surfaces a loud error (operator asked for this exact path).
         if ($override !== null && trim($override) !== '') {
-            return $preferred;
+            return $candidates[0];
         }
 
-        // Automatic fallback: protected legacy dir inside the webroot.
-        return $fsFolder . DIRECTORY_SEPARATOR . 'backups-'
-            . self::load_or_create_backup_suffix($fsFolder);
+        // Last resort: the protected legacy dir inside the webroot. It may
+        // not be creatable either (e.g. read-only webroot) — the constructor
+        // will surface that error.
+        return $candidates[count($candidates) - 1];
     }
 
     /**

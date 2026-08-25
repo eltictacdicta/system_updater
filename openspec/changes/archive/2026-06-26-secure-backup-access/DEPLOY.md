@@ -7,16 +7,21 @@ by default and adds an auth-gated download endpoint (`download_backup.php`).
 
 Installing/updating the plugin is enough — **there are no manual steps**.
 
-At runtime the plugin resolves the backup directory automatically:
+At runtime the plugin resolves the backup directory automatically, in order:
 
 1. `FS_BACKUP_DIR` constant, when defined in `config.php` (explicit override).
 2. A sibling of the framework root with a random suffix
    (`dirname(FS_FOLDER)/backups-<16hex>`) — outside the webroot, undiscoverable
    by URL scanners.
-3. Automatic fallback to a protected legacy dir inside the webroot
-   (`FS_FOLDER/backups-<16hex>`) when the sibling is not writable (e.g. a VPS
-   where the web user cannot write outside `/var/www`). The fallback dir is
-   still protected by its own `.htaccess` + `index.php` guards, by the core
+3. The home directory of the web user
+   (`<home>/backups-<16hex>`) — outside the webroot, writable in shared
+   hosting with no admin step. This also solves nginx: the backups never
+   live inside the document root.
+4. Automatic fallback to a protected legacy dir inside the webroot
+   (`FS_FOLDER/backups-<16hex>`) as last resort — when neither the sibling
+   nor the home is writable (e.g. a VPS where the web user cannot write
+   outside `/var/www` and has no writable home). The fallback dir is still
+   protected by its own `.htaccess` + `index.php` guards, by the core
    `RewriteRule ^backups` block, and by the auth+CSRF download endpoint.
 
 Legacy backups found in the old fixed `FS_FOLDER/backups` dir are migrated
@@ -28,6 +33,14 @@ creating a new one, so backups are never lost.
 The random directory name is a defence-in-depth layer, not the security
 boundary: the real protections are the `.htaccess`/`index.php` guards, the
 core `^backups` rewrite rule, and the auth+CSRF download endpoint.
+
+> **nginx note**: the only nginx case without a code-level solution is a
+> server where the web user cannot write anywhere outside the document root
+> AND has no writable home — then the last-resort fallback lives inside the
+> webroot and `.htaccess` is ignored by nginx. In that specific setup the
+> random name is only obscurity; the plugin shows a warning in the admin and
+> the real fix is `FS_BACKUP_DIR` outside the webroot or a server-block
+> `deny` rule.
 
 ## Optional hardening (only for people who want it)
 

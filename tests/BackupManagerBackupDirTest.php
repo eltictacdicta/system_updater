@@ -235,22 +235,97 @@ final class BackupManagerBackupDirTest extends TestCase
     // ============================================================
 
     #[Test]
-    public function resolveUsableBackupDirFallsBackInsideWebrootWhenSiblingUnusable(): void
+    public function resolveUsableBackupDirFallsBackInsideWebrootWhenAllOutsideUnusable(): void
     {
         $parent = sys_get_temp_dir() . '/parent_block_' . uniqid('', true);
         file_put_contents($parent, 'block'); // parent is a FILE → sibling cannot be created
         $fsFolder = $parent . '/fsroot';
+        $homeBlock = sys_get_temp_dir() . '/home_block_' . uniqid('', true);
+        file_put_contents($homeBlock, 'block'); // home is a FILE → cannot create there
 
         try {
-            $resolved = backup_manager::resolve_usable_backup_dir($fsFolder);
+            $resolved = backup_manager::resolve_usable_backup_dir($fsFolder, $homeBlock);
 
             $this->assertStringStartsWith(
-                $fsFolder . DIRECTORY_SEPARATOR . 'backups-',
+                $fsFolder . DIRECTORY_SEPARATOR . 'backups',
                 $resolved,
-                'When the sibling is unusable the resolver must fall back inside the webroot'
+                'When sibling AND home are unusable the resolver must fall back inside the webroot'
             );
         } finally {
             @unlink($parent);
+            @unlink($homeBlock);
+        }
+    }
+
+    #[Test]
+    public function resolveUsableBackupDirPrefersHomeWhenSiblingUnusable(): void
+    {
+        $tempRoot = $this->makeTempRoot('home');
+        mkdir($tempRoot . '/tmp', 0755, true);
+        $homeDir = sys_get_temp_dir() . '/home_real_' . uniqid('', true);
+        mkdir($homeDir, 0755, true);
+
+        // Block the sibling with a FILE at the effective path.
+        $effective = backup_manager::resolve_effective_backup_dir($tempRoot);
+        if (is_dir($effective)) {
+            rmdir($effective);
+        }
+        file_put_contents($effective, 'block');
+
+        try {
+            $resolved = backup_manager::resolve_usable_backup_dir($tempRoot, $homeDir);
+
+            $this->assertStringStartsWith(
+                $homeDir . DIRECTORY_SEPARATOR . 'backups-',
+                $resolved,
+                'When the sibling is unusable the resolver must prefer the user home over the webroot'
+            );
+        } finally {
+            @unlink($effective);
+            foreach ((array) glob($homeDir . '/backups-*') as $dir) {
+                chmod($dir, 0700);
+                $this->rrmdir($dir);
+            }
+            $this->rrmdir($homeDir);
+            $this->rrmdir($tempRoot);
+        }
+    }
+
+    // ============================================================
+    // backup_dir_candidates — ordered chain
+    // ============================================================
+
+    #[Test]
+    public function backupDirCandidatesAreOrderedSiblingHomeLegacy(): void
+    {
+        $tempRoot = $this->makeTempRoot('cand');
+        mkdir($tempRoot . '/tmp', 0755, true);
+
+        try {
+            $candidates = backup_manager::backup_dir_candidates($tempRoot, '/home/test-user');
+
+            $this->assertCount(
+                3,
+                $candidates,
+                'Chain must contain exactly sibling, home and legacy candidates (no override defined)'
+            );
+            $this->assertStringStartsWith(
+                dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups-',
+                $candidates[0],
+                'First candidate must be the sibling outside the webroot'
+            );
+            $this->assertStringStartsWith(
+                '/home/test-user/backups-',
+                $candidates[1],
+                'Second candidate must be the user home outside the webroot'
+            );
+            $this->assertStringStartsWith(
+                $tempRoot . DIRECTORY_SEPARATOR . 'backups-',
+                $candidates[2],
+                'Last candidate must be the protected legacy dir inside the webroot'
+            );
+        } finally {
+            $this->rrmdir($tempRoot);
         }
     }
 
@@ -306,12 +381,17 @@ final class BackupManagerBackupDirTest extends TestCase
         }
         file_put_contents($effective, 'block');
 
+        // Also block the user home so the constructor reaches the legacy
+        // fallback inside the webroot (home is the preferred alternative).
+        $homeBlock = sys_get_temp_dir() . '/home_block_' . uniqid('', true);
+        file_put_contents($homeBlock, 'block');
+
         // Simulate an nginx server so the honest warning is emitted too.
         $serverBackup = $_SERVER['SERVER_SOFTWARE'] ?? null;
         $_SERVER['SERVER_SOFTWARE'] = 'nginx/1.25.3';
 
         try {
-            $manager = new backup_manager($tempRoot);
+            $manager = new backup_manager($tempRoot, $homeBlock);
             $backupPath = $manager->get_backup_path();
 
             $this->assertStringStartsWith(
@@ -371,6 +451,7 @@ final class BackupManagerBackupDirTest extends TestCase
                 $_SERVER['SERVER_SOFTWARE'] = $serverBackup;
             }
             @unlink($effective);
+            @unlink($homeBlock);
             foreach ((array) glob($tempRoot . '/backups-*') as $dir) {
                 chmod($dir, 0700);
                 $this->rrmdir($dir);
