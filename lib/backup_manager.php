@@ -268,12 +268,35 @@ class backup_manager
             $this->fsRoot = dirname(dirname(dirname(__DIR__)));
         }
 
-        // Store backups OUTSIDE the webroot by default (sibling of the
-        // framework root).  `self::BACKUP_DIR` is kept for BC but no longer
-        // composed into paths.
-        $this->backupPath = self::resolve_backup_dir_with(null, $this->fsRoot);
+        // Resolve the effective backup dir at runtime (zero-ops contract):
+        //  1. `FS_BACKUP_DIR` override when defined (used verbatim).
+        //  2. Sibling of the framework root with a random suffix
+        //     (`dirname(FS_FOLDER)/backups-<16hex>`) — outside the webroot.
+        //  3. Automatic fallback to a protected legacy dir inside the
+        //     webroot (`FS_FOLDER/backups-<16hex>`) when the sibling is not
+        //     writable — no manual mkdir/chown/mv required.
+        // `self::BACKUP_DIR` is kept for BC but no longer composed into paths.
+        $this->backupPath = self::resolve_usable_backup_dir($this->fsRoot);
+
+        // When we fell back inside the webroot, exclude the backup dir from
+        // file backups (prevent recursive backups) and inform the operator.
+        $backupDirName = basename($this->backupPath);
+        $inWebroot = str_starts_with(
+            rtrim($this->backupPath, '/\\') . DIRECTORY_SEPARATOR,
+            rtrim($this->fsRoot, '/\\') . DIRECTORY_SEPARATOR
+        );
+        if ($inWebroot && !in_array($backupDirName, $this->excludedDirs, true)) {
+            $this->excludedDirs[] = $backupDirName;
+            $this->messages[] = "Directorio de copias de seguridad en modo compatibilidad (dentro del webroot): "
+                . $this->backupPath
+                . ". Defina FS_BACKUP_DIR para moverlo fuera del webroot si lo desea.";
+        }
+
         $this->mysqlHelper = new BackupMysqlHelper($this->errors);
         $this->ensureBackupDirectoryExists();
+
+        // Best-effort migration from legacy fixed-name backup dirs.
+        $this->migrateLegacyBackups();
     }
 
     /**
@@ -398,6 +421,166 @@ class backup_manager
     }
 
     /**
+     * Path of the state file that persists the random backup dir suffix.
+     *
+     * Lives in the framework tmp dir (same place as the plugin debug log):
+     * it survives requests, is not served by the web server in practice,
+     * and is wiped together with the rest of tmp (which is fine — the
+     * suffix is then re-adopted from the existing directory).
+     *
+     * @param string $fsFolder
+     * @return string
+     */
+    private static function backup_suffix_state_file(string $fsFolder): string
+    {
+        return $fsFolder . DIRECTORY_SEPARATOR . 'tmp'
+            . DIRECTORY_SEPARATOR . 'system_updater_backup_dir.txt';
+    }
+
+    /**
+     * Persist the random suffix to the state file (creating tmp when needed).
+     *
+     * @param string $fsFolder
+     * @param string $suffix
+     * @return bool
+     */
+    private static function persist_backup_suffix(string $fsFolder, string $suffix): bool
+    {
+        $stateFile = self::backup_suffix_state_file($fsFolder);
+        $stateDir = dirname($stateFile);
+        if (!is_dir($stateDir)) {
+            @mkdir($stateDir, 0755, true);
+        }
+        return is_dir($stateDir) && @file_put_contents($stateFile, $suffix) !== false;
+    }
+
+    /**
+     * Load an existing random suffix or create + persist a new one.
+     *
+     * The random directory name is ONLY a defence-in-depth layer: the real
+     * protections are the .htaccess/index.php guards, the core `^backups`
+     * rewrite rule, and the auth+CSRF download endpoint. The random name
+     * simply makes the directory undiscoverable by URL scanners.
+     *
+     * If the state file was lost (e.g. tmp cleaned), we ADOPT an existing
+     * suffixed backup dir instead of generating a new one, so backups are
+     * never "lost" between requests.
+     *
+     * If the state cannot be persisted at all, we return an empty suffix
+     * (fixed legacy name) rather than risk a fresh random dir per request.
+     *
+     * @param string $fsFolder
+     * @return string 16-char hex suffix, or '' when persistence is impossible.
+     */
+    private static function load_or_create_backup_suffix(string $fsFolder): string
+    {
+        $stateFile = self::backup_suffix_state_file($fsFolder);
+
+        if (is_file($stateFile)) {
+            $suffix = trim((string) file_get_contents($stateFile));
+            if (preg_match('/^[a-f0-9]{16}$/', $suffix)) {
+                return $suffix;
+            }
+        }
+
+        // Adopt an existing random dir if the state was lost.
+        foreach (array_unique(array(dirname($fsFolder), $fsFolder)) as $parent) {
+            foreach ((array) glob(rtrim($parent, '/\\') . DIRECTORY_SEPARATOR . 'backups-*') as $existing) {
+                if (!is_dir($existing)) {
+                    continue;
+                }
+                $suffix = substr(basename($existing), strlen('backups-'));
+                if (preg_match('/^[a-f0-9]{16}$/', $suffix)) {
+                    if (self::persist_backup_suffix($fsFolder, $suffix)) {
+                        return $suffix;
+                    }
+                }
+            }
+        }
+
+        $suffix = bin2hex(random_bytes(8));
+        if (!self::persist_backup_suffix($fsFolder, $suffix)) {
+            return ''; // cannot persist → fixed legacy name (still protected)
+        }
+        return $suffix;
+    }
+
+    /**
+     * Effective backup dir: preferred candidate + random suffix.
+     *
+     * An explicit `FS_BACKUP_DIR` override is used verbatim (no suffix — the
+     * operator chose the exact path). Otherwise the base candidate gets the
+     * random suffix so the directory name is not guessable.
+     *
+     * @param string|null $fsFolder Framework root (FS_FOLDER).
+     * @return string
+     */
+    public static function resolve_effective_backup_dir(?string $fsFolder = null): string
+    {
+        if ($fsFolder === null) {
+            $fsFolder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
+        }
+
+        $override = defined('FS_BACKUP_DIR') ? (string) FS_BACKUP_DIR : null;
+        $base = self::resolve_backup_dir_with($override, $fsFolder);
+
+        if ($override !== null && trim($override) !== '') {
+            return $base;
+        }
+
+        return $base . '-' . self::load_or_create_backup_suffix($fsFolder);
+    }
+
+    /**
+     * Usable backup dir: effective dir when writable, otherwise an automatic
+     * fallback to a protected legacy dir inside the webroot.
+     *
+     * Zero-ops contract: no manual mkdir/chown/mv. The only case that still
+     * surfaces a hard error is an explicit `FS_BACKUP_DIR` that cannot be
+     * used (the operator asked for that exact path).
+     *
+     * @param string|null $fsFolder Framework root (FS_FOLDER).
+     * @return string
+     */
+    public static function resolve_usable_backup_dir(?string $fsFolder = null): string
+    {
+        if ($fsFolder === null) {
+            $fsFolder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
+        }
+
+        $override = defined('FS_BACKUP_DIR') ? (string) FS_BACKUP_DIR : null;
+        $preferred = self::resolve_effective_backup_dir($fsFolder);
+
+        if (self::is_dir_usable($preferred)) {
+            return $preferred;
+        }
+
+        // Explicit override that is unusable → keep it so the constructor
+        // surfaces a loud error (operator asked for this exact path).
+        if ($override !== null && trim($override) !== '') {
+            return $preferred;
+        }
+
+        // Automatic fallback: protected legacy dir inside the webroot.
+        return $fsFolder . DIRECTORY_SEPARATOR . 'backups-'
+            . self::load_or_create_backup_suffix($fsFolder);
+    }
+
+    /**
+     * Check whether a directory exists and is writable, or can be created.
+     *
+     * @param string $dir
+     * @return bool
+     */
+    private static function is_dir_usable(string $dir): bool
+    {
+        if (is_dir($dir)) {
+            return is_writable($dir);
+        }
+        return @mkdir($dir, 0700, true) === true;
+    }
+
+    /**
      * Create the backup directory if it doesn't exist.
      *
      * Newly-created directories use restrictive 0700 permissions
@@ -418,16 +601,83 @@ class backup_manager
                 $this->errors[] = "No se puede crear el directorio de copias de seguridad: " . $this->backupPath;
                 return;
             }
-            // Create security files (defence in depth for Apache deployments
-            // that still serve the parent webroot before the operator has
-            // moved their backups to the new sibling path).
-            file_put_contents($this->backupPath . '/.htaccess', "Order Deny,Allow\nDeny from all\n");
-            file_put_contents($this->backupPath . '/index.php', "<?php\n// No directory listing\nheader('HTTP/1.0 403 Forbidden');\nexit;\n");
+        }
+
+        // Defence in depth: ensure the guards exist even for pre-existing
+        // directories (e.g. a legacy fallback dir from an older version).
+        $htaccess = $this->backupPath . '/.htaccess';
+        if (!is_file($htaccess)) {
+            @file_put_contents($htaccess, "Order Deny,Allow\nDeny from all\n");
+        }
+        $index = $this->backupPath . '/index.php';
+        if (!is_file($index)) {
+            @file_put_contents($index, "<?php\n// No directory listing\nheader('HTTP/1.0 403 Forbidden');\nexit;\n");
         }
 
         if (!is_writable($this->backupPath)) {
             $this->errors[] = "El directorio de copias de seguridad no es escribible: " . $this->backupPath
                 . " (permisos=" . substr(sprintf('%o', (int) @fileperms($this->backupPath)), -4) . ")";
+        }
+    }
+
+    /**
+     * Best-effort migration from legacy fixed-name backup dirs.
+     *
+     * Older versions stored backups in `FS_FOLDER/backups` (fixed name inside
+     * the webroot). When the effective dir is writable and a legacy dir still
+     * holds files, move them over (copy + size verify + delete source) so the
+     * operator never has to do it manually. Never fatal: on any failure we
+     * leave the legacy dir in place and keep going.
+     */
+    private function migrateLegacyBackups()
+    {
+        $active = rtrim($this->backupPath, '/\\') . DIRECTORY_SEPARATOR;
+        $activeBasename = basename($this->backupPath);
+
+        $candidates = array($this->fsRoot . DIRECTORY_SEPARATOR . 'backups');
+        // Also any suffixed dir inside the webroot that is not the active one.
+        foreach ((array) glob($this->fsRoot . DIRECTORY_SEPARATOR . 'backups-*') as $other) {
+            if (basename($other) !== $activeBasename) {
+                $candidates[] = $other;
+            }
+        }
+
+        foreach (array_unique($candidates) as $legacy) {
+            if (!is_dir($legacy) || rtrim($legacy, '/\\') . DIRECTORY_SEPARATOR === $active) {
+                continue;
+            }
+            $entries = array_diff((array) scandir($legacy), array('.', '..'));
+            if (!$entries) {
+                continue; // nothing to migrate
+            }
+
+            $moved = 0;
+            $failed = false;
+            foreach ($entries as $entry) {
+                $src = $legacy . DIRECTORY_SEPARATOR . $entry;
+                if (!is_file($src)) {
+                    continue;
+                }
+                $dst = $this->backupPath . DIRECTORY_SEPARATOR . $entry;
+                if (is_file($dst)) {
+                    continue; // already present
+                }
+                if (!@copy($src, $dst)) {
+                    $failed = true;
+                    continue;
+                }
+                if ((int) @filesize($src) !== (int) @filesize($dst)) {
+                    $failed = true;
+                    @unlink($dst);
+                    continue;
+                }
+                @unlink($src);
+                $moved++;
+            }
+
+            if ($moved > 0 && !$failed) {
+                $this->messages[] = "Copias de seguridad migradas desde " . $legacy . " a " . $this->backupPath;
+            }
         }
     }
 

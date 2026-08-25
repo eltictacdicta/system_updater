@@ -53,7 +53,7 @@ require_once __DIR__ . '/lib/debug_log.php';
 $requestedFile = isset($_GET['file']) ? (string) $_GET['file'] : '';
 $userNick = (string) ($_SESSION['user_nick'] ?? $_SESSION['_sf2_attributes']['user_nick'] ?? 'unknown');
 $remoteIp = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
-$backupDir = backup_manager::resolve_backup_dir();
+$backupDir = backup_manager::resolve_usable_backup_dir();
 
 $resolution = system_updater_resolve_backup_file($requestedFile, $backupDir);
 $status = $resolution['status'];

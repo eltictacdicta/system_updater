@@ -89,9 +89,13 @@ class BackupManagerFilenameTest extends TestCase
         if (is_dir($this->tempDir)) {
             // Clean any backup artifacts the tests may have left behind.
             // secure-backup-access: the backup dir now lives OUTSIDE the
-            // supplied fsRoot (sibling of the framework root by default),
-            // so we also clean the sibling path.
-            foreach ([$this->tempDir . '/backups', dirname($this->tempDir) . '/backups'] as $backupPath) {
+            // supplied fsRoot with a random suffix (sibling by default), so
+            // we clean both the fixed legacy paths and any suffixed dirs.
+            foreach (array_merge(
+                [$this->tempDir . '/backups', dirname($this->tempDir) . '/backups'],
+                (array) glob($this->tempDir . '/backups-*'),
+                (array) glob(dirname($this->tempDir) . '/backups-*')
+            ) as $backupPath) {
                 if (!is_dir($backupPath)) {
                     continue;
                 }
@@ -336,8 +340,11 @@ class BackupManagerFilenameTest extends TestCase
     #[Test]
     public function listBackupsGroupedIncludesLegacyBackupCompleteFiles(): void
     {
-        // secure-backup-access: backup dir now lives OUTSIDE fsRoot (sibling).
-        $backupPath = dirname($this->tempDir) . '/backups';
+        // secure-backup-access: backup dir now lives OUTSIDE fsRoot (sibling)
+        // with a random suffix. Resolve the effective dir so the legacy
+        // files land exactly where the manager will look for them.
+        mkdir($this->tempDir . '/tmp', 0755, true);
+        $backupPath = backup_manager::resolve_effective_backup_dir($this->tempDir);
         mkdir($backupPath, 0755, true);
         $legacyComplete = 'backup_2024-01-15_10-30-00_complete.zip';
         $legacyDb = 'backup_2024-01-15_10-30-00_db.sql.gz';
