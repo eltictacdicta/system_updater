@@ -17,6 +17,9 @@
  * @version 1.0.0
  */
 
+use FSFramework\Core\Plugin\PluginSchemaResyncer;
+use FSFramework\Core\Plugin\PluginUpdateOrderer;
+
 require_once 'base/fs_controller.php';
 require_once __DIR__ . '/../lib/maintenance_mode_compat.php';
 
@@ -754,15 +757,13 @@ class admin_updater extends fs_controller
             return;
         }
 
-        require_once __DIR__ . '/../lib/PluginUpdateOrderer.php';
-
         // Orden deps-first: dependencias instaladas antes que sus dependientes,
         // incluyendo dependencias transitivas fuera del lote (PU-04).
         $pendingNames = array_values(array_filter(
             array_map(static fn(array $item): string => (string) ($item['name'] ?? ''), $pending),
             static fn(string $name): bool => $name !== ''
         ));
-        $orderedNames = PluginUpdateOrderer::order($pendingNames);
+        $orderedNames = PluginUpdateOrderer::order($pendingNames, $this->catalogRequirementsFn());
 
         $updated = [];
         $failed = [];
@@ -835,12 +836,10 @@ class admin_updater extends fs_controller
             exit;
         }
 
-        require_once __DIR__ . '/../lib/PluginUpdateOrderer.php';
-
         // Orden deps-first con la misma semántica que el lote público (PU-08):
         // dependencias instaladas transitivas incluidas, ciclos con advertencia
         // y orden original, dependencias ausentes omitidas.
-        $toUpdate = PluginUpdateOrderer::order($toUpdate);
+        $toUpdate = PluginUpdateOrderer::order($toUpdate, $this->catalogRequirementsFn());
 
         if (system_updater_maintenance_stealth_required()) {
             // Respuesta JSON: el aviso se muestra en cliente si hace falta.
@@ -909,8 +908,6 @@ class admin_updater extends fs_controller
                 exit;
             }
 
-            require_once __DIR__ . '/../lib/PluginSchemaResyncer.php';
-
             $plugin = $this->getPostParam('plugin');
             if (!is_string($plugin) || trim($plugin) === '') {
                 $plugin = $this->getQueryParam('plugin');
@@ -939,12 +936,28 @@ class admin_updater extends fs_controller
     }
 
     /**
+     * Devuelve (una sola vez) la función de requisitos respaldada por el
+     * catálogo remoto, para que el orden de actualización y la visibilidad de
+     * dependencias funcionen con plugins aún no instalados localmente (D4).
+     *
+     * @return callable(string): array
+     */
+    private function catalogRequirementsFn(): callable
+    {
+        static $fn = null;
+        if ($fn === null) {
+            $fn = static fn(string $n): array => \FSFramework\Core\Plugin\PluginInstallProviderRegistry::get()->getDirectRequirements($n);
+        }
+
+        return $fn;
+    }
+
+    /**
      * @return bool
      */
     private function updateInstalledPlugin(string $pluginName): bool
     {
         require_once __DIR__ . '/../lib/plugin_compatibility_checker.php';
-        require_once __DIR__ . '/../lib/PluginSchemaResyncer.php';
 
         $wasEnabled = $this->plugin_manager->is_plugin_enabled($pluginName);
         $coreVersion = (string) $this->plugin_manager->version;
@@ -960,7 +973,8 @@ class admin_updater extends fs_controller
             // aunque la dependencia esté desactivada (PU-09).
             $downloaded = PluginSchemaResyncer::withDependencyVisibility(
                 $pluginName,
-                fn(): bool => $this->plugin_downloader->download((int) $publicEntry['id'])
+                fn(): bool => $this->plugin_downloader->download((int) $publicEntry['id']),
+                $this->catalogRequirementsFn()
             );
             if (!$downloaded) {
                 return false;
@@ -995,7 +1009,8 @@ class admin_updater extends fs_controller
 
                 $downloaded = PluginSchemaResyncer::withDependencyVisibility(
                     $pluginName,
-                    fn(): bool => $this->plugin_downloader->download_private($remote['id'])
+                    fn(): bool => $this->plugin_downloader->download_private($remote['id']),
+                    $this->catalogRequirementsFn()
                 );
                 if (!$downloaded) {
                     return false;
