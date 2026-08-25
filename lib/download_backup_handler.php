@@ -61,7 +61,35 @@ if (!function_exists('system_updater_resolve_backup_file')) {
             return $result;
         }
 
-        // Layer 1: basename() strips directory components and any `..`.
+        // Layer 0: canonicalize the backup dir FIRST. The resolved backup
+        // dir may be non-canonical (symlinks, `..` components in an
+        // FS_BACKUP_DIR override); the containment prefix must be built from
+        // the SAME canonical form that realpath() returns, otherwise
+        // legitimate files would be falsely rejected.
+        $canonicalBackupDir = realpath($backupDir);
+        if ($canonicalBackupDir === false) {
+            // The backup dir does not exist on disk — nothing can be served.
+            $result['name'] = basename($requestedFile);
+            $result['status'] = 'missing_file';
+            return $result;
+        }
+        $backupDir = $canonicalBackupDir;
+
+        // Layer 0b: reject path traversal by SHAPE before basename() strips
+        // it. A value containing directory separators or "." / ".."
+        // components is an attempted escape — it must be reported as a
+        // SECURITY event (400 + audit), not silently treated as a plain
+        // missing file (404, unlogged).
+        if (basename($requestedFile) !== $requestedFile
+            || str_contains($requestedFile, '\\')
+            || $requestedFile === '.'
+            || $requestedFile === '..') {
+            $result['name'] = $requestedFile;
+            $result['status'] = 'traversal';
+            return $result;
+        }
+
+        // Layer 1: basename() strips any directory components (`../` included).
         $name = basename($requestedFile);
         if ($name === '' || $name === '.' || $name === '..') {
             $result['name'] = $name;

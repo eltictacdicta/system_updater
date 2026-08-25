@@ -42,10 +42,6 @@ require_once __DIR__ . '/lib/process_bootstrap.php';
 $ctx = system_updater_process_init(['mode' => 'plain', 'progress_prefix' => 'fs_download_backup']);
 $sessionId = $ctx['session_id'];
 
-// The plain-mode bootstrap already required an authenticated session.
-// Now require a valid CSRF token, then dispatch the actual download.
-ensure_request_csrf();
-
 require_once __DIR__ . '/lib/backup_manager.php';
 require_once __DIR__ . '/lib/download_backup_handler.php';
 require_once __DIR__ . '/lib/debug_log.php';
@@ -54,6 +50,34 @@ $requestedFile = isset($_GET['file']) ? (string) $_GET['file'] : '';
 $userNick = (string) ($_SESSION['user_nick'] ?? $_SESSION['_sf2_attributes']['user_nick'] ?? 'unknown');
 $remoteIp = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
 $backupDir = backup_manager::resolve_usable_backup_dir();
+
+// The plain-mode bootstrap already required an authenticated session.
+// Now require a valid CSRF token. A REJECTED token is a security event and
+// must be audited like any other rejection — never a silent exit.
+$csrfToken = system_updater_csrf_read_from_request();
+if ($csrfToken === '' || !system_updater_csrf_validate($csrfToken)) {
+    system_updater_record_download_audit(
+        'SECURITY',
+        $userNick,
+        $requestedFile,
+        $backupDir,
+        0,
+        $remoteIp,
+        'csrf_rejected'
+    );
+
+    http_response_code(403);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode([
+        'success' => false,
+        'message' => 'Token de seguridad inválido.',
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+// Valid — close session immediately so streaming cannot block on it.
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
 
 $resolution = system_updater_resolve_backup_file($requestedFile, $backupDir);
 $status = $resolution['status'];

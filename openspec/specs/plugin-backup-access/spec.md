@@ -11,31 +11,77 @@ administrator session with a valid CSRF token.
 
 ### Requirement: Backup Storage Location
 
-The system MUST resolve the backup directory to a path **outside** the
-webroot (`FS_FOLDER`). The default SHALL be `dirname(FS_FOLDER) . '/backups'`.
-Operators MAY override the default by defining a `FS_BACKUP_DIR` constant.
+The system MUST resolve the backup directory outside the webroot
+(`FS_FOLDER`) with this automatic chain (zero-ops contract, no manual
+`mkdir`/`chown`/`mv`):
+
+1. `FS_BACKUP_DIR` constant when defined — used **strictly** (it is the
+   only candidate; an unusable override is a loud configuration error,
+   never a silent fallback).
+2. A sibling of the framework root with a random 16-hex suffix
+   (`dirname(FS_FOLDER) . '/backups-<hex>'`) — outside the webroot and
+   undiscoverable by URL scanners.
+3. The web user's home directory with the same random suffix
+   (`<home>/backups-<hex>`) — outside the webroot, writable in shared
+   hosting with no admin step (also covers nginx).
+4. A protected legacy dir inside the webroot
+   (`FS_FOLDER/backups-<hex>`) as last resort — guarded by `.htaccess`
+   (`Require all denied` + legacy `Order/Deny`) and `index.php`.
+
 The directory MUST be created on demand with restrictive permissions
-(`0700`) and MUST be rejected at startup if not writable.
+(`0700`), MUST be guarded by `.htaccess`/`index.php` on every run, MUST
+be excluded from file backups when it lives inside the webroot, and MUST
+surface a loud error when none of the candidates is usable. Legacy
+backups found in the old fixed `FS_FOLDER/backups` dir MUST be migrated
+best-effort (copy + size verify + cleanup). The random suffix MUST be
+persisted in `tmp/system_updater_backup_dir.txt` under an exclusive lock
+and re-adopted from the existing directory if the state file is lost.
 
 #### Scenario: Default location lives outside the webroot
 
-- GIVEN no `FS_BACKUP_DIR` constant defined
+- GIVEN no `FS_BACKUP_DIR` constant defined and a writable sibling
 - WHEN `backup_manager` resolves the backup path
-- THEN the path equals `dirname(FS_FOLDER) . '/backups'`
+- THEN the path equals `dirname(FS_FOLDER) . '/backups-<16hex>'`
 - AND the path is not a descendant of `FS_FOLDER`
 
-#### Scenario: Operator override takes effect
+#### Scenario: Sibling unusable falls back to the user home
+
+- GIVEN no `FS_BACKUP_DIR` constant defined
+- AND the sibling is not writable (e.g. `/var/www` without permissions)
+- AND the web user's home IS writable
+- WHEN `backup_manager` resolves the backup path
+- THEN the path equals `<home>/backups-<16hex>` (outside the webroot)
+
+#### Scenario: Everything external fails falls back to protected legacy
+
+- GIVEN no `FS_BACKUP_DIR` constant defined
+- AND neither the sibling nor the home is writable
+- WHEN `backup_manager` resolves the backup path
+- THEN the path equals `FS_FOLDER/backups-<16hex>` (inside the webroot)
+- AND the directory is guarded by `.htaccess` and `index.php`
+- AND a compatibility message informs the operator
+
+#### Scenario: Operator override takes effect strictly
 
 - GIVEN `FS_BACKUP_DIR = '/var/backups/fsframework'`
 - WHEN `backup_manager` resolves the backup path
 - THEN the path equals `/var/backups/fsframework`
+- AND no other candidate is used even if it is writable
 
-#### Scenario: Unwritable directory is a startup error
+#### Scenario: Unwritable explicit override is a startup error
 
-- GIVEN the resolved backup directory exists but is not writable
+- GIVEN `FS_BACKUP_DIR` points to a directory that exists but is not writable
 - WHEN a backup is requested
 - THEN the operation fails with a clear error
 - AND no partial file is left behind
+
+#### Scenario: Legacy backups migrate automatically
+
+- GIVEN the old fixed `FS_FOLDER/backups` directory still holds files
+- WHEN `backup_manager` starts with a writable resolved directory
+- THEN the files are copied to the resolved directory with size verification
+- AND the legacy copies are removed
+- AND a message reports the migration
 
 ### Requirement: Auth-Gated Download Endpoint
 
@@ -68,10 +114,14 @@ and MUST log every download (user, file, size, IP, timestamp).
 ### Requirement: Path Traversal Protection
 
 The endpoint MUST reject any `?file=` value that resolves outside the
-backup directory. MUST use `basename()` to strip directory components and
+backup directory. MUST canonicalize the backup dir with `realpath()`
+before building the containment prefix, MUST reject values containing
+directory separators or `.`/`..` components **by shape** as traversal,
+MUST use `basename()` for valid simple filenames, and MUST use
 `realpath()` plus a `str_starts_with()` containment check against the
 canonical backup path. Any rejected attempt MUST be logged as a security
-event.
+event (shape-based rejections included — they are probes, not missing
+files).
 
 #### Scenario: Traversal via `..` is rejected
 
@@ -80,11 +130,24 @@ event.
 - THEN HTTP 400 with a JSON error body
 - AND a security log entry is appended
 
+#### Scenario: Traversal by shape is rejected as a security event
+
+- GIVEN `?file=../evil.sql.gz`
+- WHEN the endpoint is called
+- THEN HTTP 400 with a JSON error body
+- AND a security log entry is appended (not a silent 404)
+
 #### Scenario: Absolute path is rejected
 
 - GIVEN `?file=/etc/shadow`
 - WHEN the endpoint is called
 - THEN HTTP 400 with a JSON error body
+
+#### Scenario: Non-canonical backup dir still serves legitimate files
+
+- GIVEN the resolved backup dir contains `..` components or symlinks
+- WHEN the endpoint is called with a legitimate filename
+- THEN the file is served (the containment prefix is canonicalized first)
 
 #### Scenario: Symlink escape is rejected
 

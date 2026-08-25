@@ -59,8 +59,9 @@ works everywhere.
 ```bash
 curl -I https://your-host/download_backup.php   # expect 401 without session
 # As authenticated admin, open /index.php?page=admin_updater and click a
-# backup's "Download" button.  Expect 200 + bytes match the source file
-# (SHA-256 recorded in tmp/system_updater_debug.log).
+# backup's "Download" button. Expect HTTP 200 and that the downloaded bytes
+# match the source file (size + filename are recorded in
+# tmp/system_updater_debug.log).
 ```
 
 ## Rollback

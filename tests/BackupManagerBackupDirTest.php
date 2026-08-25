@@ -354,8 +354,7 @@ final class BackupManagerBackupDirTest extends TestCase
             $this->assertSame(
                 0700,
                 $perms,
-                'Backup directory must be created with 0700 permissions (got %s)',
-                decoct($perms)
+                'Backup directory must be created with 0700 permissions (got ' . decoct($perms) . ')'
             );
         } finally {
             foreach ((array) glob(dirname($tempRoot) . '/backups-*') as $dir) {

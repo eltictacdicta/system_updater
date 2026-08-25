@@ -75,9 +75,14 @@ final class DownloadBackupScriptTest extends TestCase
         $content = (string) file_get_contents(self::SCRIPT);
 
         $this->assertStringContainsString(
-            'ensure_request_csrf()',
+            'system_updater_csrf_validate(',
             $content,
-            'download_backup.php must call ensure_request_csrf() after bootstrap'
+            'download_backup.php must validate the CSRF token after bootstrap'
+        );
+        $this->assertStringContainsString(
+            'csrf_rejected',
+            $content,
+            'download_backup.php must audit a rejected CSRF token as a SECURITY event'
         );
     }
 

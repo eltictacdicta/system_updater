@@ -87,14 +87,19 @@ class BackupManagerFilenameTest extends TestCase
         }
 
         if (is_dir($this->tempDir)) {
-            // Clean any backup artifacts the tests may have left behind.
-            // secure-backup-access: the backup dir now lives OUTSIDE the
-            // supplied fsRoot with a random suffix (sibling by default), so
-            // we clean both the fixed legacy paths and any suffixed dirs.
+            // Clean ONLY this test instance's backup artifacts. The backup
+            // dir lives outside the supplied fsRoot with a random suffix, so
+            // we clean the fixed legacy paths inside $this->tempDir plus the
+            // effective dir this instance configured. Never glob the shared
+            // sys_get_temp_dir() parent — that could delete another test's
+            // or another process's backups.
+            $effective = is_dir($this->tempDir . '/tmp')
+                ? backup_manager::resolve_effective_backup_dir($this->tempDir)
+                : null;
             foreach (array_merge(
-                [$this->tempDir . '/backups', dirname($this->tempDir) . '/backups'],
+                [$this->tempDir . '/backups'],
                 (array) glob($this->tempDir . '/backups-*'),
-                (array) glob(dirname($this->tempDir) . '/backups-*')
+                $effective === null ? [] : [$effective]
             ) as $backupPath) {
                 if (!is_dir($backupPath)) {
                     continue;

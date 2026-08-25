@@ -204,6 +204,73 @@ final class DownloadBackupHandlerTest extends TestCase
     }
 
     // ============================================================
+    // system_updater_resolve_backup_file — shape pre-validation
+    // ============================================================
+
+    #[Test]
+    public function resolveBackupFileRejectsTraversalByShapeAsSecurity(): void
+    {
+        // A value with directory separators is an attempted escape by SHAPE:
+        // it must be classified as traversal (SECURITY + 400 upstream), NOT
+        // silently reduced by basename() to a missing file (404, unlogged).
+        $resolution = system_updater_resolve_backup_file('../evil.sql.gz', $this->backupDir);
+
+        $this->assertSame('traversal', $resolution['status']);
+        $this->assertSame('../evil.sql.gz', $resolution['name']);
+        $this->assertFalse($resolution['real_path']);
+    }
+
+    #[Test]
+    public function resolveBackupFileRejectsWindowsSeparatorAsSecurity(): void
+    {
+        $resolution = system_updater_resolve_backup_file('..\\evil.sql.gz', $this->backupDir);
+
+        $this->assertSame('traversal', $resolution['status']);
+        $this->assertFalse($resolution['real_path']);
+    }
+
+    // ============================================================
+    // system_updater_resolve_backup_file — canonical backup dir
+    // ============================================================
+
+    #[Test]
+    public function resolveBackupFileAcceptsLegitimateFileWithNonCanonicalBackupDir(): void
+    {
+        // The resolved backup dir may be non-canonical (symlink parent, `..`
+        // components in an FS_BACKUP_DIR override). The containment check
+        // must canonicalize it first or legitimate files are falsely
+        // rejected.
+        $alias = $this->backupDir . '/alias';
+        if (!symlink($this->backupDir, $alias)) {
+            $this->markTestSkipped('No se pudo crear el symlink de directorio de prueba.');
+        }
+
+        try {
+            $resolution = system_updater_resolve_backup_file('real.sql.gz', $alias);
+
+            $this->assertSame('ok', $resolution['status']);
+            $this->assertSame(
+                $this->backupDir . DIRECTORY_SEPARATOR . 'real.sql.gz',
+                $resolution['real_path']
+            );
+        } finally {
+            @unlink($alias);
+        }
+    }
+
+    #[Test]
+    public function resolveBackupFileReportsMissingWhenBackupDirDoesNotExist(): void
+    {
+        $resolution = system_updater_resolve_backup_file(
+            'real.sql.gz',
+            $this->backupDir . '/does-not-exist'
+        );
+
+        $this->assertSame('missing_file', $resolution['status']);
+        $this->assertFalse($resolution['real_path']);
+    }
+
+    // ============================================================
     // system_updater_record_download_audit — appends to debug log
     // ============================================================
 

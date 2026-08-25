@@ -495,6 +495,43 @@ class backup_manager
     private static function load_or_create_backup_suffix(string $fsFolder, ?string $homeDir = null): string
     {
         $stateFile = self::backup_suffix_state_file($fsFolder);
+        $lockFile = $stateFile . '.lock';
+        $lockDir = dirname($lockFile);
+        if (!is_dir($lockDir)) {
+            @mkdir($lockDir, 0755, true);
+        }
+
+        // Serialize concurrent requests: without the lock, two simultaneous
+        // requests with no state file would generate DIFFERENT suffixes and
+        // the second would persist its own, silently "losing" the first
+        // request's directory. flock() on a stable lock file makes the whole
+        // read → adopt → generate → persist sequence atomic per process.
+        $lock = @fopen($lockFile, 'c');
+        if ($lock === false || !flock($lock, LOCK_EX)) {
+            if ($lock !== false) {
+                fclose($lock);
+            }
+            // Lock unavailable → best-effort non-atomic path (same as before).
+            return self::load_or_create_backup_suffix_unlocked($fsFolder, $homeDir);
+        }
+
+        try {
+            return self::load_or_create_backup_suffix_unlocked($fsFolder, $homeDir);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    /**
+     * Unlocked implementation of {@see self::load_or_create_backup_suffix()}.
+     *
+     * Callers MUST hold the flock on the state-file lock before invoking
+     * this so concurrent requests cannot generate distinct suffixes.
+     */
+    private static function load_or_create_backup_suffix_unlocked(string $fsFolder, ?string $homeDir): string
+    {
+        $stateFile = self::backup_suffix_state_file($fsFolder);
 
         if (is_file($stateFile)) {
             $suffix = trim((string) file_get_contents($stateFile));
@@ -582,10 +619,15 @@ class backup_manager
         $suffix = self::load_or_create_backup_suffix($fsFolder, $homeDir);
         $suffixed = $suffix !== '' ? '-' . $suffix : '';
 
-        $candidates = array();
+        // Explicit override is STRICT: the operator chose this exact path,
+        // so it is the only candidate. An unusable override must surface as
+        // a loud configuration error, never silently fall back to another
+        // directory the operator did not choose.
         if ($override !== null && trim($override) !== '') {
-            $candidates[] = rtrim($override, '/\\');
+            return array(rtrim($override, '/\\'));
         }
+
+        $candidates = array();
         $candidates[] = dirname($fsFolder) . DIRECTORY_SEPARATOR . 'backups' . $suffixed;
 
         if ($homeDir === null && function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
