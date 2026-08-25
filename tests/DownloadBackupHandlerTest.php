@@ -144,7 +144,7 @@ final class DownloadBackupHandlerTest extends TestCase
 
         $this->assertContains(
             $resolution['status'],
-            ['traversal', 'invalid', 'missing_file'],
+            ['traversal', 'invalid'],
             'Traversal attempt must NOT resolve to ok. Got: ' . json_encode($resolution)
         );
         $this->assertNotSame(

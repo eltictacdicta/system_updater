@@ -116,16 +116,12 @@ if ($status === 'missing_file') {
 // status === 'ok'
 $realPath = (string) $resolution['real_path'];
 $safeName = (string) $resolution['name'];
-$size = (int) @filesize($realPath);
 
-header('Content-Type: application/octet-stream');
-header('Content-Disposition: attachment; filename="' . $safeName . '"');
-header('Content-Length: ' . $size);
-header('X-Content-Type-Options: nosniff');
-header('Cache-Control: no-store');
-
-system_updater_record_download_audit('DOWNLOAD', $userNick, $safeName, $realPath, $size, $remoteIp, null);
-
+// Open the file BEFORE sending success headers or auditing the download:
+// if fopen() fails (file removed between resolution and open, permissions
+// changed, etc.) we must respond 500 WITHOUT having claimed a successful
+// transfer. Deriving the size from the open descriptor also avoids a
+// filesize()/fopen() TOCTOU mismatch in Content-Length.
 $fp = @fopen($realPath, 'rb');
 if ($fp === false) {
     http_response_code(500);
@@ -136,6 +132,17 @@ if ($fp === false) {
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
+
+$stat = @fstat($fp);
+$size = is_array($stat) && isset($stat['size']) ? (int) $stat['size'] : 0;
+
+header('Content-Type: application/octet-stream');
+header('Content-Disposition: attachment; filename="' . $safeName . '"');
+header('Content-Length: ' . $size);
+header('X-Content-Type-Options: nosniff');
+header('Cache-Control: no-store');
+
+system_updater_record_download_audit('DOWNLOAD', $userNick, $safeName, $realPath, $size, $remoteIp, null);
 
 while (!feof($fp)) {
     $chunk = fread($fp, 8192);
