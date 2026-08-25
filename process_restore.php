@@ -60,14 +60,6 @@ switch ($action) {
 
         system_updater_send_sse('init', ['message' => 'Backup encontrado. Iniciando restauración...', 'percent' => 3]);
 
-        if (system_updater_maintenance_stealth_required()) {
-            $error = system_updater_maintenance_stealth_required_message();
-            system_updater_save_progress($progressFile, 'error', $error, 0, $error);
-            system_updater_send_sse('error', ['message' => $error, 'percent' => 0]);
-            @unlink($progressFile);
-            exit;
-        }
-
         if (!system_updater_begin_maintenance([
             'message' => 'Restauración del sistema en curso.',
             'source' => 'system_updater.restore',

@@ -20,8 +20,6 @@ class plugin_downloader
     private const PUBLIC_DOWNLOAD_CATALOG_URLS = [
         'https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json',
         'https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/master/custom_plugins.json',
-        'https://raw.githubusercontent.com/eltictacdicta/fs-custom-plugins/main/custom_plugins.json',
-        'https://raw.githubusercontent.com/eltictacdicta/fs-custom-plugins/master/custom_plugins.json',
     ];
 
     /**
@@ -127,34 +125,8 @@ class plugin_downloader
         if ($json && $json !== 'ERROR') {
             $this->download_list = json_decode($json, true);
             if (is_array($this->download_list)) {
-                foreach ($this->download_list as $key => $value) {
-                    $this->download_list[$key] = $this->normalizeDownloadItem($value, $key);
-                    $this->download_list[$key]['instalado'] = file_exists($this->fsRoot . '/plugins/' . $value['nombre']);
-
-                    // Mapear autor desde creador o nick
-                    if (!isset($this->download_list[$key]['autor'])) {
-                        $this->download_list[$key]['autor'] = isset($value['creador']) ? $value['creador'] : (isset($value['nick']) ? $value['nick'] : 'Desconocido');
-                    }
-
-                    // Intentar obtener versión y descripción del repo si no están en el JSON o son N/A
-                    if (!isset($this->download_list[$key]['version']) || $this->download_list[$key]['version'] == 'N/A' || !isset($this->download_list[$key]['descripcion'])) {
-                        $remote_data = $this->get_remote_plugin_ini($value);
-                        if ($remote_data) {
-                            if ((!isset($this->download_list[$key]['version']) || $this->download_list[$key]['version'] == 'N/A') && isset($remote_data['version'])) {
-                                $this->download_list[$key]['version'] = $remote_data['version'];
-                            }
-                            if ((!isset($this->download_list[$key]['descripcion']) || empty($this->download_list[$key]['descripcion'])) && isset($remote_data['description'])) {
-                                $this->download_list[$key]['descripcion'] = $remote_data['description'];
-                            }
-                            if (isset($remote_data['require'])) {
-                                $this->download_list[$key]['require'] = $remote_data['require'];
-                            }
-                            if (isset($remote_data['repository_url'])) {
-                                $this->download_list[$key]['repository_url'] = $remote_data['repository_url'];
-                            }
-                        }
-                    }
-                }
+                $this->download_list = $this->mergeWithLocalCatalog($this->download_list);
+                $this->download_list = $this->hydrateDownloadList($this->download_list);
 
                 if ($this->cache) {
                     $this->cache->set('download_list', $this->download_list, self::PUBLIC_DOWNLOAD_CACHE_TTL);
@@ -163,9 +135,110 @@ class plugin_downloader
             }
         }
 
+        $localCatalog = $this->loadLocalCatalogEntries();
+        if ($localCatalog !== []) {
+            $this->download_list = $this->hydrateDownloadList($localCatalog);
+            if ($this->cache) {
+                $this->cache->set('download_list', $this->download_list, self::PUBLIC_DOWNLOAD_CACHE_TTL);
+            }
+            return $this->download_list;
+        }
+
         $this->errors[] = 'Error al descargar la lista de plugins.';
         $this->download_list = [];
         return $this->download_list;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    protected function loadLocalCatalogEntries()
+    {
+        $path = $this->fsRoot . '/plugins/system_updater/data/custom_plugins.json';
+        if (!is_file($path)) {
+            return [];
+        }
+
+        $decoded = json_decode((string) file_get_contents($path), true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $remoteEntries
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function mergeWithLocalCatalog(array $remoteEntries)
+    {
+        $localEntries = $this->loadLocalCatalogEntries();
+        if ($localEntries === []) {
+            return $remoteEntries;
+        }
+
+        $merged = [];
+        foreach ($remoteEntries as $entry) {
+            if (!is_array($entry) || empty($entry['nombre'])) {
+                continue;
+            }
+            $merged[$entry['nombre']] = $entry;
+        }
+
+        foreach ($localEntries as $entry) {
+            if (!is_array($entry) || empty($entry['nombre'])) {
+                continue;
+            }
+            $merged[$entry['nombre']] = array_merge($merged[$entry['nombre']] ?? [], $entry);
+        }
+
+        return array_values($merged);
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $entries
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    protected function hydrateDownloadList(array $entries)
+    {
+        $downloadList = [];
+        foreach ($entries as $key => $value) {
+            if (!is_array($value) || empty($value['nombre'])) {
+                continue;
+            }
+
+            $downloadList[$key] = $this->normalizeDownloadItem($value, $key);
+            $downloadList[$key]['instalado'] = file_exists($this->fsRoot . '/plugins/' . $value['nombre']);
+
+            if (!isset($downloadList[$key]['autor'])) {
+                $downloadList[$key]['autor'] = isset($value['creador']) ? $value['creador'] : (isset($value['nick']) ? $value['nick'] : 'Desconocido');
+            }
+
+            if (!isset($downloadList[$key]['version']) || $downloadList[$key]['version'] == 'N/A' || !isset($downloadList[$key]['descripcion'])) {
+                $remote_data = $this->get_remote_plugin_ini($value);
+                if ($remote_data) {
+                    if ((!isset($downloadList[$key]['version']) || $downloadList[$key]['version'] == 'N/A') && isset($remote_data['version'])) {
+                        $downloadList[$key]['version'] = $remote_data['version'];
+                    }
+                    if ((!isset($downloadList[$key]['descripcion']) || empty($downloadList[$key]['descripcion'])) && isset($remote_data['description'])) {
+                        $downloadList[$key]['descripcion'] = $remote_data['description'];
+                    }
+                    if (isset($remote_data['require'])) {
+                        $downloadList[$key]['require'] = $remote_data['require'];
+                    }
+                    if (isset($remote_data['min_version'])) {
+                        $downloadList[$key]['min_version'] = $remote_data['min_version'];
+                    }
+                    if (isset($remote_data['max_version'])) {
+                        $downloadList[$key]['max_version'] = $remote_data['max_version'];
+                    }
+                    if (isset($remote_data['repository_url'])) {
+                        $downloadList[$key]['repository_url'] = $remote_data['repository_url'];
+                    }
+                }
+            }
+        }
+
+        return $downloadList;
     }
 
     /**
@@ -207,6 +280,8 @@ protected function fetchRemoteContents($url, $timeout = 10)
      */
     public function download($plugin_id)
     {
+        $this->errors = [];
+
         foreach ($this->downloads() as $item) {
             if ($item['id'] != (int) $plugin_id) {
                 continue;
@@ -237,22 +312,13 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
             @unlink($zipPath);
 
-            // Renombrar si es necesario
-            $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
-            foreach (scandir($this->fsRoot . '/plugins') as $f) {
-                if ($f === '.' || $f === '..')
-                    continue;
-                if (is_dir($this->fsRoot . '/plugins/' . $f) && !in_array($f, $pluginsList)) {
-                    // Eliminar existente si hay que sobrescribir
-                    if (file_exists($targetPath)) {
-                        $this->delTree($targetPath);
-                    }
-                    rename($this->fsRoot . '/plugins/' . $f, $targetPath);
-                    break;
-                }
+            if (!$this->promoteExtractedPlugin((string) $item['nombre'], $pluginsList)) {
+                return false;
             }
 
+            $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
             $this->bootstrapPluginGitMetadata($targetPath, $item);
+            $this->syncPluginDatabaseSchema((string) $item['nombre']);
 
             $this->messages[] = 'Plugin añadido correctamente.';
             return true;
@@ -372,6 +438,11 @@ protected function fetchRemoteContents($url, $timeout = 10)
         $fs_var = new fs_var();
 
         $rawToken = trim((string) $github_token);
+        if ($rawToken === '') {
+            $existing = $this->get_private_config();
+            $rawToken = trim((string) ($existing['github_token'] ?? ''));
+        }
+
         $encryptedToken = $this->encrypt_token($rawToken);
 
         $this->private_config = [
@@ -516,6 +587,8 @@ protected function fetchRemoteContents($url, $timeout = 10)
      */
     public function download_private($plugin_id)
     {
+        $this->errors = [];
+
         if (!$this->is_private_plugins_enabled()) {
             $this->errors[] = 'Los plugins privados no están configurados.';
             return false;
@@ -557,21 +630,13 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
             @unlink($zipPath);
 
-            // Renombrar si es necesario
-            $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
-            foreach (scandir($this->fsRoot . '/plugins') as $f) {
-                if ($f === '.' || $f === '..')
-                    continue;
-                if (is_dir($this->fsRoot . '/plugins/' . $f) && !in_array($f, $pluginsList)) {
-                    if (file_exists($targetPath)) {
-                        $this->delTree($targetPath);
-                    }
-                    rename($this->fsRoot . '/plugins/' . $f, $targetPath);
-                    break;
-                }
+            if (!$this->promoteExtractedPlugin((string) $item['nombre'], $pluginsList)) {
+                return false;
             }
 
+            $targetPath = $this->fsRoot . '/plugins/' . $item['nombre'];
             $this->bootstrapPluginGitMetadata($targetPath, $item);
+            $this->syncPluginDatabaseSchema((string) $item['nombre']);
 
             $this->messages[] = 'Plugin privado añadido correctamente.';
             return true;
@@ -653,12 +718,122 @@ protected function fetchRemoteContents($url, $timeout = 10)
     }
 
     /**
+     * Busca una entrada del catálogo público por nombre de plugin.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function findPublicEntryByName(string $pluginName): ?array
+    {
+        $pluginName = trim($pluginName);
+        if ($pluginName === '') {
+            return null;
+        }
+
+        foreach ($this->downloads() as $entry) {
+            if (($entry['nombre'] ?? '') === $pluginName) {
+                return $entry;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Lista plugins instalados con versión remota más nueva (públicos y privados).
+     *
+     * @param array<int, array<string, mixed>> $installedPlugins
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function getAvailableUpdates(array $installedPlugins): array
+    {
+        require_once __DIR__ . '/plugin_compatibility_checker.php';
+
+        $updates = [];
+        $installedByName = [];
+        foreach ($installedPlugins as $installed) {
+            $name = (string) ($installed['name'] ?? '');
+            if ($name !== '') {
+                $installedByName[$name] = $installed;
+            }
+        }
+
+        foreach ($this->downloads() as $entry) {
+            $name = (string) ($entry['nombre'] ?? '');
+            if ($name === '' || empty($entry['instalado'])) {
+                continue;
+            }
+
+            $localVersion = isset($installedByName[$name]['version'])
+                ? (string) $installedByName[$name]['version']
+                : null;
+            $remoteVersion = isset($entry['version']) ? (string) $entry['version'] : null;
+
+            if ($localVersion === null || $remoteVersion === null) {
+                continue;
+            }
+
+            if (!plugin_compatibility_checker::isRemoteVersionNewer($remoteVersion, $localVersion)) {
+                continue;
+            }
+
+            $updates[] = [
+                'name' => $name,
+                'description' => (string) ($entry['descripcion'] ?? ''),
+                'current_version' => plugin_compatibility_checker::normalizeVersion($localVersion),
+                'new_version' => plugin_compatibility_checker::normalizeVersion($remoteVersion),
+                'source' => 'public',
+                'id' => $entry['id'] ?? null,
+                'min_version' => (string) ($entry['min_version'] ?? ''),
+                'max_version' => (string) ($entry['max_version'] ?? ''),
+            ];
+        }
+
+        if ($this->is_private_plugins_enabled()) {
+            foreach ($this->private_downloads() as $entry) {
+                $name = (string) ($entry['nombre'] ?? '');
+                if ($name === '' || empty($entry['instalado'])) {
+                    continue;
+                }
+
+                $localVersion = isset($installedByName[$name]['version'])
+                    ? (string) $installedByName[$name]['version']
+                    : null;
+                $remoteVersion = isset($entry['version']) ? (string) $entry['version'] : null;
+
+                if ($localVersion === null || $remoteVersion === null) {
+                    continue;
+                }
+
+                if (!plugin_compatibility_checker::isRemoteVersionNewer($remoteVersion, $localVersion)) {
+                    continue;
+                }
+
+                $updates[] = [
+                    'name' => $name,
+                    'description' => (string) ($entry['descripcion'] ?? ''),
+                    'current_version' => plugin_compatibility_checker::normalizeVersion($localVersion),
+                    'new_version' => plugin_compatibility_checker::normalizeVersion($remoteVersion),
+                    'source' => 'private',
+                    'id' => $entry['id'] ?? null,
+                    'min_version' => (string) ($entry['min_version'] ?? ''),
+                    'max_version' => (string) ($entry['max_version'] ?? ''),
+                ];
+            }
+        }
+
+        usort($updates, static fn(array $a, array $b): int => strcmp((string) $a['name'], (string) $b['name']));
+
+        return $updates;
+    }
+
+    /**
      * Obtiene los datos del fsframework.ini de un repositorio remoto.
      * @param array $plugin_data Datos del plugin del JSON
      * @param string $token Token de GitHub (opcional)
      * @return array|false Array con los datos del ini o false si falla
      */
-    private function get_remote_plugin_ini($plugin_data, $token = null)
+    protected function get_remote_plugin_ini($plugin_data, $token = null)
     {
         if (!isset($plugin_data['link']) || empty($plugin_data['link'])) {
             return false;
@@ -951,6 +1126,104 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
         $disabledFunctions = array_map('trim', explode(',', $disabled));
         return !in_array('exec', $disabledFunctions, true);
+    }
+
+    /**
+     * Sincroniza migraciones y tablas XML del plugin tras sobrescribir archivos.
+     */
+    private function syncPluginDatabaseSchema(string $pluginName): void
+    {
+        $pluginName = trim($pluginName);
+        if ($pluginName === '' || !is_file($this->fsRoot . '/base/fs_plugin_manager.php')) {
+            return;
+        }
+
+        require_once $this->fsRoot . '/base/fs_plugin_manager.php';
+
+        $manager = new \fs_plugin_manager();
+        if (!method_exists($manager, 'applyPluginSchemaUpdates')) {
+            return;
+        }
+
+        $result = $manager->applyPluginSchemaUpdates($pluginName);
+        if (is_array($result) && empty($result['success'])) {
+            foreach ((array) ($result['errors'] ?? []) as $error) {
+                $this->errors[] = 'Esquema BD (' . $pluginName . '): ' . $error;
+            }
+        }
+    }
+
+    /**
+     * Mueve el directorio extraído al destino final, con backup si sobrescribe.
+     *
+     * @param list<string>|false $pluginsListBefore
+     */
+    private function promoteExtractedPlugin(string $pluginName, array|false $pluginsListBefore): bool
+    {
+        if ($pluginsListBefore === false) {
+            $this->errors[] = 'No se pudo leer el directorio de plugins.';
+            return false;
+        }
+
+        $pluginsRoot = $this->fsRoot . '/plugins/';
+        $targetPath = $pluginsRoot . $pluginName;
+        $newFolder = null;
+
+        foreach (scandir($pluginsRoot) as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            if (is_dir($pluginsRoot . $entry) && !in_array($entry, $pluginsListBefore, true)) {
+                $newFolder = $entry;
+                break;
+            }
+        }
+
+        if ($newFolder === null) {
+            $this->errors[] = 'No se encontró el directorio extraído del plugin.';
+            return false;
+        }
+
+        $newPath = $pluginsRoot . $newFolder;
+        $isUpdate = is_dir($targetPath);
+        $manager = null;
+
+        if ($isUpdate) {
+            if (!is_file($this->fsRoot . '/base/fs_plugin_manager.php')) {
+                $this->errors[] = 'No se puede crear backup del plugin existente.';
+                $this->delTree($newPath);
+                return false;
+            }
+
+            require_once $this->fsRoot . '/base/fs_plugin_manager.php';
+            $manager = new \fs_plugin_manager();
+            if (!$manager->create_backup($pluginName)) {
+                $this->errors[] = 'No se pudo crear backup antes de sobrescribir ' . $pluginName . '.';
+                $this->delTree($newPath);
+                return false;
+            }
+
+            if (!$this->delTree($targetPath)) {
+                $this->errors[] = 'Error al eliminar la versión anterior del plugin.';
+                $manager->restore_backup($pluginName);
+                $this->delTree($newPath);
+                return false;
+            }
+        }
+
+        if (!rename($newPath, $targetPath)) {
+            $this->errors[] = 'Error al instalar el plugin en su directorio final.';
+            if ($isUpdate && $manager instanceof \fs_plugin_manager) {
+                $manager->restore_backup($pluginName);
+            } else {
+                $this->delTree($newPath);
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     /**

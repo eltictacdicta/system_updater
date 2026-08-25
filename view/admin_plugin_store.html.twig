@@ -6,29 +6,96 @@
 #}
 {{ include('header.html.twig') }}
 
+<script type="text/javascript" src="plugins/system_updater/view/js/plugin_cascade_ajax.js"></script>
 <script type="text/javascript">
-    function descargar_plugin_publico_inestable(pluginId, pluginName) {
-        bootbox.confirm({
-            message: 'Este plugin está marcado como inestable. Significa que <b>no se recomienda su uso</b>, que todavía está en desarrollo y puede contener errores. ¿Estás seguro de que quieres descargar <b>' + pluginName + '</b>?',
-            title: '<b>Atención</b>',
-            callback: function (result) {
-                if (result) {
-                    window.location.href = '{{ fsc.url()|raw }}&tab=public&action=download&plugin_id=' + pluginId;
-                }
-            }
-        });
+    var pluginStoreBaseUrl = '{{ fsc.url()|raw }}';
+    var pluginStoreCsrf = '{{ csrf_token() }}';
+
+    function pluginStoreStatus(message) {
+        var box = $('#plugin-store-progress');
+        if (!box.length) {
+            $('body').append(
+                '<div id="plugin-store-progress" class="alert alert-info" style="position:fixed;top:60px;right:20px;z-index:9999;min-width:280px;">'
+                + '<i class="fa fa-spinner fa-spin"></i> <span id="plugin-store-progress-text"></span></div>'
+            );
+            box = $('#plugin-store-progress');
+        }
+        $('#plugin-store-progress-text').text(message);
+        box.show();
     }
 
-    function descargar_plugin_privado_inestable(pluginId, pluginName) {
+    function pluginStoreHideStatus() {
+        $('#plugin-store-progress').fadeOut(200);
+    }
+
+    function descargar_plugin_cascada(pluginName, isPrivate, unstableConfirm) {
+        var run = function () {
+            pluginStoreStatus('Iniciando descarga…');
+            fsPluginCascade.confirmDownloadThenActivate({
+                baseUrl: pluginStoreBaseUrl,
+                pluginName: pluginName,
+                csrfToken: pluginStoreCsrf,
+                isPrivate: isPrivate,
+                reloadOnSuccess: true,
+                onStatus: pluginStoreStatus
+            }).always(pluginStoreHideStatus);
+        };
+
+        if (typeof unstableConfirm === 'function') {
+            unstableConfirm(run);
+            return false;
+        }
+
+        run();
+        return false;
+    }
+
+    function activar_plugin_cascada(pluginName) {
+        pluginStoreStatus('Activando plugins…');
+        fsPluginCascade.activateCascade(pluginStoreBaseUrl, pluginName, pluginStoreCsrf, function (phase, data) {
+            if (phase === 'activate') {
+                pluginStoreStatus('Activando ' + data.plugin + ' (' + (data.index + 1) + '/' + data.total + ')…');
+            }
+        }).done(function () {
+            window.location.reload();
+        }).fail(function (response) {
+            var message = (response && response.message) ? response.message : 'No se pudo activar el plugin.';
+            bootbox.alert({ title: '<b>Error</b>', message: message });
+        }).always(pluginStoreHideStatus);
+
+        return false;
+    }
+
+    function descargar_plugin_publico_inestable_confirm(event, pluginId, pluginName) {
+        if (event) {
+            event.preventDefault();
+        }
         bootbox.confirm({
-            message: 'Este plugin privado está marcado como inestable. Puede contener errores o cambios no finalizados. ¿Deseas descargar <b>' + pluginName + '</b>?',
+            message: 'Este plugin está marcado como inestable. ¿Deseas descargarlo igualmente?',
             title: '<b>Atención</b>',
             callback: function (result) {
                 if (result) {
-                    window.location.href = '{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id=' + pluginId;
+                    descargar_plugin_cascada(pluginName, false);
                 }
             }
         });
+        return false;
+    }
+
+    function descargar_plugin_privado_inestable_confirm(event, pluginId, pluginName) {
+        if (event) {
+            event.preventDefault();
+        }
+        bootbox.confirm({
+            message: 'Este plugin privado está marcado como inestable. ¿Deseas descargarlo igualmente?',
+            title: '<b>Atención</b>',
+            callback: function (result) {
+                if (result) {
+                    descargar_plugin_cascada(pluginName, true);
+                }
+            }
+        });
+        return false;
     }
 </script>
 
@@ -80,10 +147,97 @@
                 <i class="fa fa-lock"></i> Plugins Privados
             </a>
         </li>
+        <li role="presentation" class="{{ fsc.activeTab == 'catalog' ? 'active' : '' }}">
+            <a href="{{ fsc.url()|raw }}&tab=catalog">
+                <i class="fa fa-code-fork"></i> Catálogo GitHub
+            </a>
+        </li>
     </ul>
 
     <div class="tab-content" style="padding: 15px; border: 1px solid #ddd; border-top: none;">
-        {% if fsc.activeTab == 'public' %}
+        {% if fsc.activeTab == 'catalog' %}
+        <div class="row">
+            <div class="col-md-4">
+                <div class="panel panel-primary">
+                    <div class="panel-heading">
+                        <h4 class="panel-title"><i class="fa fa-github"></i> Repositorio del catálogo</h4>
+                    </div>
+                    <div class="panel-body">
+                        <p>
+                            Catálogo público en
+                            <a href="https://github.com/eltictacdicta/fs-cusmtom-plugins" target="_blank">eltictacdicta/fs-cusmtom-plugins</a>.
+                        </p>
+                        <p><small>URL remota actual:</small><br>
+                            <code>{{ fsc.catalogRemoteUrl }}</code>
+                        </p>
+                        <form method="post" action="{{ fsc.url()|raw }}&tab=catalog&action=save_catalog_config">
+                            {{ csrf_field() }}
+                            <div class="form-group">
+                                <label>Token de GitHub</label>
+                                <input type="password" name="github_token" class="form-control" value="" placeholder="{% if fsc.catalogHasGithubToken %}Token guardado — escribe uno nuevo para reemplazarlo{% else %}ghp_xxxx...{% endif %}" autocomplete="off">
+                                <span class="help-block">Permisos de escritura en el repo del catálogo. Si ya configuraste plugins privados, se reutiliza su token. Deja el campo vacío para conservar el token actual.</span>
+                            </div>
+                            <div class="form-group">
+                                <label>Repositorio</label>
+                                <input type="text" name="catalog_repo" class="form-control" value="{{ fsc.catalogConfig.catalog_repo|default('eltictacdicta/fs-cusmtom-plugins') }}">
+                            </div>
+                            <div class="form-group">
+                                <label>Rama</label>
+                                <input type="text" name="catalog_branch" class="form-control" value="{{ fsc.catalogConfig.catalog_branch|default('main') }}">
+                            </div>
+                            <div class="form-group">
+                                <label>Archivo JSON</label>
+                                <input type="text" name="catalog_file" class="form-control" value="{{ fsc.catalogConfig.catalog_file|default('custom_plugins.json') }}">
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-block">
+                                <i class="fa fa-save"></i> Guardar configuración
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-8">
+                <div class="panel panel-default">
+                    <div class="panel-heading">
+                        <h4 class="panel-title"><i class="fa fa-file-code-o"></i> custom_plugins.json</h4>
+                    </div>
+                    <div class="panel-body">
+                        <p class="text-muted">
+                            Edita aquí el catálogo que alimenta la pestaña <strong>Plugins Públicos</strong>.
+                            Los cambios locales se aplican de inmediato; usa <strong>Publicar en GitHub</strong> para actualizar
+                            <a href="https://github.com/eltictacdicta/fs-cusmtom-plugins" target="_blank">fs-cusmtom-plugins</a>.
+                        </p>
+                        <form method="post" action="{{ fsc.url()|raw }}&tab=catalog&action=save_catalog">
+                            {{ csrf_field() }}
+                            <div class="form-group">
+                                <textarea name="catalog_json" class="form-control" rows="22" style="font-family: monospace;">{{ fsc.catalogJson }}</textarea>
+                            </div>
+                            <div class="btn-group">
+                                <button type="submit" class="btn btn-primary">
+                                    <i class="fa fa-save"></i> Guardar local
+                                </button>
+                            </div>
+                        </form>
+                        <hr>
+                        <form method="post" action="{{ fsc.url()|raw }}&tab=catalog&action=sync_catalog" style="display:inline;">
+                            {{ csrf_field() }}
+                            <button type="submit" class="btn btn-info">
+                                <i class="fa fa-download"></i> Sincronizar desde GitHub
+                            </button>
+                        </form>
+                        <form method="post" action="{{ fsc.url()|raw }}&tab=catalog&action=publish_catalog" style="display:inline;" onsubmit="return confirm('¿Publicar el catálogo local en GitHub?');">
+                            {{ csrf_field() }}
+                            <input type="hidden" name="commit_message" value="Actualizar custom_plugins.json desde system_updater">
+                            <button type="submit" class="btn btn-success">
+                                <i class="fa fa-upload"></i> Publicar en GitHub
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% elseif fsc.activeTab == 'public' %}
         {# Plugins Públicos #}
         {% if fsc.publicPlugins|length > 0 %}
         <div class="table-responsive">
@@ -132,14 +286,25 @@
                         {% endif %}
                         <br/><br/>
                         {% if plugin.instalado or fsc.isInstalled(plugin.nombre) %}
+                            {% if plugin.update_available is defined and plugin.update_available %}
+                            <form method="post" action="{{ fsc.url()|raw }}&tab=public&action=update_public&plugin_id={{ plugin.id }}" style="display:inline;">
+                                {{ csrf_field() }}
+                                <button type="submit" class="btn btn-xs btn-warning" onclick="return confirm('¿Actualizar {{ plugin.nombre|e('js') }} de v{{ plugin.local_version|default('?')|e('js') }} a v{{ plugin.version|default('?')|e('js') }}?');">
+                                    <span class="glyphicon glyphicon-refresh" aria-hidden="true"></span>&nbsp; Actualizar
+                                </button>
+                            </form>
+                            {% endif %}
                             {% if fsc.isActive(plugin.nombre) %}
                             <a href="{{ fsc.url()|raw }}&tab=public" class="btn btn-xs btn-success">
                                 <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Activo
                             </a>
                             {% else %}
-                            <a href="{{ fsc.url()|raw }}&tab=public" class="btn btn-xs btn-default">
+                            <button type="button" class="btn btn-xs btn-default" disabled>
                                 <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Instalado
-                            </a>
+                            </button>
+                            <button type="button" class="btn btn-xs btn-primary" onclick="return activar_plugin_cascada('{{ plugin.nombre|e('js') }}');">
+                                <span class="glyphicon glyphicon-play" aria-hidden="true"></span>&nbsp; Activar
+                            </button>
                             {% endif %}
                         {% elseif plugin.tipo == 'pago' or plugin.tipo == 'externo' %}
                         <a href="{{ plugin.link|default('https://github.com/eltictacdicta/fs-framework/plugin/' ~ plugin.nombre) }}" target="_blank" class="btn btn-xs btn-info">
@@ -150,23 +315,20 @@
                             <span class="glyphicon glyphicon-gift" aria-hidden="true"></span>&nbsp; Obtener
                         </a>
                         {% elseif plugin.estable is defined and not plugin.estable %}
-                        <form method="post" action="{{ fsc.url()|raw }}&tab=public&action=download&plugin_id={{ plugin.id }}" style="display:inline;" onsubmit="return descargar_plugin_publico_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
-                            {{ csrf_field() }}
-                            <button type="submit" class="btn btn-xs btn-primary">
-                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                            </button>
-                        </form>
+                        <button type="button" class="btn btn-xs btn-primary" onclick="return descargar_plugin_publico_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
+                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                        </button>
                         {% else %}
-                        <form method="post" action="{{ fsc.url()|raw }}&tab=public&action=download&plugin_id={{ plugin.id }}" style="display:inline;">
-                            {{ csrf_field() }}
-                            <button type="submit" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
-                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                            </button>
-                        </form>
+                        <button type="button" class="btn btn-xs btn-primary" onclick="return descargar_plugin_cascada('{{ plugin.nombre|e('js') }}', false);">
+                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                        </button>
                         {% endif %}
                     </td>
                     <td>
                         {{ plugin.descripcion|default('Sin descripción disponible')|nl2br }}<br/>
+                        {% if plugin.require is defined and plugin.require %}
+                        <span class="label label-default" title="Dependencias">require: {{ plugin.require is iterable ? plugin.require|join(', ') : plugin.require }}</span>
+                        {% endif %}
                         {% if plugin.ultima_modificacion is defined and plugin.ultima_modificacion %}
                         Última modificación: {{ plugin.ultima_modificacion }}
                         {% endif %}
@@ -196,8 +358,8 @@
                             {{ csrf_field() }}
                             <div class="form-group">
                                 <label>Token de GitHub</label>
-                                <input type="password" name="github_token" class="form-control" value="{{ fsc.privateConfig.github_token|default('') }}" placeholder="ghp_xxxx...">
-                                <span class="help-block">Token con permisos de lectura de repositorios</span>
+                                <input type="password" name="github_token" class="form-control" value="" placeholder="{% if fsc.privateHasGithubToken %}Token guardado — escribe uno nuevo para reemplazarlo{% else %}ghp_xxxx...{% endif %}" autocomplete="off">
+                                <span class="help-block">Token con permisos de lectura de repositorios. Deja el campo vacío para conservar el token actual.</span>
                             </div>
                             <div class="form-group">
                                 <label>URL del JSON de plugins</label>
@@ -316,24 +478,21 @@
                                                 <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Activo
                                             </a>
                                             {% else %}
-                                            <a href="{{ fsc.url()|raw }}&tab=private" class="btn btn-xs btn-default">
+                                            <button type="button" class="btn btn-xs btn-default" disabled>
                                                 <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>&nbsp; Instalado
-                                            </a>
+                                            </button>
+                                            <button type="button" class="btn btn-xs btn-primary" onclick="return activar_plugin_cascada('{{ plugin.nombre|e('js') }}');">
+                                                <span class="glyphicon glyphicon-play" aria-hidden="true"></span>&nbsp; Activar
+                                            </button>
                                             {% endif %}
                                         {% elseif plugin.estable is defined and not plugin.estable %}
-                                        <form method="post" action="{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id={{ plugin.id }}" style="display:inline;" onsubmit="return descargar_plugin_privado_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
-                                            {{ csrf_field() }}
-                                            <button type="submit" class="btn btn-xs btn-warning">
-                                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                                            </button>
-                                        </form>
+                                        <button type="button" class="btn btn-xs btn-warning" onclick="return descargar_plugin_privado_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
+                                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                                        </button>
                                         {% else %}
-                                        <form method="post" action="{{ fsc.url()|raw }}&tab=private&action=download_private&plugin_id={{ plugin.id }}" style="display:inline;">
-                                            {{ csrf_field() }}
-                                            <button type="submit" class="btn btn-xs btn-primary" onclick="return confirm('¿Descargar e instalar {{ plugin.nombre|e('js') }}?');">
-                                                <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
-                                            </button>
-                                        </form>
+                                        <button type="button" class="btn btn-xs btn-primary" onclick="return descargar_plugin_cascada('{{ plugin.nombre|e('js') }}', true);">
+                                            <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
+                                        </button>
                                         {% endif %}
                                     </td>
                                     <td>

@@ -17,6 +17,9 @@
  * @version 1.0.0
  */
 
+use FSFramework\Core\Plugin\PluginSchemaResyncer;
+use FSFramework\Core\Plugin\PluginUpdateOrderer;
+
 require_once 'base/fs_controller.php';
 require_once __DIR__ . '/../lib/maintenance_mode_compat.php';
 
@@ -229,6 +232,18 @@ class admin_updater extends fs_controller
                 }
                 break;
 
+            case 'update_all_public_plugins':
+                $this->actionUpdateAllPublicPlugins();
+                break;
+
+            case 'update_chained_plugins':
+                $this->actionUpdateChainedPlugins();
+                break;
+
+            case 'resync_plugin_schema':
+                $this->actionResyncPluginSchema();
+                break;
+
             case 'create_backup':
                 $this->actionCreateBackup();
                 break;
@@ -271,6 +286,14 @@ class admin_updater extends fs_controller
             case 'disable_maintenance':
                 $this->actionDisableMaintenance();
                 break;
+
+            case 'operation_warnings':
+                $this->actionOperationWarnings();
+                break;
+
+            case 'check_updates':
+                $this->actionCheckUpdates();
+                break;
         }
     }
 
@@ -287,8 +310,26 @@ class admin_updater extends fs_controller
         // Backups agrupados
         $this->backups = $this->backup_manager->list_backups_grouped();
 
-        // Verificar actualizaciones
-        $this->updates = $this->checkUpdates();
+        // Estado local rápido; la comprobación remota se hace por AJAX.
+        $this->updates = $this->buildInitialUpdates();
+    }
+
+    /**
+     * Estado inicial de actualizaciones sin peticiones remotas.
+     *
+     * @return array<string, mixed>
+     */
+    private function buildInitialUpdates(): array
+    {
+        return [
+            'updater' => false,
+            'updater_pending' => $this->updater_mgr->get_pending_self_update(),
+            'core' => false,
+            'core_new_version' => '',
+            'plugins' => [],
+            'public_plugin_updates' => [],
+            'checked' => false,
+        ];
     }
 
     /**
@@ -376,39 +417,10 @@ class admin_updater extends fs_controller
             $updates['updater'] = $updaterUpdate;
         }
 
-        // Comprobar actualizaciones de plugins instalados
-        // Comparar versión local con versión remota de los plugins privados
-        if ($this->plugin_downloader->is_private_plugins_enabled()) {
-            $remotePlugins = $this->plugin_downloader->private_downloads();
-            $installedPlugins = $this->plugin_manager->installed();
-
-            foreach ($remotePlugins as $remote) {
-                $pluginName = $remote['nombre'] ?? '';
-                if (empty($pluginName) || !$remote['instalado']) {
-                    continue;
-                }
-
-                // Obtener versión local del plugin instalado
-                $localVersion = null;
-                foreach ($installedPlugins as $installed) {
-                    if ($installed['name'] === $pluginName) {
-                        $localVersion = $installed['version'] ?? null;
-                        break;
-                    }
-                }
-
-                $remoteVersion = $remote['version'] ?? null;
-
-                if ($localVersion !== null && $remoteVersion !== null && $this->isRemoteVersionNewer((string) $remoteVersion, (string) $localVersion)) {
-                    $updates['plugins'][] = [
-                        'name' => $pluginName,
-                        'description' => $remote['descripcion'] ?? '',
-                        'current_version' => $localVersion,
-                        'new_version' => $remoteVersion,
-                    ];
-                }
-            }
-        }
+        // Comprobar actualizaciones de plugins instalados (públicos y privados)
+        $updates['plugins'] = $this->plugin_downloader->getAvailableUpdates(
+            $this->plugin_manager->installed()
+        );
 
         // Comprobar actualización del core
         // El core se compara contra la versión remota del repositorio
@@ -418,7 +430,59 @@ class admin_updater extends fs_controller
             $updates['core_new_version'] = $coreUpdate;
         }
 
+        $currentCoreVersion = (string) $this->plugin_manager->version;
+        $targetCoreVersion = $updates['core'] ? (string) $updates['core_new_version'] : '';
+
+        require_once __DIR__ . '/../lib/plugin_compatibility_checker.php';
+        $updates['plugins'] = plugin_compatibility_checker::enrichPluginUpdatesWithCoreCompatibility(
+            $updates['plugins'],
+            $currentCoreVersion,
+            $targetCoreVersion
+        );
+        $updates['public_plugin_updates'] = array_values(array_filter(
+            $updates['plugins'],
+            static fn(array $item): bool => ($item['source'] ?? '') === 'public'
+        ));
+        $updates['ready_plugin_updates'] = array_values(array_filter(
+            $updates['plugins'],
+            static fn(array $item): bool => ($item['update_status'] ?? '') === 'ready'
+        ));
+        $updates['chained_plugin_updates'] = array_values(array_filter(
+            $updates['plugins'],
+            static fn(array $item): bool => ($item['update_status'] ?? '') === 'blocked_by_core'
+                && !empty($item['compatible_with_target_core'])
+        ));
+        $updates['has_chained_update_plan'] = $updates['core'] && $updates['chained_plugin_updates'] !== [];
+
         return $updates;
+    }
+
+    /**
+     * @param list<string> $pluginNames
+     *
+     * @return list<string>
+     */
+    private function filterReadyPluginUpdates(array $pluginNames): array
+    {
+        require_once __DIR__ . '/../lib/plugin_compatibility_checker.php';
+
+        $readyNames = [];
+        $coreVersion = (string) $this->plugin_manager->version;
+        $targetCoreVersion = $this->checkCoreUpdate() ?: '';
+
+        foreach (plugin_compatibility_checker::enrichPluginUpdatesWithCoreCompatibility(
+            $this->plugin_downloader->getAvailableUpdates($this->plugin_manager->installed()),
+            $coreVersion,
+            (string) $targetCoreVersion
+        ) as $plugin) {
+            if (($plugin['update_status'] ?? '') === 'ready') {
+                $readyNames[] = (string) ($plugin['name'] ?? '');
+            }
+        }
+
+        $readyNames = array_values(array_filter($readyNames, static fn(string $name): bool => $name !== ''));
+
+        return array_values(array_intersect($pluginNames, $readyNames));
     }
 
     /**
@@ -530,16 +594,36 @@ class admin_updater extends fs_controller
      */
     private function normalizeVersion($version)
     {
+        if (function_exists('fs_normalize_plugin_version')) {
+            return fs_normalize_plugin_version((string) $version);
+        }
+
         $version = trim((string) $version);
         if ($version === '') {
             return '';
+        }
+
+        if (preg_match('/^v/i', $version)) {
+            $version = ltrim(substr($version, 1));
+        }
+
+        if (preg_match('/^(\d+)\.(\d+)\.(\d+)/', $version, $matches)) {
+            return $matches[1] . '.' . $matches[2] . '.' . $matches[3];
+        }
+
+        if (preg_match('/^(\d+)\.(\d+)$/', $version, $matches)) {
+            return $matches[1] . '.' . $matches[2] . '.0';
+        }
+
+        if (preg_match('/^(\d+)$/', $version, $matches)) {
+            return $matches[1] . '.0.0';
         }
 
         if (preg_match('/v?(\d+(?:\.\d+)+)/i', $version, $matches)) {
             return $matches[1];
         }
 
-        return '';
+        return $version;
     }
 
     /**
@@ -598,9 +682,7 @@ class admin_updater extends fs_controller
         }
 
         if (system_updater_maintenance_stealth_required()) {
-            $this->errorMessage = $this->getMaintenanceStealthRequiredMessage();
-            $this->new_error_msg($this->errorMessage);
-            return;
+            $this->new_advice($this->getMaintenanceStealthRequiredMessage());
         }
 
         if (!system_updater_begin_maintenance([
@@ -615,26 +697,8 @@ class admin_updater extends fs_controller
         }
 
         try {
-        // Intentar actualizar a través de la tienda de plugins privados
-            if ($this->plugin_downloader->is_private_plugins_enabled()) {
-                $remotePlugins = $this->plugin_downloader->private_downloads();
-                foreach ($remotePlugins as $remote) {
-                    if (($remote['nombre'] ?? '') === $pluginName && isset($remote['id'])) {
-                        if ($this->plugin_downloader->download_private($remote['id'])) {
-                            if ($this->plugin_manager->enable($pluginName)) {
-                                $this->successMessage = "Plugin $pluginName actualizado y habilitado correctamente.";
-                                $this->new_message($this->successMessage);
-                            } else {
-                                $this->errorMessage = "Plugin $pluginName actualizado, pero no se pudo habilitar.";
-                                $this->new_error_msg($this->errorMessage);
-                            }
-                        } else {
-                            $this->errorMessage = "Error al actualizar el plugin $pluginName.";
-                            $this->new_error_msg($this->errorMessage);
-                        }
-                        return;
-                    }
-                }
+            if ($this->updateInstalledPlugin($pluginName)) {
+                return;
             }
 
             $this->errorMessage = "No se pudo encontrar la actualización para $pluginName.";
@@ -642,6 +706,394 @@ class admin_updater extends fs_controller
         } finally {
             system_updater_end_maintenance();
         }
+    }
+
+    /**
+     * Actualiza todos los plugins públicos con versión remota pendiente.
+     */
+    private function actionUpdateAllPublicPlugins()
+    {
+        if (!$this->requireCsrf()) {
+            $this->errorMessage = 'Token CSRF inválido. Recarga la página e inténtalo de nuevo.';
+            $this->new_error_msg($this->errorMessage);
+            return;
+        }
+
+        require_once __DIR__ . '/../lib/plugin_compatibility_checker.php';
+
+        $pending = array_values(array_filter(
+            plugin_compatibility_checker::enrichPluginUpdatesWithCoreCompatibility(
+                $this->plugin_downloader->getAvailableUpdates($this->plugin_manager->installed()),
+                (string) $this->plugin_manager->version,
+                (string) ($this->checkCoreUpdate() ?: '')
+            ),
+            static fn(array $item): bool => ($item['source'] ?? '') === 'public'
+                && ($item['update_status'] ?? '') === 'ready'
+        ));
+
+        if ($pending === []) {
+            $this->new_advice('No hay plugins públicos pendientes de actualizar.');
+            return;
+        }
+
+        if (system_updater_maintenance_stealth_required()) {
+            $this->new_advice($this->getMaintenanceStealthRequiredMessage());
+        }
+
+        if (!system_updater_begin_maintenance([
+            'message' => 'Actualización masiva de plugins públicos en curso.',
+            'source' => 'system_updater.public_plugins_batch_update',
+            'retry_after' => 300,
+        ])) {
+            $this->errorMessage = 'No se pudo activar el modo mantenimiento antes de actualizar los plugins.';
+            $this->new_error_msg($this->errorMessage);
+            return;
+        }
+
+        // Orden deps-first: dependencias instaladas antes que sus dependientes,
+        // incluyendo dependencias transitivas fuera del lote (PU-04).
+        $pendingNames = array_values(array_filter(
+            array_map(static fn(array $item): string => (string) ($item['name'] ?? ''), $pending),
+            static fn(string $name): bool => $name !== ''
+        ));
+        $orderedNames = PluginUpdateOrderer::order($pendingNames, $this->catalogRequirementsFn());
+
+        $updated = [];
+        $failed = [];
+
+        try {
+            foreach ($orderedNames as $name) {
+                if (!$this->updateInstalledPlugin($name)) {
+                    $failed[] = $name;
+                    continue;
+                }
+
+                $updated[] = $name;
+            }
+        } finally {
+            system_updater_end_maintenance();
+        }
+
+        if ($updated !== []) {
+            $this->successMessage = 'Plugins actualizados: ' . implode(', ', $updated) . '.';
+            $this->new_message($this->successMessage);
+        }
+
+        if ($failed !== []) {
+            $this->errorMessage = 'No se pudieron actualizar: ' . implode(', ', $failed) . '.';
+            $this->new_error_msg($this->errorMessage);
+        }
+    }
+
+    /**
+     * Actualiza en lote plugins pendientes tras una actualización del núcleo (PU-08).
+     */
+    private function actionUpdateChainedPlugins(): void
+    {
+        header('Content-Type: application/json; charset=UTF-8');
+
+        if (!$this->requireCsrf()) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Token CSRF inválido. Recarga la página e inténtalo de nuevo.',
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $requested = $this->getPostParam('plugins', []);
+        if (!is_array($requested)) {
+            $requested = array_filter(array_map('trim', explode(',', (string) $requested)));
+        }
+
+        $requested = array_values(array_filter(
+            array_map(static fn($name): string => trim((string) $name), $requested),
+            static fn(string $name): bool => $name !== ''
+        ));
+
+        if ($requested === []) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'No se indicaron plugins para actualizar.',
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $toUpdate = $this->filterReadyPluginUpdates($requested);
+        if ($toUpdate === []) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Ninguno de los plugins solicitados puede actualizarse con la versión actual del núcleo.',
+                'updated' => [],
+                'failed' => $requested,
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        // Orden deps-first con la misma semántica que el lote público (PU-08):
+        // dependencias instaladas transitivas incluidas, ciclos con advertencia
+        // y orden original, dependencias ausentes omitidas.
+        $toUpdate = PluginUpdateOrderer::order($toUpdate, $this->catalogRequirementsFn());
+
+        if (system_updater_maintenance_stealth_required()) {
+            // Respuesta JSON: el aviso se muestra en cliente si hace falta.
+        }
+
+        if (!system_updater_begin_maintenance([
+            'message' => 'Actualización conjunta de plugins tras actualizar el núcleo.',
+            'source' => 'system_updater.chained_plugin_update',
+            'retry_after' => 300,
+        ])) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'No se pudo activar el modo mantenimiento.',
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $updated = [];
+        $failed = [];
+
+        try {
+            foreach ($toUpdate as $pluginName) {
+                if ($this->updateInstalledPlugin($pluginName)) {
+                    $updated[] = $pluginName;
+                    continue;
+                }
+
+                $failed[] = $pluginName;
+            }
+        } finally {
+            system_updater_end_maintenance();
+        }
+
+        $skipped = array_values(array_diff($requested, $toUpdate));
+        if ($skipped !== []) {
+            $failed = array_values(array_unique(array_merge($failed, $skipped)));
+        }
+
+        echo json_encode([
+            'success' => $updated !== [],
+            'message' => $updated !== []
+                ? 'Plugins actualizados: ' . implode(', ', $updated) . '.'
+                : 'No se pudo actualizar ningún plugin.',
+            'updated' => $updated,
+            'failed' => $failed,
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    /**
+     * Re-sincroniza el esquema BD de los plugins instalados (PU-10).
+     *
+     * Devuelve JSON {success, updated, failed, messages}. Con &plugin=X
+     * re-sincroniza un único plugin (resolviendo sus dependencias instaladas).
+     */
+    private function actionResyncPluginSchema()
+    {
+        header('Content-Type: application/json; charset=UTF-8');
+
+        try {
+            if (!$this->requireCsrf()) {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Token CSRF inválido. Recarga la página e inténtalo de nuevo.',
+                ], JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+
+            $plugin = $this->getPostParam('plugin');
+            if (!is_string($plugin) || trim($plugin) === '') {
+                $plugin = $this->getQueryParam('plugin');
+            }
+            $only = is_string($plugin) && trim($plugin) !== '' ? trim($plugin) : null;
+
+            $result = PluginSchemaResyncer::resyncInstalled($this->plugin_manager, $only);
+
+            echo json_encode([
+                'success' => $result['success'],
+                'message' => $result['success']
+                    ? 'Esquema sincronizado correctamente para: ' . implode(', ', $result['updated']) . '.'
+                    : 'No se pudo sincronizar el esquema de: ' . implode(', ', $result['failed']) . '.',
+                'updated' => $result['updated'],
+                'failed' => $result['failed'],
+                'messages' => $result['messages'],
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        } catch (\Throwable $e) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Error al re-sincronizar el esquema: ' . $e->getMessage(),
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+
+    /**
+     * Devuelve (una sola vez) la función de requisitos respaldada por el
+     * catálogo remoto, para que el orden de actualización y la visibilidad de
+     * dependencias funcionen con plugins aún no instalados localmente (D4).
+     *
+     * @return callable(string): array
+     */
+    private function catalogRequirementsFn(): callable
+    {
+        static $fn = null;
+        if ($fn === null) {
+            $fn = static fn(string $n): array => \FSFramework\Core\Plugin\PluginInstallProviderRegistry::get()->getDirectRequirements($n);
+        }
+
+        return $fn;
+    }
+
+    /**
+     * @return bool
+     */
+    private function updateInstalledPlugin(string $pluginName): bool
+    {
+        require_once __DIR__ . '/../lib/plugin_compatibility_checker.php';
+
+        $wasEnabled = $this->plugin_manager->is_plugin_enabled($pluginName);
+        $coreVersion = (string) $this->plugin_manager->version;
+
+        $publicEntry = $this->plugin_downloader->findPublicEntryByName($pluginName);
+        if (is_array($publicEntry) && isset($publicEntry['id'])) {
+            if (!$this->assertRemotePluginCompatible($pluginName, $publicEntry, $coreVersion)) {
+                return false;
+            }
+
+            // Visibilidad de dependencias en memoria durante download() →
+            // syncPluginDatabaseSchema() para que los XMLs de tablas resuelvan
+            // aunque la dependencia esté desactivada (PU-09).
+            $downloaded = PluginSchemaResyncer::withDependencyVisibility(
+                $pluginName,
+                fn(): bool => $this->plugin_downloader->download((int) $publicEntry['id']),
+                $this->catalogRequirementsFn()
+            );
+            if (!$downloaded) {
+                return false;
+            }
+
+            $this->reportPluginSchemaSyncAdvisories();
+
+            if ($wasEnabled && !$this->plugin_manager->is_plugin_enabled($pluginName)) {
+                if (!$this->plugin_manager->enable($pluginName)) {
+                    $this->errorMessage = "Plugin $pluginName actualizado, pero no se pudo habilitar.";
+                    $this->new_error_msg($this->errorMessage);
+                    return true;
+                }
+            }
+
+            $this->successMessage = $wasEnabled
+                ? "Plugin $pluginName actualizado correctamente."
+                : "Plugin $pluginName actualizado correctamente.";
+            $this->new_message($this->successMessage);
+            return true;
+        }
+
+        if ($this->plugin_downloader->is_private_plugins_enabled()) {
+            foreach ($this->plugin_downloader->private_downloads() as $remote) {
+                if (($remote['nombre'] ?? '') !== $pluginName || !isset($remote['id'])) {
+                    continue;
+                }
+
+                if (!$this->assertRemotePluginCompatible($pluginName, $remote, $coreVersion)) {
+                    return false;
+                }
+
+                $downloaded = PluginSchemaResyncer::withDependencyVisibility(
+                    $pluginName,
+                    fn(): bool => $this->plugin_downloader->download_private($remote['id']),
+                    $this->catalogRequirementsFn()
+                );
+                if (!$downloaded) {
+                    return false;
+                }
+
+                $this->reportPluginSchemaSyncAdvisories();
+
+                if ($wasEnabled && !$this->plugin_manager->is_plugin_enabled($pluginName)) {
+                    if (!$this->plugin_manager->enable($pluginName)) {
+                        $this->errorMessage = "Plugin $pluginName actualizado, pero no se pudo habilitar.";
+                        $this->new_error_msg($this->errorMessage);
+                        return true;
+                    }
+                }
+
+                $this->successMessage = $wasEnabled
+                    ? "Plugin $pluginName actualizado correctamente."
+                    : "Plugin $pluginName actualizado correctamente.";
+                $this->new_message($this->successMessage);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Muestra avisos de sincronización de esquema tras descargar/actualizar un plugin.
+     */
+    private function reportPluginSchemaSyncAdvisories(): void
+    {
+        foreach ($this->plugin_downloader->get_errors() as $error) {
+            if (str_starts_with($error, 'Esquema BD')) {
+                $this->new_advice($error);
+            }
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $remoteEntry
+     */
+    private function assertRemotePluginCompatible(string $pluginName, array $remoteEntry, string $coreVersion): bool
+    {
+        $evaluation = plugin_compatibility_checker::validateRemotePluginForCore(
+            $coreVersion,
+            plugin_compatibility_checker::boundsFromCatalogEntry($remoteEntry)
+        );
+
+        if ($evaluation['compatible']) {
+            return true;
+        }
+
+        $hint = '';
+        $targetCore = $this->checkCoreUpdate();
+        if ($targetCore) {
+            $targetEval = plugin_compatibility_checker::classifyPluginUpdateAgainstCore(
+                $coreVersion,
+                (string) $targetCore,
+                plugin_compatibility_checker::boundsFromCatalogEntry($remoteEntry)
+            );
+            if ($targetEval['blocked_by_core']) {
+                $hint = ' Actualiza primero el núcleo a v' . $targetCore . '.';
+            }
+        }
+
+        $this->errorMessage = 'No se puede actualizar ' . $pluginName . ': la versión remota '
+            . ($evaluation['message'] ?? 'no es compatible con el núcleo actual (v' . $coreVersion . ').')
+            . $hint;
+        $this->new_error_msg($this->errorMessage);
+
+        return false;
+    }
+
+    /**
+     * @return array<string, array{min_version: string, max_version: string}>
+     */
+    private function buildPendingRemoteBoundsMap(): array
+    {
+        $map = [];
+
+        foreach ($this->plugin_downloader->getAvailableUpdates($this->plugin_manager->installed()) as $update) {
+            $name = (string) ($update['name'] ?? '');
+            if ($name === '') {
+                continue;
+            }
+
+            $map[$name] = plugin_compatibility_checker::normalizeBounds($update);
+        }
+
+        return $map;
     }
 
     /**
@@ -797,8 +1249,7 @@ class admin_updater extends fs_controller
         }
 
         if (!$this->isStealthAccessReady()) {
-            header('Location: ' . $this->url() . '&error=maintenance-stealth-required');
-            exit;
+            $this->new_advice($this->getMaintenanceStealthRequiredMessage());
         }
 
         $message = trim((string) $this->getPostParam('maintenance_message', ''));
@@ -821,6 +1272,79 @@ class admin_updater extends fs_controller
         }
 
         header('Location: ' . $this->url() . '&error=maintenance-failed');
+        exit;
+    }
+
+    /**
+     * Acción AJAX: comprobar actualizaciones remotas del núcleo y plugins.
+     */
+    private function actionCheckUpdates(): void
+    {
+        header('Content-Type: application/json; charset=UTF-8');
+        $this->requireAjaxCsrf();
+
+        try {
+            $updates = $this->checkUpdates();
+            $updates['checked'] = true;
+            $updaterInfo = $this->updater_mgr->get_info();
+
+            echo json_encode([
+                'success' => true,
+                'updates' => $updates,
+                'meta' => [
+                    'core_version' => (string) $this->plugin_manager->version,
+                    'updater_version' => (string) ($updaterInfo['version'] ?? ''),
+                ],
+            ], JSON_UNESCAPED_UNICODE);
+        } catch (\Throwable $exception) {
+            echo json_encode([
+                'success' => false,
+                'message' => $exception->getMessage(),
+            ], JSON_UNESCAPED_UNICODE);
+        }
+
+        exit;
+    }
+
+    /**
+     * Acción AJAX: advertencias antes de operaciones delicadas.
+     */
+    private function actionOperationWarnings()
+    {
+        header('Content-Type: application/json; charset=UTF-8');
+        $this->requireAjaxCsrf();
+
+        require_once __DIR__ . '/../lib/plugin_compatibility_checker.php';
+
+        try {
+            $excludeNick = is_object($this->user) ? trim((string) ($this->user->nick ?? '')) : '';
+            $warnings = system_updater_get_operation_warnings($excludeNick);
+
+            $context = trim((string) $this->getQueryParam('context', ''));
+            $targetCoreVersion = trim((string) $this->getQueryParam('target_core_version', ''));
+            if ($context === 'core_update' && $targetCoreVersion !== '') {
+                $warnings = array_merge(
+                    $warnings,
+                    plugin_compatibility_checker::getCoreUpdateWarnings(
+                        $targetCoreVersion,
+                        $GLOBALS['plugins'] ?? [],
+                        null,
+                        $this->buildPendingRemoteBoundsMap()
+                    )
+                );
+            }
+
+            echo json_encode([
+                'success' => true,
+                'warnings' => $warnings,
+            ], JSON_UNESCAPED_UNICODE);
+        } catch (\Throwable $exception) {
+            echo json_encode([
+                'success' => false,
+                'message' => $exception->getMessage(),
+            ], JSON_UNESCAPED_UNICODE);
+        }
+
         exit;
     }
 
@@ -1002,6 +1526,22 @@ class admin_updater extends fs_controller
         }
 
         return $this->backup_manager->get_backup_path();
+    }
+
+    /**
+     * Valida CSRF en peticiones AJAX (GET/POST) antes de ejecutar trabajo costoso.
+     */
+    private function requireAjaxCsrf(): void
+    {
+        $token = trim((string) ($this->getQueryParam('_csrf_token') ?: $this->getPostParam('_csrf_token', '')));
+        if ($token === '' || !\FSFramework\Security\CsrfManager::isValid($token)) {
+            header('Content-Type: application/json; charset=UTF-8');
+            echo json_encode([
+                'success' => false,
+                'message' => 'Token de seguridad inválido. Recarga la página.',
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
     }
 
     /**

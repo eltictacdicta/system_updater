@@ -1,0 +1,12 @@
+ownership: plugin-local
+change_root: plugins/system_updater/openspec/changes/{name}/
+archive_root: plugins/system_updater/openspec/changes/archive/{YYYY-MM-DD}-{name}/
+
+project: system_updater-plugin
+scope: plugins/system_updater/
+parent_project: fs-framework
+
+strict_tdd: true
+
+testing:
+  runner: ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml
