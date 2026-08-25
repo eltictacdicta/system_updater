@@ -254,13 +254,6 @@ class admin_updater extends fs_controller
                 }
                 break;
 
-            case 'download_backup':
-                $file = $this->getQueryParam('file');
-                if ($file) {
-                    $this->actionDownloadBackup($file);
-                }
-                break;
-
             case 'delete_backup_group':
                 $baseName = $this->getQueryParam('base_name');
                 if ($baseName) {
@@ -746,46 +739,6 @@ class admin_updater extends fs_controller
         } else {
             $errors = $this->backup_manager->get_errors();
             $this->errorMessage = 'Error en la restauración: ' . implode(', ', $errors);
-            $this->new_error_msg($this->errorMessage);
-        }
-    }
-
-    /**
-     * Acción: Descargar copia de seguridad
-     * 
-     * @param string $file
-     */
-    private function actionDownloadBackup($file)
-    {
-        $filePath = $this->backup_manager->get_backup_path() . DIRECTORY_SEPARATOR . basename($file);
-
-        if (file_exists($filePath)) {
-            // Limpiar todos los buffers de salida del framework para evitar
-            // que el archivo completo se acumule en memoria.
-            while (ob_get_level()) {
-                ob_end_clean();
-            }
-
-            header('Content-Description: File Transfer');
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="' . basename($filePath) . '"');
-            header('Expires: 0');
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            header('Content-Length: ' . filesize($filePath));
-
-            // Streaming: leer y enviar en bloques de 8 KB
-            $handle = fopen($filePath, 'rb');
-            if ($handle) {
-                while (!feof($handle)) {
-                    echo fread($handle, 8192);
-                    flush();
-                }
-                fclose($handle);
-            }
-            exit;
-        } else {
-            $this->errorMessage = 'El archivo de backup no se encontró.';
             $this->new_error_msg($this->errorMessage);
         }
     }

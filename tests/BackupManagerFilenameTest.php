@@ -88,8 +88,13 @@ class BackupManagerFilenameTest extends TestCase
 
         if (is_dir($this->tempDir)) {
             // Clean any backup artifacts the tests may have left behind.
-            $backupPath = $this->tempDir . '/backups';
-            if (is_dir($backupPath)) {
+            // secure-backup-access: the backup dir now lives OUTSIDE the
+            // supplied fsRoot (sibling of the framework root by default),
+            // so we also clean the sibling path.
+            foreach ([$this->tempDir . '/backups', dirname($this->tempDir) . '/backups'] as $backupPath) {
+                if (!is_dir($backupPath)) {
+                    continue;
+                }
                 foreach (array_diff(scandir($backupPath), ['.', '..']) as $entry) {
                     $entryPath = $backupPath . '/' . $entry;
                     if (is_dir($entryPath)) {
@@ -331,7 +336,8 @@ class BackupManagerFilenameTest extends TestCase
     #[Test]
     public function listBackupsGroupedIncludesLegacyBackupCompleteFiles(): void
     {
-        $backupPath = $this->tempDir . '/backups';
+        // secure-backup-access: backup dir now lives OUTSIDE fsRoot (sibling).
+        $backupPath = dirname($this->tempDir) . '/backups';
         mkdir($backupPath, 0755, true);
         $legacyComplete = 'backup_2024-01-15_10-30-00_complete.zip';
         $legacyDb = 'backup_2024-01-15_10-30-00_db.sql.gz';

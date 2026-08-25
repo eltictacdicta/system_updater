@@ -10,17 +10,21 @@
 # Plesk configurations enable compression for all text/* responses.
 <IfModule mod_deflate.c>
     SetEnvIfNoCase Request_URI "process_.*\.php$" no-gzip dont-vary
+    # download_backup.php is not SSE but it streams a binary body via
+    # readfile(); disabling compression guarantees the SHA-256 of the
+    # response body matches the SHA-256 of the source file.
+    SetEnvIfNoCase Request_URI "download_backup\.php$" no-gzip dont-vary
 </IfModule>
 
 # Disable mod_security (OWASP CRS) for process scripts.
 # SSE streams with long query strings and continuous output trigger false positives.
 <IfModule mod_security2.c>
-    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery)\.php$">
+    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery|download_backup)\.php$">
         SecRuleEngine Off
     </FilesMatch>
 </IfModule>
 <IfModule security2_module>
-    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery)\.php$">
+    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery|download_backup)\.php$">
         SecRuleEngine Off
     </FilesMatch>
 </IfModule>
@@ -35,5 +39,14 @@
         Header set Cache-Control "no-cache, no-transform"
         Header set X-Accel-Buffering "no"
         Header set Connection "keep-alive"
+    </FilesMatch>
+    # download_backup.php serves authenticated binary content.  We override
+    # the root no-store default with a slightly tighter no-store + nosniff
+    # pair so the browser cannot guess a different content type for the
+    # attachment (defence in depth: the PHP code already emits the right
+    # Content-Type and Cache-Control).
+    <FilesMatch "^download_backup\.php$">
+        Header set Cache-Control "no-store"
+        Header set X-Content-Type-Options "nosniff"
     </FilesMatch>
 </IfModule>

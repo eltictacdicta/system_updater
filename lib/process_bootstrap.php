@@ -48,6 +48,13 @@ function system_updater_shutdown_on_missing_config(string $mode = 'sse'): void
 
 /**
  * @param array<string, mixed> $options
+ *   Supported modes:
+ *   - 'sse' (default): Server-Sent Events. Emits text/event-stream headers,
+ *     requires csrf_guard on 'start', and is meant for long-lived progress
+ *     streaming.
+ *   - 'plain': No SSE headers, no deflate, no buffering.  Used by
+ *     `download_backup.php` which needs to send a binary file body without
+ *     any framing that would interfere with `readfile()`.
  * @return array{session_id: string, action: string, progress_file: string}
  */
 function system_updater_process_init(array $options = []): array
@@ -94,6 +101,27 @@ function system_updater_process_init(array $options = []): array
         header('Content-Encoding: identity');
         // Prevent browsers from sniffing the content type
         header('X-Content-Type-Options: nosniff');
+    } elseif ($mode === 'plain') {
+        require_once __DIR__ . '/csrf_guard.php';
+
+        // Clean any output buffers left over from config.php — required
+        // because we are about to call readfile() and any buffered output
+        // would corrupt the binary body.
+        while (ob_get_level()) {
+            @ob_end_clean();
+        }
+        // Do NOT set Content-Type, Cache-Control, or X-Accel-Buffering here:
+        // each endpoint sets its own headers (the download endpoint needs
+        // attachment + Content-Length, not the SSE defaults).
+    } else {
+        // Unknown mode — fail loud instead of silently falling back to SSE.
+        http_response_code(500);
+        header('Content-Type: application/json; charset=UTF-8');
+        echo json_encode([
+            'success' => false,
+            'message' => 'system_updater_process_init: unknown mode "' . $mode . '"',
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
     }
 
     $action = (string) ($_GET['action'] ?? '');

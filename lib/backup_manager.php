@@ -268,8 +268,10 @@ class backup_manager
             $this->fsRoot = dirname(dirname(dirname(__DIR__)));
         }
 
-        // Store backups in /backups/ directory at project root
-        $this->backupPath = $this->fsRoot . DIRECTORY_SEPARATOR . self::BACKUP_DIR;
+        // Store backups OUTSIDE the webroot by default (sibling of the
+        // framework root).  `self::BACKUP_DIR` is kept for BC but no longer
+        // composed into paths.
+        $this->backupPath = self::resolve_backup_dir_with(null, $this->fsRoot);
         $this->mysqlHelper = new BackupMysqlHelper($this->errors);
         $this->ensureBackupDirectoryExists();
     }
@@ -343,18 +345,89 @@ class backup_manager
     }
 
     /**
+     * Resolve the directory where backup files live.
+     *
+     * The default is a SIBLING of `$fsFolder` (i.e. `dirname($fsFolder) . '/backups'`)
+     * so that backups are unreachable by the web server by definition.
+     * Operators MAY override the default by defining the `FS_BACKUP_DIR` constant
+     * (used in `resolve_backup_dir_with` when not null).
+     *
+     * Order of precedence (when called with no arguments):
+     *  1. `FS_BACKUP_DIR` constant (if defined and non-empty).
+     *  2. `dirname(FS_FOLDER) . '/backups'` (sibling of the framework root).
+     *
+     * Tests and the constructor use {@see self::resolve_backup_dir_with()}
+     * to pass an explicit `$fsFolder` instead of relying on the global
+     * `FS_FOLDER` constant.
+     *
+     * @return string
+     */
+    public static function resolve_backup_dir(): string
+    {
+        return self::resolve_backup_dir_with(
+            defined('FS_BACKUP_DIR') ? (string) FS_BACKUP_DIR : null,
+            defined('FS_FOLDER') ? (string) FS_FOLDER : null
+        );
+    }
+
+    /**
+     * Pure seam for {@see self::resolve_backup_dir()}.
+     *
+     * Returns the absolute backup directory for the given framework root,
+     * honouring an explicit override (e.g. `FS_BACKUP_DIR`) when it is
+     * non-empty. Passing `null` for `$override` or `$fsFolder` falls back
+     * to the appropriate global / `__DIR__`-derived default.
+     *
+     * @param string|null $override Optional override (FS_BACKUP_DIR).
+     * @param string|null $fsFolder Framework root (FS_FOLDER).  Defaults to
+     *                              the directory three levels above this file.
+     * @return string
+     */
+    public static function resolve_backup_dir_with(?string $override, ?string $fsFolder): string
+    {
+        if ($override !== null && trim($override) !== '') {
+            return rtrim($override, '/\\');
+        }
+
+        if ($fsFolder === null) {
+            // __DIR__ here = .../plugins/system_updater/lib
+            $fsFolder = dirname(dirname(dirname(__DIR__)));
+        }
+
+        return dirname($fsFolder) . DIRECTORY_SEPARATOR . 'backups';
+    }
+
+    /**
      * Create the backup directory if it doesn't exist.
+     *
+     * Newly-created directories use restrictive 0700 permissions
+     * (defence in depth: even if a sibling directory is readable by other
+     * users on the host, the backup files inside are not).  For pre-existing
+     * directories we only check writability — we do NOT silently chmod them,
+     * because that would mask real ownership/perms problems the operator needs
+     * to see.
+     *
+     * Surfaces a loud error when the directory is not writable so the
+     * operator notices the misconfiguration immediately instead of
+     * receiving confusing "permission denied" mid-backup.
      */
     private function ensureBackupDirectoryExists()
     {
         if (!is_dir($this->backupPath)) {
-            if (!@mkdir($this->backupPath, 0755, true)) {
+            if (!@mkdir($this->backupPath, 0700, true)) {
                 $this->errors[] = "No se puede crear el directorio de copias de seguridad: " . $this->backupPath;
                 return;
             }
-            // Create security files
+            // Create security files (defence in depth for Apache deployments
+            // that still serve the parent webroot before the operator has
+            // moved their backups to the new sibling path).
             file_put_contents($this->backupPath . '/.htaccess', "Order Deny,Allow\nDeny from all\n");
             file_put_contents($this->backupPath . '/index.php', "<?php\n// No directory listing\nheader('HTTP/1.0 403 Forbidden');\nexit;\n");
+        }
+
+        if (!is_writable($this->backupPath)) {
+            $this->errors[] = "El directorio de copias de seguridad no es escribible: " . $this->backupPath
+                . " (permisos=" . substr(sprintf('%o', (int) @fileperms($this->backupPath)), -4) . ")";
         }
     }
 

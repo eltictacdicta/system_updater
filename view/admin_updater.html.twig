@@ -295,9 +295,9 @@
                                                 <i class="fa fa-download"></i> <span class="caret"></span>
                                             </button>
                                             <ul class="dropdown-menu pull-right">
-                                                <li><a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.complete.name }}" target="_blank">Descargar Completo</a></li>
-                                                {% if group.files %}<li><a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.files.name }}" target="_blank">Descargar Archivos</a></li>{% endif %}
-                                                {% if group.database %}<li><a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.database.name }}" target="_blank">Descargar BD</a></li>{% endif %}
+                                                <li><a href="plugins/system_updater/download_backup.php?file={{ group.complete.name|e('url') }}&su_csrf_token={{ fsc.su_csrf_token|e('url') }}" target="_blank">Descargar Completo</a></li>
+                                                {% if group.files %}<li><a href="plugins/system_updater/download_backup.php?file={{ group.files.name|e('url') }}&su_csrf_token={{ fsc.su_csrf_token|e('url') }}" target="_blank">Descargar Archivos</a></li>{% endif %}
+                                                {% if group.database %}<li><a href="plugins/system_updater/download_backup.php?file={{ group.database.name|e('url') }}&su_csrf_token={{ fsc.su_csrf_token|e('url') }}" target="_blank">Descargar BD</a></li>{% endif %}
                                             </ul>
                                         </div>
                                         <button type="button" class="btn btn-warning btn-restore" data-action="restore_complete" data-file="{{ group.complete.name }}" title="Restaurar todo">
@@ -312,7 +312,7 @@
                                         
                                         {% if not group.complete %}
                                             {% if group.files %}
-                                            <a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.files.name }}" class="btn btn-default" title="Descargar Archivos" target="_blank">
+                                            <a href="plugins/system_updater/download_backup.php?file={{ group.files.name|e('url') }}&su_csrf_token={{ fsc.su_csrf_token|e('url') }}" class="btn btn-default" title="Descargar Archivos" target="_blank">
                                                 <i class="fa fa-download"></i>
                                             </a>
                                             <button type="button" class="btn btn-default btn-restore" data-action="restore_files" data-file="{{ group.files.name }}" title="Restaurar Archivos">
@@ -320,7 +320,7 @@
                                             </button>
                                             {% endif %}
                                             {% if group.database %}
-                                            <a href="{{ fsc.url()|raw }}&action=download_backup&file={{ group.database.name }}" class="btn btn-default" title="Descargar BD" target="_blank">
+                                            <a href="plugins/system_updater/download_backup.php?file={{ group.database.name|e('url') }}&su_csrf_token={{ fsc.su_csrf_token|e('url') }}" class="btn btn-default" title="Descargar BD" target="_blank">
                                                 <i class="fa fa-database"></i>
                                             </a>
                                             <button type="button" class="btn btn-default btn-restore" data-action="restore_database" data-file="{{ group.database.name }}" title="Restaurar BD">
