@@ -306,6 +306,10 @@ final class BackupManagerBackupDirTest extends TestCase
         }
         file_put_contents($effective, 'block');
 
+        // Simulate an nginx server so the honest warning is emitted too.
+        $serverBackup = $_SERVER['SERVER_SOFTWARE'] ?? null;
+        $_SERVER['SERVER_SOFTWARE'] = 'nginx/1.25.3';
+
         try {
             $manager = new backup_manager($tempRoot);
             $backupPath = $manager->get_backup_path();
@@ -328,6 +332,32 @@ final class BackupManagerBackupDirTest extends TestCase
                 $messages,
                 'Fallback must inform the operator with a compatibility message'
             );
+            $this->assertStringContainsString(
+                'nginx',
+                $messages,
+                'nginx fallback must warn the operator about missing .htaccess support'
+            );
+
+            // The fallback dir MUST be guarded against direct web access.
+            $this->assertFileExists(
+                $backupPath . '/.htaccess',
+                'Fallback dir must contain a .htaccess guard'
+            );
+            $htaccess = (string) file_get_contents($backupPath . '/.htaccess');
+            $this->assertStringContainsString(
+                'Require all denied',
+                $htaccess,
+                'Generated .htaccess must use Apache 2.4 syntax'
+            );
+            $this->assertStringContainsString(
+                'Deny from all',
+                $htaccess,
+                'Generated .htaccess must keep the legacy Apache 2.2 syntax'
+            );
+            $this->assertFileExists(
+                $backupPath . '/index.php',
+                'Fallback dir must contain an index.php guard'
+            );
 
             // The active backup dir must be excluded from file backups.
             $ref = new ReflectionProperty(backup_manager::class, 'excludedDirs');
@@ -335,6 +365,11 @@ final class BackupManagerBackupDirTest extends TestCase
             $excluded = $ref->getValue($manager);
             $this->assertContains(basename($backupPath), $excluded);
         } finally {
+            if ($serverBackup === null) {
+                unset($_SERVER['SERVER_SOFTWARE']);
+            } else {
+                $_SERVER['SERVER_SOFTWARE'] = $serverBackup;
+            }
             @unlink($effective);
             foreach ((array) glob($tempRoot . '/backups-*') as $dir) {
                 chmod($dir, 0700);

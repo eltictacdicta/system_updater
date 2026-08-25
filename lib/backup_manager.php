@@ -292,6 +292,20 @@ class backup_manager
                 . ". Defina FS_BACKUP_DIR para moverlo fuera del webroot si lo desea.";
         }
 
+        // Honest nginx note: .htaccess does not apply on nginx, so a backup
+        // dir inside the webroot has NO server-side barrier there — the
+        // random name is only obscurity. The real fix is FS_BACKUP_DIR
+        // outside the webroot (or a server-block deny rule).
+        if ($inWebroot) {
+            $serverSoftware = isset($_SERVER['SERVER_SOFTWARE'])
+                ? strtolower((string) $_SERVER['SERVER_SOFTWARE']) : '';
+            if (str_contains($serverSoftware, 'nginx')) {
+                $this->messages[] = "AVISO: se detectó nginx con el directorio de copias dentro del webroot. "
+                    . "En nginx .htaccess no aplica: defina FS_BACKUP_DIR fuera del webroot "
+                    . "(o bloquee el directorio en el server block) para protección real.";
+            }
+        }
+
         $this->mysqlHelper = new BackupMysqlHelper($this->errors);
         $this->ensureBackupDirectoryExists();
 
@@ -590,6 +604,15 @@ class backup_manager
      * because that would mask real ownership/perms problems the operator needs
      * to see.
      *
+     * The web-access guards (.htaccess + index.php) are written IDEMPOTENTLY
+     * on every construction, so they also protect pre-existing directories
+     * (e.g. a legacy fallback dir from an older version). The .htaccess uses
+     * BOTH the Apache 2.4 `Require all denied` syntax and the legacy
+     * `Order/Deny` form so it works on every Apache version. A failure to
+     * write these guards is surfaced as a hard error: when the backup dir
+     * lives inside the webroot they are the only Apache-side barrier against
+     * direct download.
+     *
      * Surfaces a loud error when the directory is not writable so the
      * operator notices the misconfiguration immediately instead of
      * receiving confusing "permission denied" mid-backup.
@@ -603,15 +626,24 @@ class backup_manager
             }
         }
 
-        // Defence in depth: ensure the guards exist even for pre-existing
-        // directories (e.g. a legacy fallback dir from an older version).
+        // Defence in depth: (re)write the guards on every run so pre-existing
+        // dirs get the reinforced version too.
         $htaccess = $this->backupPath . '/.htaccess';
-        if (!is_file($htaccess)) {
-            @file_put_contents($htaccess, "Order Deny,Allow\nDeny from all\n");
-        }
+        $htaccessOk = @file_put_contents(
+            $htaccess,
+            "# Deny all web access to backup files (Apache 2.4 + legacy syntax)\n"
+            . "Require all denied\n"
+            . "Order Deny,Allow\n"
+            . "Deny from all\n"
+        ) !== false;
         $index = $this->backupPath . '/index.php';
-        if (!is_file($index)) {
-            @file_put_contents($index, "<?php\n// No directory listing\nheader('HTTP/1.0 403 Forbidden');\nexit;\n");
+        $indexOk = @file_put_contents(
+            $index,
+            "<?php\n// No directory listing\nheader('HTTP/1.0 403 Forbidden');\nexit;\n"
+        ) !== false;
+
+        if (!$htaccessOk || !$indexOk) {
+            $this->errors[] = "No se pudieron crear los archivos de protección en " . $this->backupPath;
         }
 
         if (!is_writable($this->backupPath)) {
