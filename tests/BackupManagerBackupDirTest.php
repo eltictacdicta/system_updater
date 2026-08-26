@@ -37,10 +37,8 @@ require_once FS_FOLDER . '/plugins/system_updater/lib/backup_manager.php';
  *
  * These tests pin the security-relevant behaviour of the change
  * `secure-backup-access`:
- *   - backups MUST live outside the webroot by default (suffixed sibling);
+ *   - backups MUST live outside the webroot by default (fixed sibling path);
  *   - the `FS_BACKUP_DIR` override MUST be honoured verbatim;
- *   - the random suffix MUST be persisted and stable across calls;
- *   - a lost state file MUST adopt the existing suffixed dir (no data loss);
  *   - an unusable sibling MUST fall back automatically to a protected
  *     legacy dir inside the webroot (zero manual ops);
  *   - legacy `backups` dirs MUST be migrated best-effort;
@@ -150,31 +148,26 @@ final class BackupManagerBackupDirTest extends TestCase
     }
 
     // ============================================================
-    // resolve_effective_backup_dir — random suffix persistence
+    // resolve_effective_backup_dir — fixed path (PrestaShop-style)
     // ============================================================
 
     #[Test]
-    public function resolveEffectiveBackupDirAppliesRandomSuffix(): void
+    public function resolveEffectiveBackupDirUsesFixedSiblingPath(): void
     {
-        $fsRoot = $this->makeTempRoot('suffix');
+        $fsRoot = $this->makeTempRoot('fixed');
         mkdir($fsRoot . '/tmp', 0755, true);
 
         try {
             $resolved = backup_manager::resolve_effective_backup_dir($fsRoot);
 
-            $this->assertMatchesRegularExpression(
-                '~' . preg_quote(dirname($fsRoot), '~') . '/backups-[a-f0-9]{16}$~',
+            $this->assertSame(
+                dirname($fsRoot) . DIRECTORY_SEPARATOR . 'backups',
                 $resolved,
-                'Effective dir must be a suffixed sibling with a 16-hex random suffix'
+                'Effective dir must be the fixed sibling backups/ path (no random suffix)'
             );
-
-            $stateFile = $fsRoot . '/tmp/system_updater_backup_dir.txt';
-            $this->assertFileExists($stateFile, 'Suffix must be persisted to the state file');
-            $suffix = trim((string) file_get_contents($stateFile));
-            $this->assertMatchesRegularExpression('/^[a-f0-9]{16}$/', $suffix);
-            $this->assertStringEndsWith('-' . $suffix, $resolved);
         } finally {
             $this->rrmdir($fsRoot);
+            @rmdir(dirname($fsRoot) . DIRECTORY_SEPARATOR . 'backups');
         }
     }
 
@@ -191,42 +184,11 @@ final class BackupManagerBackupDirTest extends TestCase
             $this->assertSame(
                 $first,
                 $second,
-                'Suffix must be persisted, not regenerated on every call'
+                'Effective backup dir must be stable across calls'
             );
         } finally {
             $this->rrmdir($fsRoot);
-        }
-    }
-
-    #[Test]
-    public function resolveEffectiveBackupDirAdoptsExistingSuffixedDir(): void
-    {
-        $fsRoot = $this->makeTempRoot('adopt');
-        mkdir($fsRoot . '/tmp', 0755, true);
-
-        try {
-            // First call creates + persists a suffix; then simulate tmp wipe.
-            backup_manager::resolve_effective_backup_dir($fsRoot);
-            $this->assertTrue(
-                unlink($fsRoot . '/tmp/system_updater_backup_dir.txt'),
-                'State file must exist before we simulate the tmp wipe'
-            );
-
-            // Pre-create a DIFFERENT suffixed dir (e.g. after a manual copy
-            // or a tmp cleanup) — adoption must prefer what is on disk.
-            $adoptedSuffix = str_repeat('ab', 8); // 16 hex chars
-            $existing = dirname($fsRoot) . '/backups-' . $adoptedSuffix;
-            mkdir($existing, 0700, true);
-            file_put_contents($existing . '/backup_2024-01-01.sql.gz', 'x');
-
-            try {
-                $resolved = backup_manager::resolve_effective_backup_dir($fsRoot);
-                $this->assertStringEndsWith('-' . $adoptedSuffix, $resolved);
-            } finally {
-                $this->rrmdir($existing);
-            }
-        } finally {
-            $this->rrmdir($fsRoot);
+            @rmdir(dirname($fsRoot) . DIRECTORY_SEPARATOR . 'backups');
         }
     }
 
@@ -266,26 +228,23 @@ final class BackupManagerBackupDirTest extends TestCase
         mkdir($homeDir, 0755, true);
 
         // Block the sibling with a FILE at the effective path.
-        $effective = backup_manager::resolve_effective_backup_dir($tempRoot);
+        $effective = dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups';
         if (is_dir($effective)) {
-            rmdir($effective);
+            $this->rrmdir($effective);
         }
         file_put_contents($effective, 'block');
 
         try {
             $resolved = backup_manager::resolve_usable_backup_dir($tempRoot, $homeDir);
 
-            $this->assertStringStartsWith(
-                $homeDir . DIRECTORY_SEPARATOR . 'backups-',
+            $this->assertSame(
+                $homeDir . DIRECTORY_SEPARATOR . 'backups',
                 $resolved,
                 'When the sibling is unusable the resolver must prefer the user home over the webroot'
             );
         } finally {
             @unlink($effective);
-            foreach ((array) glob($homeDir . '/backups-*') as $dir) {
-                chmod($dir, 0700);
-                $this->rrmdir($dir);
-            }
+            @rmdir($homeDir . DIRECTORY_SEPARATOR . 'backups');
             $this->rrmdir($homeDir);
             $this->rrmdir($tempRoot);
         }
@@ -309,18 +268,18 @@ final class BackupManagerBackupDirTest extends TestCase
                 $candidates,
                 'Chain must contain exactly sibling, home and legacy candidates (no override defined)'
             );
-            $this->assertStringStartsWith(
-                dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups-',
+            $this->assertSame(
+                dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups',
                 $candidates[0],
                 'First candidate must be the sibling outside the webroot'
             );
-            $this->assertStringStartsWith(
-                '/home/test-user/backups-',
+            $this->assertSame(
+                '/home/test-user/backups',
                 $candidates[1],
                 'Second candidate must be the user home outside the webroot'
             );
-            $this->assertStringStartsWith(
-                $tempRoot . DIRECTORY_SEPARATOR . 'backups-',
+            $this->assertSame(
+                $tempRoot . DIRECTORY_SEPARATOR . 'backups',
                 $candidates[2],
                 'Last candidate must be the protected legacy dir inside the webroot'
             );
@@ -342,13 +301,11 @@ final class BackupManagerBackupDirTest extends TestCase
         try {
             new backup_manager($tempRoot);
 
-            $created = (array) glob(dirname($tempRoot) . '/backups-*');
-            $this->assertNotEmpty(
-                $created,
-                'Constructor must create the suffixed backup dir outside the webroot'
+            $sibling = dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups';
+            $this->assertDirectoryExists(
+                $sibling,
+                'Constructor must create the fixed backup dir outside the webroot'
             );
-            $sibling = (string) $created[0];
-            $this->assertDirectoryExists($sibling);
 
             $perms = fileperms($sibling) & 0777;
             $this->assertSame(
@@ -357,10 +314,7 @@ final class BackupManagerBackupDirTest extends TestCase
                 'Backup directory must be created with 0700 permissions (got ' . decoct($perms) . ')'
             );
         } finally {
-            foreach ((array) glob(dirname($tempRoot) . '/backups-*') as $dir) {
-                chmod($dir, 0700);
-                $this->rrmdir($dir);
-            }
+            @rmdir(dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups');
             $this->rrmdir($tempRoot);
         }
     }
@@ -374,9 +328,9 @@ final class BackupManagerBackupDirTest extends TestCase
         // Block the preferred sibling by creating a FILE at the effective
         // path: the resolver must fall back to a protected legacy dir
         // inside the webroot instead of surfacing a hard error.
-        $effective = backup_manager::resolve_effective_backup_dir($tempRoot);
+        $effective = dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups';
         if (is_dir($effective)) {
-            rmdir($effective);
+            $this->rrmdir($effective);
         }
         file_put_contents($effective, 'block');
 
@@ -393,10 +347,10 @@ final class BackupManagerBackupDirTest extends TestCase
             $manager = new backup_manager($tempRoot, $homeBlock);
             $backupPath = $manager->get_backup_path();
 
-            $this->assertStringStartsWith(
-                $tempRoot . DIRECTORY_SEPARATOR . 'backups-',
+            $this->assertSame(
+                $tempRoot . DIRECTORY_SEPARATOR . 'backups',
                 $backupPath,
-                'Constructor must fall back to a suffixed dir inside the webroot'
+                'Constructor must fall back to the fixed dir inside the webroot'
             );
 
             $this->assertEmpty(
@@ -451,10 +405,7 @@ final class BackupManagerBackupDirTest extends TestCase
             }
             @unlink($effective);
             @unlink($homeBlock);
-            foreach ((array) glob($tempRoot . '/backups-*') as $dir) {
-                chmod($dir, 0700);
-                $this->rrmdir($dir);
-            }
+            @rmdir($tempRoot . DIRECTORY_SEPARATOR . 'backups');
             $this->rrmdir($tempRoot);
         }
     }
@@ -473,8 +424,8 @@ final class BackupManagerBackupDirTest extends TestCase
             $newPath = $manager->get_backup_path();
 
             // Sibling is usable in tests → no fallback; legacy must migrate.
-            $this->assertStringStartsWith(
-                dirname($tempRoot) . '/backups-',
+            $this->assertSame(
+                dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups',
                 $newPath,
                 'Usable sibling must be preferred (no fallback)'
             );
@@ -491,10 +442,7 @@ final class BackupManagerBackupDirTest extends TestCase
             $messages = implode(' ', $manager->get_messages());
             $this->assertStringContainsString('migradas', $messages);
         } finally {
-            foreach ((array) glob(dirname($tempRoot) . '/backups-*') as $dir) {
-                chmod($dir, 0700);
-                $this->rrmdir($dir);
-            }
+            @rmdir(dirname($tempRoot) . DIRECTORY_SEPARATOR . 'backups');
             $this->rrmdir($tempRoot);
         }
     }

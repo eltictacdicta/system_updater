@@ -54,6 +54,15 @@ class BackupManagerRestoreTest extends TestCase
         $this->assertStringContainsString("type === 'database'", $content);
     }
 
+    public function testProcessRestoreUsesBackupManagerPath(): void
+    {
+        $file = FS_FOLDER . '/plugins/system_updater/process_restore.php';
+        $content = file_get_contents($file);
+
+        $this->assertStringContainsString('get_backup_path()', $content);
+        $this->assertStringNotContainsString("FS_FOLDER . '/backups/'", $content);
+    }
+
     public function testProcessRestoreSupportsDatabaseType(): void
     {
         $file = FS_FOLDER . '/plugins/system_updater/process_restore.php';

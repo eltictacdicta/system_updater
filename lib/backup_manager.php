@@ -210,7 +210,7 @@ class BackupMysqlHelper
 class backup_manager
 {
     const BACKUP_DIR = 'backups';
-    const VERSION = '2.3.1';
+    const VERSION = '2.3.2';
     const HOST_SLUG_MAX_LEN = 63;
     const HOST_HEADER_MAX_LEN = 253;
 
@@ -271,14 +271,12 @@ class backup_manager
 
         // Resolve the effective backup dir at runtime (zero-ops contract):
         //  1. `FS_BACKUP_DIR` override when defined (used verbatim).
-        //  2. Sibling of the framework root with a random suffix
-        //     (`dirname(FS_FOLDER)/backups-<16hex>`) — outside the webroot.
-        //  3. Home directory of the web user
-        //     (`<home>/backups-<16hex>`) — outside the webroot, writable in
-        //     shared hosting with no admin step (also solves nginx).
-        //  4. Protected legacy dir inside the webroot
-        //     (`FS_FOLDER/backups-<16hex>`) as last resort — no manual
-        //     mkdir/chown/mv required.
+        //  2. Sibling of the framework root (`dirname(FS_FOLDER)/backups`) —
+        //     outside the webroot (PrestaShop-style fixed path + guards).
+        //  3. Home directory of the web user (`<home>/backups`) — outside the
+        //     webroot, writable in shared hosting with no admin step.
+        //  4. Protected legacy dir inside the webroot (`FS_FOLDER/backups`) as
+        //     last resort — guarded by `.htaccess` + `index.php`.
         // `self::BACKUP_DIR` is kept for BC but no longer composed into paths.
         $this->backupPath = self::resolve_usable_backup_dir($this->fsRoot, $homeDir);
 
@@ -289,17 +287,18 @@ class backup_manager
             rtrim($this->backupPath, '/\\') . DIRECTORY_SEPARATOR,
             rtrim($this->fsRoot, '/\\') . DIRECTORY_SEPARATOR
         );
-        if ($inWebroot && !in_array($backupDirName, $this->excludedDirs, true)) {
-            $this->excludedDirs[] = $backupDirName;
+        if ($inWebroot) {
+            if (!in_array($backupDirName, $this->excludedDirs, true)) {
+                $this->excludedDirs[] = $backupDirName;
+            }
             $this->messages[] = "Directorio de copias de seguridad en modo compatibilidad (dentro del webroot): "
                 . $this->backupPath
                 . ". Defina FS_BACKUP_DIR para moverlo fuera del webroot si lo desea.";
         }
 
         // Honest nginx note: .htaccess does not apply on nginx, so a backup
-        // dir inside the webroot has NO server-side barrier there — the
-        // random name is only obscurity. The real fix is FS_BACKUP_DIR
-        // outside the webroot (or a server-block deny rule).
+        // dir inside the webroot has NO server-side barrier there. The real
+        // fix is FS_BACKUP_DIR outside the webroot (or a server-block deny rule).
         if ($inWebroot) {
             $serverSoftware = isset($_SERVER['SERVER_SOFTWARE'])
                 ? strtolower((string) $_SERVER['SERVER_SOFTWARE']) : '';
@@ -439,140 +438,7 @@ class backup_manager
     }
 
     /**
-     * Path of the state file that persists the random backup dir suffix.
-     *
-     * Lives in the framework tmp dir (same place as the plugin debug log):
-     * it survives requests, is not served by the web server in practice,
-     * and is wiped together with the rest of tmp (which is fine — the
-     * suffix is then re-adopted from the existing directory).
-     *
-     * @param string $fsFolder
-     * @return string
-     */
-    private static function backup_suffix_state_file(string $fsFolder): string
-    {
-        return $fsFolder . DIRECTORY_SEPARATOR . 'tmp'
-            . DIRECTORY_SEPARATOR . 'system_updater_backup_dir.txt';
-    }
-
-    /**
-     * Persist the random suffix to the state file (creating tmp when needed).
-     *
-     * @param string $fsFolder
-     * @param string $suffix
-     * @return bool
-     */
-    private static function persist_backup_suffix(string $fsFolder, string $suffix): bool
-    {
-        $stateFile = self::backup_suffix_state_file($fsFolder);
-        $stateDir = dirname($stateFile);
-        if (!is_dir($stateDir)) {
-            @mkdir($stateDir, 0755, true);
-        }
-        return is_dir($stateDir) && @file_put_contents($stateFile, $suffix) !== false;
-    }
-
-    /**
-     * Load an existing random suffix or create + persist a new one.
-     *
-     * The random directory name is ONLY a defence-in-depth layer: the real
-     * protections are the .htaccess/index.php guards, the core `^backups`
-     * rewrite rule, and the auth+CSRF download endpoint. The random name
-     * simply makes the directory undiscoverable by URL scanners.
-     *
-     * If the state file was lost (e.g. tmp cleaned), we ADOPT an existing
-     * suffixed backup dir instead of generating a new one, so backups are
-     * never "lost" between requests. Adoption looks in every parent that the
-     * resolution chain may have used (sibling, webroot, user home).
-     *
-     * If the state cannot be persisted at all, we return an empty suffix
-     * (fixed legacy name) rather than risk a fresh random dir per request.
-     *
-     * @param string      $fsFolder
-     * @param string|null $homeDir  Optional user-home override (test seam).
-     * @return string 16-char hex suffix, or '' when persistence is impossible.
-     */
-    private static function load_or_create_backup_suffix(string $fsFolder, ?string $homeDir = null): string
-    {
-        $stateFile = self::backup_suffix_state_file($fsFolder);
-        $lockFile = $stateFile . '.lock';
-        $lockDir = dirname($lockFile);
-        if (!is_dir($lockDir)) {
-            @mkdir($lockDir, 0755, true);
-        }
-
-        // Serialize concurrent requests: without the lock, two simultaneous
-        // requests with no state file would generate DIFFERENT suffixes and
-        // the second would persist its own, silently "losing" the first
-        // request's directory. flock() on a stable lock file makes the whole
-        // read → adopt → generate → persist sequence atomic per process.
-        $lock = @fopen($lockFile, 'c');
-        if ($lock === false || !flock($lock, LOCK_EX)) {
-            if ($lock !== false) {
-                fclose($lock);
-            }
-            // Lock unavailable → best-effort non-atomic path (same as before).
-            return self::load_or_create_backup_suffix_unlocked($fsFolder, $homeDir);
-        }
-
-        try {
-            return self::load_or_create_backup_suffix_unlocked($fsFolder, $homeDir);
-        } finally {
-            flock($lock, LOCK_UN);
-            fclose($lock);
-        }
-    }
-
-    /**
-     * Unlocked implementation of {@see self::load_or_create_backup_suffix()}.
-     *
-     * Callers MUST hold the flock on the state-file lock before invoking
-     * this so concurrent requests cannot generate distinct suffixes.
-     */
-    private static function load_or_create_backup_suffix_unlocked(string $fsFolder, ?string $homeDir): string
-    {
-        $stateFile = self::backup_suffix_state_file($fsFolder);
-
-        if (is_file($stateFile)) {
-            $suffix = trim((string) file_get_contents($stateFile));
-            if (preg_match('/^[a-f0-9]{16}$/', $suffix)) {
-                return $suffix;
-            }
-        }
-
-        // Adopt an existing random dir if the state was lost.
-        $parents = array_unique(array_filter(array(
-            dirname($fsFolder),
-            $fsFolder,
-            $homeDir !== null && $homeDir !== '' ? $homeDir : null,
-        )));
-        foreach ($parents as $parent) {
-            foreach ((array) glob(rtrim((string) $parent, '/\\') . DIRECTORY_SEPARATOR . 'backups-*') as $existing) {
-                if (!is_dir($existing)) {
-                    continue;
-                }
-                $suffix = substr(basename($existing), strlen('backups-'));
-                if (preg_match('/^[a-f0-9]{16}$/', $suffix)) {
-                    if (self::persist_backup_suffix($fsFolder, $suffix)) {
-                        return $suffix;
-                    }
-                }
-            }
-        }
-
-        $suffix = bin2hex(random_bytes(8));
-        if (!self::persist_backup_suffix($fsFolder, $suffix)) {
-            return ''; // cannot persist → fixed legacy name (still protected)
-        }
-        return $suffix;
-    }
-
-    /**
-     * Effective backup dir: preferred candidate + random suffix.
-     *
-     * An explicit `FS_BACKUP_DIR` override is used verbatim (no suffix — the
-     * operator chose the exact path). Otherwise the base candidate gets the
-     * random suffix so the directory name is not guessable.
+     * Effective backup dir: first writable candidate in the resolution chain.
      *
      * @param string|null $fsFolder Framework root (FS_FOLDER).
      * @param string|null $homeDir  Optional user-home override (test seam).
@@ -580,30 +446,17 @@ class backup_manager
      */
     public static function resolve_effective_backup_dir(?string $fsFolder = null, ?string $homeDir = null): string
     {
-        if ($fsFolder === null) {
-            $fsFolder = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
-        }
-
-        $override = defined('FS_BACKUP_DIR') ? (string) FS_BACKUP_DIR : null;
-        $base = self::resolve_backup_dir_with($override, $fsFolder);
-
-        if ($override !== null && trim($override) !== '') {
-            return $base;
-        }
-
-        return $base . '-' . self::load_or_create_backup_suffix($fsFolder, $homeDir);
+        return self::resolve_usable_backup_dir($fsFolder, $homeDir);
     }
 
     /**
      * Ordered list of backup-dir candidates (from safest to last resort).
      *
-     *   1. `FS_BACKUP_DIR` override (verbatim, no suffix).
+     *   1. `FS_BACKUP_DIR` override (verbatim).
      *   2. Sibling of the framework root — outside the webroot.
      *   3. Home directory of the web user — outside the webroot, writable in
      *      shared hosting without any admin step (solves nginx too).
      *   4. Protected legacy dir inside the webroot (last resort).
-     *
-     * Every candidate (except the override) gets the random suffix.
      *
      * @param string|null $fsFolder Framework root (FS_FOLDER).
      * @param string|null $homeDir  Optional user-home override (test seam).
@@ -616,8 +469,6 @@ class backup_manager
         }
 
         $override = defined('FS_BACKUP_DIR') ? (string) FS_BACKUP_DIR : null;
-        $suffix = self::load_or_create_backup_suffix($fsFolder, $homeDir);
-        $suffixed = $suffix !== '' ? '-' . $suffix : '';
 
         // Explicit override is STRICT: the operator chose this exact path,
         // so it is the only candidate. An unusable override must surface as
@@ -628,17 +479,17 @@ class backup_manager
         }
 
         $candidates = array();
-        $candidates[] = dirname($fsFolder) . DIRECTORY_SEPARATOR . 'backups' . $suffixed;
+        $candidates[] = dirname($fsFolder) . DIRECTORY_SEPARATOR . 'backups';
 
         if ($homeDir === null && function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
             $pw = posix_getpwuid(posix_geteuid());
             $homeDir = is_array($pw) && isset($pw['dir']) ? (string) $pw['dir'] : null;
         }
         if ($homeDir !== null && $homeDir !== '') {
-            $candidates[] = rtrim($homeDir, '/\\') . DIRECTORY_SEPARATOR . 'backups' . $suffixed;
+            $candidates[] = rtrim($homeDir, '/\\') . DIRECTORY_SEPARATOR . 'backups';
         }
 
-        $candidates[] = $fsFolder . DIRECTORY_SEPARATOR . 'backups' . $suffixed;
+        $candidates[] = $fsFolder . DIRECTORY_SEPARATOR . 'backups';
         return array_values(array_unique($candidates));
     }
 
@@ -782,8 +633,13 @@ class backup_manager
         $activeBasename = basename($this->backupPath);
 
         $candidates = array($this->fsRoot . DIRECTORY_SEPARATOR . 'backups');
-        // Also any suffixed dir inside the webroot that is not the active one.
+        // Also any suffixed dir from older versions (backups-<hex>).
         foreach ((array) glob($this->fsRoot . DIRECTORY_SEPARATOR . 'backups-*') as $other) {
+            if (basename($other) !== $activeBasename) {
+                $candidates[] = $other;
+            }
+        }
+        foreach ((array) glob(dirname($this->fsRoot) . DIRECTORY_SEPARATOR . 'backups-*') as $other) {
             if (basename($other) !== $activeBasename) {
                 $candidates[] = $other;
             }
@@ -2411,11 +2267,12 @@ class backup_manager
         }
         
         // Fallback to native restore if shell restore was not attempted or failed
-        if (!$shellRestoreAttempted) {
+        if (!$importSuccess) {
             // Use PHP-native restore method
             $restoreResult = $this->restore_database_native($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress);
             if ($restoreResult['success']) {
                 $importSuccess = true;
+                $importError = null;
             } else {
                 $importError = 'Error en restauración nativa PHP';
             }

@@ -73,6 +73,9 @@ class BackupManagerFilenameTest extends TestCase
         if (!is_dir($this->tempDir . '/sub')) {
             mkdir($this->tempDir . '/sub', 0755, true);
         }
+        if (!is_dir($this->tempDir . '/tmp')) {
+            mkdir($this->tempDir . '/tmp', 0755, true);
+        }
         file_put_contents($this->tempDir . '/sub/file.txt', 'content');
     }
 
@@ -88,18 +91,14 @@ class BackupManagerFilenameTest extends TestCase
 
         if (is_dir($this->tempDir)) {
             // Clean ONLY this test instance's backup artifacts. The backup
-            // dir lives outside the supplied fsRoot with a random suffix, so
-            // we clean the fixed legacy paths inside $this->tempDir plus the
-            // effective dir this instance configured. Never glob the shared
-            // sys_get_temp_dir() parent — that could delete another test's
-            // or another process's backups.
-            $effective = is_dir($this->tempDir . '/tmp')
-                ? backup_manager::resolve_effective_backup_dir($this->tempDir)
-                : null;
+            // dir lives outside the supplied fsRoot (fixed sibling path), so
+            // we clean the legacy paths inside $this->tempDir plus the
+            // effective dir this instance configured.
+            $effective = backup_manager::resolve_effective_backup_dir($this->tempDir);
             foreach (array_merge(
                 [$this->tempDir . '/backups'],
                 (array) glob($this->tempDir . '/backups-*'),
-                $effective === null ? [] : [$effective]
+                [$effective]
             ) as $backupPath) {
                 if (!is_dir($backupPath)) {
                     continue;

@@ -49,8 +49,8 @@ switch ($action) {
 
         system_updater_send_sse('init', ['message' => 'Verificando backup...', 'percent' => 2]);
 
-        $backupPath = FS_FOLDER . '/backups/' . $file;
-        if (!file_exists($backupPath)) {
+        $backupPath = $backupManager->get_backup_path() . DIRECTORY_SEPARATOR . $file;
+        if (!is_file($backupPath)) {
             $error = 'El archivo de backup no existe: ' . $file;
             system_updater_save_progress($progressFile, 'error', $error, 0, $error);
             system_updater_send_sse('error', ['message' => $error, 'percent' => 0]);
@@ -116,6 +116,9 @@ switch ($action) {
     case 'progress':
         if (file_exists($progressFile)) {
             $data = json_decode((string) file_get_contents($progressFile), true);
+            if (!is_array($data)) {
+                $data = ['step' => 'waiting', 'message' => 'Esperando datos de progreso...', 'percent' => 0];
+            }
             system_updater_send_sse('progress', $data);
         } else {
             system_updater_send_sse('progress', ['step' => 'waiting', 'message' => 'Esperando inicio...', 'percent' => 0]);
@@ -125,6 +128,7 @@ switch ($action) {
     case 'status':
         if (file_exists($progressFile)) {
             $data = json_decode((string) file_get_contents($progressFile), true);
+            $data = is_array($data) ? $data : null;
             $isAlive = (time() - ($data['timestamp'] ?? 0)) < 120;
             system_updater_send_sse('status', [
                 'active' => $isAlive,
