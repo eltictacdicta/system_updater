@@ -60,8 +60,8 @@ class plugin_compatibility_checker
     public static function normalizeBounds(array $bounds): array
     {
         return [
-            'min_version' => trim((string) ($bounds['min_version'] ?? '')),
-            'max_version' => trim((string) ($bounds['max_version'] ?? '')),
+            'min_version' => self::stringOrEmpty($bounds['min_version'] ?? ''),
+            'max_version' => self::stringOrEmpty($bounds['max_version'] ?? ''),
         ];
     }
 
@@ -188,6 +188,37 @@ class plugin_compatibility_checker
     }
 
     /**
+     * Decide si una entrada de actualización puede aplicarse contra el núcleo en ejecución.
+     *
+     * Las entradas resueltas desde el historial (`resolved_from_history === true`)
+     * se validan con los límites del release resuelto, de modo que una punta de
+     * rama más nueva pero incompatible con el core no bloquee un release
+     * histórico que sí es compatible. Las entradas de fallback (sin historial)
+     * se validan con los límites de la punta de rama, exactamente como hoy (PU-14).
+     *
+     * Puro: no realiza I/O ni depende de estado global.
+     *
+     * @param array<string, mixed> $updateEntry Entrada de getAvailableUpdates()
+     * @param array<string, mixed> $branchTipEntry Fila del catálogo en la punta de rama
+     *
+     * @return array{compatible: bool, violation: ?string, message: ?string}
+     */
+    public static function evaluateUpdateEntryForCore(
+        string $coreVersion,
+        array $updateEntry,
+        array $branchTipEntry
+    ): array {
+        $boundsSource = (($updateEntry['resolved_from_history'] ?? false) === true)
+            ? $updateEntry
+            : $branchTipEntry;
+
+        return self::validateRemotePluginForCore(
+            $coreVersion,
+            self::boundsFromCatalogEntry($boundsSource)
+        );
+    }
+
+    /**
      * Clasifica una actualización remota respecto al núcleo actual y al destino (PU-08).
      *
      * @param array{min_version?: string, max_version?: string} $remoteBounds
@@ -298,6 +329,95 @@ class plugin_compatibility_checker
         return self::normalizeBounds($section);
     }
 
+    /**
+     * Resuelve la entrada de release más alta compatible con el core en ejecución.
+     *
+     * Puro: no realiza I/O ni depende de estado global. Devuelve la entrada
+     * original completa (con su referencia de descarga) o null.
+     *
+     * @param list<array<string, mixed>> $versions Historial de releases del plugin.
+     * @param string $installedVersion Versión instalada; '' desactiva el filtro de novedad.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function resolveLatestCompatible(
+        string $coreVersion,
+        array $versions,
+        string $installedVersion = ''
+    ): ?array {
+        $best = null;
+        $bestNorm = null;
+
+        foreach ($versions as $raw) {
+            if (!is_array($raw)) {
+                continue;
+            }
+
+            $version = self::stringOrEmpty($raw['version'] ?? '');
+            $norm = self::normalizeVersion($version);
+            if ($norm === '') {
+                continue;
+            }
+
+            $eval = self::evaluateCoreAgainstPlugin(
+                $coreVersion,
+                self::stringOrEmpty($raw['min_version'] ?? ''),
+                self::stringOrEmpty($raw['max_version'] ?? '')
+            );
+            if (!$eval['compatible']) {
+                continue;
+            }
+
+            if ($installedVersion !== '' && !self::isRemoteVersionNewer($version, $installedVersion)) {
+                continue;
+            }
+
+            if ($bestNorm === null || version_compare($norm, $bestNorm, '>')) {
+                $best = $raw;
+                $bestNorm = $norm;
+            }
+        }
+
+        return $best;
+    }
+
+    /**
+     * Normaliza un historial crudo de releases a una lista canónica de entradas válidas.
+     *
+     * Puro y defensivo: descarta elementos no-array y entradas sin `version`
+     * (o cuya versión normaliza a ''). Normaliza `version` y los límites
+     * `min_version`/`max_version` (ausentes → ''), preservando el resto de los
+     * campos originales (referencia de descarga incluida). Nunca lanza.
+     *
+     * @param array<mixed> $raw
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function normalizeReleaseHistory(array $raw): array
+    {
+        $normalized = [];
+
+        foreach ($raw as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+
+            $version = self::stringOrEmpty($entry['version'] ?? '');
+            if (self::normalizeVersion($version) === '') {
+                continue;
+            }
+
+            $bounds = self::normalizeBounds($entry);
+            $entry['version'] = $version;
+            $entry['min_version'] = $bounds['min_version'];
+            $entry['max_version'] = $bounds['max_version'];
+
+            $normalized[] = $entry;
+        }
+
+        return $normalized;
+    }
+
     public static function normalizeVersion(string $version): string
     {
         if (function_exists('fs_normalize_plugin_version')) {
@@ -342,5 +462,14 @@ class plugin_compatibility_checker
         }
 
         return version_compare($remote, $local, '>');
+    }
+
+    /**
+     * Convierte un valor arbitrario a string recortado; los no escalares (y null)
+     * se consideran ausentes y devuelven ''.
+     */
+    private static function stringOrEmpty(mixed $value): string
+    {
+        return is_scalar($value) ? trim((string) $value) : '';
     }
 }

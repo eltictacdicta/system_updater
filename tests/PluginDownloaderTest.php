@@ -2,6 +2,7 @@
 
 namespace Tests\SystemUpdater;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 require_once FS_FOLDER . '/plugins/system_updater/lib/plugin_downloader.php';
@@ -36,6 +37,12 @@ class PluginDownloaderTest extends TestCase
                 }
 
                 return false;
+            }
+
+            // T11: hydration now fetches releases.json; keep the test hermetic.
+            protected function get_remote_plugin_releases(array $plugin_data, ?string $token = null): array
+            {
+                return [];
             }
         };
 
@@ -98,6 +105,12 @@ class PluginDownloaderTest extends TestCase
             {
                 return false;
             }
+
+            // T11: hydration now fetches releases.json; keep the test hermetic.
+            protected function get_remote_plugin_releases(array $plugin_data, ?string $token = null): array
+            {
+                return [];
+            }
         };
 
         $downloads = $downloader->downloads();
@@ -107,6 +120,128 @@ class PluginDownloaderTest extends TestCase
         $this->assertContains('catalogo_core', $names);
 
         $this->removeTree($tempRoot);
+    }
+
+    public function testGetRemotePluginReleasesParsesPublicRawHistory(): void
+    {
+        $response = json_encode([
+            [
+                'version' => '1.8.1',
+                'min_version' => '0.13',
+                'max_version' => '0.16',
+                'zip_url' => 'https://example.test/tpvmod-1.8.1.zip',
+            ],
+            [
+                'version' => '1.9.0',
+                'min_version' => '0.17',
+                'max_version' => '',
+                'zip_url' => 'https://example.test/tpvmod-1.9.0.zip',
+            ],
+        ]);
+
+        $downloader = $this->makeReleasesDownloader($response);
+        $releases = $downloader->fetchReleases([
+            'link' => 'https://github.com/acme/tpvmod',
+            'branch' => 'main',
+        ]);
+
+        $this->assertSame(
+            ['https://raw.githubusercontent.com/acme/tpvmod/main/releases.json'],
+            $downloader->fetchedUrls
+        );
+        $this->assertCount(2, $releases);
+        $this->assertSame('1.8.1', $releases[0]['version']);
+        $this->assertSame('0.13', $releases[0]['min_version']);
+        $this->assertSame('0.16', $releases[0]['max_version']);
+        $this->assertSame('https://example.test/tpvmod-1.8.1.zip', $releases[0]['zip_url']);
+        $this->assertSame('1.9.0', $releases[1]['version']);
+    }
+
+    public function testGetRemotePluginReleasesDefaultsToMasterBranch(): void
+    {
+        $downloader = $this->makeReleasesDownloader(json_encode([
+            ['version' => '1.0.0', 'zip_url' => 'https://example.test/1.0.0.zip'],
+        ]));
+
+        $downloader->fetchReleases(['link' => 'https://github.com/acme/tpvmod']);
+
+        $this->assertSame(
+            ['https://raw.githubusercontent.com/acme/tpvmod/master/releases.json'],
+            $downloader->fetchedUrls
+        );
+    }
+
+    public function testGetRemotePluginReleasesDropsMalformedEntries(): void
+    {
+        $downloader = $this->makeReleasesDownloader(json_encode([
+            ['version' => '1.2.3', 'zip_url' => 'https://example.test/1.2.3.zip'],
+            'not-an-array',
+            ['no_version' => true],
+        ]));
+
+        $releases = $downloader->fetchReleases(['link' => 'https://github.com/acme/tpvmod']);
+
+        $this->assertCount(1, $releases);
+        $this->assertSame('1.2.3', $releases[0]['version']);
+    }
+
+    /**
+     * @param mixed $response
+     */
+    #[DataProvider('provideFailingReleasesResponses')]
+    public function testGetRemotePluginReleasesReturnsEmptyOnFailure($response): void
+    {
+        $downloader = $this->makeReleasesDownloader($response);
+
+        $releases = $downloader->fetchReleases(['link' => 'https://github.com/acme/tpvmod']);
+
+        $this->assertSame([], $releases);
+    }
+
+    public static function provideFailingReleasesResponses(): array
+    {
+        return [
+            'network error string' => ['ERROR'],
+            'network error false' => [false],
+            'invalid json' => ['not-json'],
+            'non-array json' => [json_encode('hello')],
+            'empty history' => [json_encode([])],
+        ];
+    }
+
+    public function testGetRemotePluginReleasesReturnsEmptyWithoutRepositoryFields(): void
+    {
+        $downloader = $this->makeReleasesDownloader(json_encode([
+            ['version' => '1.0.0', 'zip_url' => 'https://example.test/1.0.0.zip'],
+        ]));
+
+        $releases = $downloader->fetchReleases([]);
+
+        $this->assertSame([], $releases);
+        $this->assertSame([], $downloader->fetchedUrls);
+    }
+
+    private function makeReleasesDownloader($response): object
+    {
+        return new class($response) extends \plugin_downloader {
+            public array $fetchedUrls = [];
+
+            public function __construct(public $response)
+            {
+                parent::__construct();
+            }
+
+            protected function fetchRemoteContents($url, $timeout = 10)
+            {
+                $this->fetchedUrls[] = $url;
+                return $this->response;
+            }
+
+            public function fetchReleases(array $plugin_data, ?string $token = null): array
+            {
+                return $this->get_remote_plugin_releases($plugin_data, $token);
+            }
+        };
     }
 
     private function removeTree(string $dir): void

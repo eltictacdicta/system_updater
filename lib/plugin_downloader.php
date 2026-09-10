@@ -236,6 +236,13 @@ class plugin_downloader
                     }
                 }
             }
+
+            if (!empty($downloadList[$key]['instalado']) && !$this->entryHasReleaseHistory($downloadList[$key])) {
+                $releases = $this->get_remote_plugin_releases($value);
+                if ($releases !== []) {
+                    $downloadList[$key]['releases'] = $releases;
+                }
+            }
         }
 
         return $downloadList;
@@ -274,11 +281,17 @@ protected function fetchRemoteContents($url, $timeout = 10)
     return @file_get_contents($url, false, $context);
 }
     /**
-     * Descarga e instala un plugin público
+     * Descarga e instala un plugin público.
+     *
+     * Cuando `$zipUrlOverride` es no vacío se usa como URL del ZIP (release
+     * histórico resuelto); con `null`/`''` se mantiene el `zip_link` del catálogo
+     * (camino de punta de rama intacto).
+     *
      * @param int $plugin_id ID del plugin
+     * @param string|null $zipUrlOverride URL de ZIP alternativa del release resuelto
      * @return bool
      */
-    public function download($plugin_id)
+    public function download($plugin_id, ?string $zipUrlOverride = null)
     {
         $this->errors = [];
 
@@ -289,14 +302,17 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
             $this->messages[] = 'Descargando el plugin ' . $item['nombre'];
 
+            // Selección de URL: override no vacío gana; si no, zip_link del catálogo.
+            $zipUrl = ($zipUrlOverride !== null && trim($zipUrlOverride) !== '')
+                ? $this->normalizeUrl($zipUrlOverride)
+                : (string) $item['zip_link'];
+
             // Descargar ZIP
             $zipPath = $this->fsRoot . '/download.zip';
-            $downloaded = function_exists('fs_file_download')
-                ? @fs_file_download($item['zip_link'], $zipPath, 60)
-                : (($content = @file_get_contents($this->normalizeUrl($item['zip_link']))) && @file_put_contents($zipPath, $content));
+            $downloaded = $this->fetchZipToFile($zipUrl, $zipPath);
             if (!$downloaded) {
                 $this->errors[] = 'Error al descargar. Tendrás que descargarlo manualmente desde '
-                    . '<a href="' . $item['zip_link'] . '" target="_blank">aquí</a>.';
+                    . '<a href="' . $zipUrl . '" target="_blank">aquí</a>.';
                 return false;
             }
 
@@ -326,6 +342,30 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
         $this->errors[] = 'Descarga no encontrada.';
         return false;
+    }
+
+    /**
+     * Descarga una URL remota a un archivo local.
+     *
+     * Método extraído como costura de test: permite interceptar la URL
+     * efectivamente seleccionada por `download()` sin I/O real.
+     *
+     * @param string $zipUrl
+     * @param string $zipPath
+     * @return bool
+     */
+    protected function fetchZipToFile(string $zipUrl, string $zipPath): bool
+    {
+        if (function_exists('fs_file_download')) {
+            return (bool) @fs_file_download($zipUrl, $zipPath, 60);
+        }
+
+        $content = @file_get_contents($this->normalizeUrl($zipUrl));
+        if (!$content) {
+            return false;
+        }
+
+        return (bool) @file_put_contents($zipPath, $content);
     }
 
     /**
@@ -567,6 +607,13 @@ protected function fetchRemoteContents($url, $timeout = 10)
                         $this->private_download_list[$key]['repository_url'] = $remote_ini_data['repository_url'];
                     }
                 }
+
+                if (!empty($this->private_download_list[$key]['instalado']) && !$this->entryHasReleaseHistory($this->private_download_list[$key])) {
+                    $releases = $this->get_remote_plugin_releases($value, $config['github_token']);
+                    if ($releases !== []) {
+                        $this->private_download_list[$key]['releases'] = $releases;
+                    }
+                }
             }
 
             if ($this->cache) {
@@ -582,10 +629,16 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
     /**
      * Descarga e instala un plugin privado
+     *
+     * Cuando `$zipUrlOverride` es no vacío se usa como URL del ZIP (release
+     * histórico resuelto); con `null`/`''` se mantiene el `zip_link` del
+     * catálogo privado (comportamiento actual intacto).
+     *
      * @param string $plugin_id ID del plugin (prefijado con 'priv_')
+     * @param string|null $zipUrlOverride URL de ZIP alternativa del release resuelto
      * @return bool
      */
-    public function download_private($plugin_id)
+    public function download_private($plugin_id, ?string $zipUrlOverride = null)
     {
         $this->errors = [];
 
@@ -603,16 +656,12 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
             $this->messages[] = 'Descargando plugin privado ' . $item['nombre'];
 
+            $zipUrl = ($zipUrlOverride !== null && trim($zipUrlOverride) !== '')
+                ? $this->normalizeUrl($zipUrlOverride)
+                : $item['zip_link'];
+
             $zipPath = $this->fsRoot . '/download.zip';
-            $downloaded = function_exists('fs_file_download_auth')
-                ? @fs_file_download_auth($item['zip_link'], $zipPath, $config['github_token'], 60)
-                : (($content = @file_get_contents($this->normalizeUrl($item['zip_link']), false, stream_context_create([
-                    'http' => [
-                        'header' => "Authorization: token " . $config['github_token'] . "\r\n" .
-                            "User-Agent: FSFramework-Updater\r\n" .
-                            "Accept: application/vnd.github.v3.raw\r\n"
-                    ]
-                ]))) && @file_put_contents($zipPath, $content));
+            $downloaded = $this->fetchPrivateZipToFile($zipUrl, $zipPath, (string) $config['github_token']);
             if (!$downloaded) {
                 $this->errors[] = 'Error al descargar el plugin privado.';
                 return false;
@@ -644,6 +693,34 @@ protected function fetchRemoteContents($url, $timeout = 10)
 
         $this->errors[] = 'Plugin privado no encontrado.';
         return false;
+    }
+
+    /**
+     * Descarga un ZIP privado usando el token de GitHub.
+     *
+     * Método extraído como costura de test: permite interceptar la URL
+     * efectivamente seleccionada por `download_private()` sin I/O real.
+     *
+     * @param string $zipUrl
+     * @param string $zipPath
+     * @param string $token
+     * @return bool
+     */
+    protected function fetchPrivateZipToFile(string $zipUrl, string $zipPath, string $token): bool
+    {
+        if (function_exists('fs_file_download_auth')) {
+            return (bool) @fs_file_download_auth($zipUrl, $zipPath, $token, 60);
+        }
+
+        $content = @file_get_contents($this->normalizeUrl($zipUrl), false, stream_context_create([
+            'http' => [
+                'header' => "Authorization: token " . $token . "\r\n" .
+                    "User-Agent: FSFramework-Updater\r\n" .
+                    "Accept: application/vnd.github.v3.raw\r\n"
+            ]
+        ]));
+
+        return (bool) ($content && @file_put_contents($zipPath, $content));
     }
 
     /**
@@ -739,13 +816,40 @@ protected function fetchRemoteContents($url, $timeout = 10)
     }
 
     /**
+     * Devuelve la entrada de actualización resuelta para un plugin público.
+     *
+     * Reutiliza `getAvailableUpdates()` (mismo historial, mismo resolver) y
+     * devuelve la entrada con `zip_link`/`resolved_from_history` del release
+     * resuelto, o `null` si el plugin no tiene actualización disponible.
+     *
+     * @param array<int, array<string, mixed>> $installedPlugins
+     *
+     * @return array<string, mixed>|null
+     */
+    public function findPublicUpdateByName(string $name, array $installedPlugins, string $coreVersion = ''): ?array
+    {
+        $name = trim($name);
+        if ($name === '') {
+            return null;
+        }
+
+        foreach ($this->getAvailableUpdates($installedPlugins, $coreVersion) as $update) {
+            if (($update['name'] ?? '') === $name) {
+                return $update;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Lista plugins instalados con versión remota más nueva (públicos y privados).
      *
      * @param array<int, array<string, mixed>> $installedPlugins
      *
      * @return list<array<string, mixed>>
      */
-    public function getAvailableUpdates(array $installedPlugins): array
+    public function getAvailableUpdates(array $installedPlugins, string $coreVersion = ''): array
     {
         require_once __DIR__ . '/plugin_compatibility_checker.php';
 
@@ -758,73 +862,183 @@ protected function fetchRemoteContents($url, $timeout = 10)
             }
         }
 
-        foreach ($this->downloads() as $entry) {
-            $name = (string) ($entry['nombre'] ?? '');
-            if ($name === '' || empty($entry['instalado'])) {
-                continue;
+        $publicCatalog = $this->downloads();
+        foreach ($publicCatalog as $entry) {
+            $update = $this->buildAvailableUpdate($entry, $installedByName, $publicCatalog, 'public', $coreVersion);
+            if ($update !== null) {
+                $updates[] = $update;
             }
-
-            $localVersion = isset($installedByName[$name]['version'])
-                ? (string) $installedByName[$name]['version']
-                : null;
-            $remoteVersion = isset($entry['version']) ? (string) $entry['version'] : null;
-
-            if ($localVersion === null || $remoteVersion === null) {
-                continue;
-            }
-
-            if (!plugin_compatibility_checker::isRemoteVersionNewer($remoteVersion, $localVersion)) {
-                continue;
-            }
-
-            $updates[] = [
-                'name' => $name,
-                'description' => (string) ($entry['descripcion'] ?? ''),
-                'current_version' => plugin_compatibility_checker::normalizeVersion($localVersion),
-                'new_version' => plugin_compatibility_checker::normalizeVersion($remoteVersion),
-                'source' => 'public',
-                'id' => $entry['id'] ?? null,
-                'min_version' => (string) ($entry['min_version'] ?? ''),
-                'max_version' => (string) ($entry['max_version'] ?? ''),
-            ];
         }
 
         if ($this->is_private_plugins_enabled()) {
-            foreach ($this->private_downloads() as $entry) {
-                $name = (string) ($entry['nombre'] ?? '');
-                if ($name === '' || empty($entry['instalado'])) {
-                    continue;
+            $privateCatalog = $this->private_downloads();
+            foreach ($privateCatalog as $entry) {
+                $update = $this->buildAvailableUpdate($entry, $installedByName, $privateCatalog, 'private', $coreVersion);
+                if ($update !== null) {
+                    $updates[] = $update;
                 }
-
-                $localVersion = isset($installedByName[$name]['version'])
-                    ? (string) $installedByName[$name]['version']
-                    : null;
-                $remoteVersion = isset($entry['version']) ? (string) $entry['version'] : null;
-
-                if ($localVersion === null || $remoteVersion === null) {
-                    continue;
-                }
-
-                if (!plugin_compatibility_checker::isRemoteVersionNewer($remoteVersion, $localVersion)) {
-                    continue;
-                }
-
-                $updates[] = [
-                    'name' => $name,
-                    'description' => (string) ($entry['descripcion'] ?? ''),
-                    'current_version' => plugin_compatibility_checker::normalizeVersion($localVersion),
-                    'new_version' => plugin_compatibility_checker::normalizeVersion($remoteVersion),
-                    'source' => 'private',
-                    'id' => $entry['id'] ?? null,
-                    'min_version' => (string) ($entry['min_version'] ?? ''),
-                    'max_version' => (string) ($entry['max_version'] ?? ''),
-                ];
             }
         }
 
         usort($updates, static fn(array $a, array $b): int => strcmp((string) $a['name'], (string) $b['name']));
 
         return $updates;
+    }
+
+    /**
+     * Construye la entrada de actualización de una fila del catálogo.
+     *
+     * Con historial resuelve el release compatible; sin historial mantiene el
+     * camino de punta de rama sin agregar claves nuevas (PU-14).
+     *
+     * @param array<string, mixed> $entry
+     * @param array<string, array<string, mixed>> $installedByName
+     * @param array<int, array<string, mixed>> $catalog
+     *
+     * @return array<string, mixed>|null
+     */
+    private function buildAvailableUpdate(
+        array $entry,
+        array $installedByName,
+        array $catalog,
+        string $source,
+        string $coreVersion
+    ): ?array {
+        $name = (string) ($entry['nombre'] ?? '');
+        if ($name === '' || empty($entry['instalado'])) {
+            return null;
+        }
+
+        $localVersion = isset($installedByName[$name]['version'])
+            ? (string) $installedByName[$name]['version']
+            : null;
+
+        if ($localVersion === null) {
+            return null;
+        }
+
+        $history = $this->releaseHistoryFromEntry($entry);
+        if ($history !== []) {
+            return $this->buildHistoryUpdate($entry, $name, $localVersion, $catalog, $source, $coreVersion, $history);
+        }
+
+        $remoteVersion = isset($entry['version']) ? (string) $entry['version'] : null;
+        if ($remoteVersion === null) {
+            return null;
+        }
+
+        if (!plugin_compatibility_checker::isRemoteVersionNewer($remoteVersion, $localVersion)) {
+            return null;
+        }
+
+        return [
+            'name' => $name,
+            'description' => (string) ($entry['descripcion'] ?? ''),
+            'current_version' => plugin_compatibility_checker::normalizeVersion($localVersion),
+            'new_version' => plugin_compatibility_checker::normalizeVersion($remoteVersion),
+            'source' => $source,
+            'id' => $entry['id'] ?? null,
+            'min_version' => (string) ($entry['min_version'] ?? ''),
+            'max_version' => (string) ($entry['max_version'] ?? ''),
+        ];
+    }
+
+    /**
+     * Extrae el historial normalizado de `releases` o `versions` de una entrada.
+     *
+     * @param array<string, mixed> $entry
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function releaseHistoryFromEntry(array $entry): array
+    {
+        require_once __DIR__ . '/plugin_compatibility_checker.php';
+
+        if (isset($entry['releases']) && is_array($entry['releases']) && $entry['releases'] !== []) {
+            return plugin_compatibility_checker::normalizeReleaseHistory($entry['releases']);
+        }
+
+        if (isset($entry['versions']) && is_array($entry['versions']) && $entry['versions'] !== []) {
+            return plugin_compatibility_checker::normalizeReleaseHistory($entry['versions']);
+        }
+
+        return [];
+    }
+
+    /**
+     * Construye la entrada de actualización para un plugin con historial.
+     *
+     * @param array<string, mixed> $entry
+     * @param array<int, array<string, mixed>> $catalog
+     * @param list<array<string, mixed>> $history
+     *
+     * @return array<string, mixed>|null
+     */
+    private function buildHistoryUpdate(
+        array $entry,
+        string $name,
+        string $localVersion,
+        array $catalog,
+        string $source,
+        string $coreVersion,
+        array $history
+    ): ?array {
+        $resolved = plugin_compatibility_checker::resolveLatestCompatible($coreVersion, $history, $localVersion);
+        if ($resolved === null) {
+            return null;
+        }
+
+        $zipLink = $this->resolveHistoryDownloadReference($resolved, $catalog);
+        if ($zipLink === '') {
+            return null;
+        }
+
+        return [
+            'name' => $name,
+            'description' => (string) ($entry['descripcion'] ?? ''),
+            'current_version' => plugin_compatibility_checker::normalizeVersion($localVersion),
+            'new_version' => plugin_compatibility_checker::normalizeVersion((string) ($resolved['version'] ?? '')),
+            'source' => $source,
+            'id' => $entry['id'] ?? null,
+            'min_version' => (string) ($resolved['min_version'] ?? ''),
+            'max_version' => (string) ($resolved['max_version'] ?? ''),
+            'zip_link' => $zipLink,
+            'resolved_from_history' => true,
+        ];
+    }
+
+    /**
+     * Resuelve la referencia de descarga de un release del historial.
+     *
+     * Prioriza `zip_url`; si solo hay `catalog_id`, busca el `zip_link` de esa
+     * fila en el mismo catálogo. Sin referencia utilizable devuelve ''.
+     *
+     * @param array<string, mixed> $resolved
+     * @param array<int, array<string, mixed>> $catalog
+     */
+    private function resolveHistoryDownloadReference(array $resolved, array $catalog): string
+    {
+        $zipUrl = trim((string) ($resolved['zip_url'] ?? ''));
+        if ($zipUrl !== '') {
+            return $this->normalizeUrl($zipUrl);
+        }
+
+        $catalogId = $resolved['catalog_id'] ?? null;
+        if ($catalogId === null || $catalogId === '') {
+            return '';
+        }
+
+        foreach ($catalog as $catalogEntry) {
+            if (!is_array($catalogEntry)) {
+                continue;
+            }
+
+            if (($catalogEntry['id'] ?? null) == $catalogId && !empty($catalogEntry['zip_link'])) {
+                return $this->normalizeUrl($catalogEntry['zip_link']);
+            }
+        }
+
+        return '';
     }
 
     /**
@@ -884,6 +1098,83 @@ protected function fetchRemoteContents($url, $timeout = 10)
                     }
                     return $ini_data;
                 }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Obtiene el historial de releases (releases.json) de un repositorio remoto.
+     *
+     * Best-effort: repositorio ausente, 404, error de red, JSON inválido,
+     * no-array o historial vacío devuelven []. Nunca es fatal.
+     *
+     * @param array<string, mixed> $plugin_data
+     *
+     * @return list<array<string, mixed>>
+     */
+    protected function get_remote_plugin_releases(array $plugin_data, ?string $token = null): array
+    {
+        $repositoryUrl = '';
+        if (!empty($plugin_data['link'])) {
+            $repositoryUrl = (string) $plugin_data['link'];
+        } elseif (!empty($plugin_data['repository_url'])) {
+            $repositoryUrl = (string) $plugin_data['repository_url'];
+        }
+
+        if ($repositoryUrl === '') {
+            return [];
+        }
+
+        $parsed = $this->parseRepositoryUrl($repositoryUrl);
+        if (!isset($parsed['path'])) {
+            return [];
+        }
+
+        $pathParts = explode('/', trim((string) $parsed['path'], '/'));
+        if (count($pathParts) < 2 || $pathParts[0] === '' || $pathParts[1] === '') {
+            return [];
+        }
+
+        $user = $pathParts[0];
+        $repo = $pathParts[1];
+        $branch = !empty($plugin_data['branch']) ? (string) $plugin_data['branch'] : 'master';
+
+        if ($token) {
+            $apiUrl = "https://api.github.com/repos/{$user}/{$repo}/contents/releases.json?ref={$branch}";
+            $content = function_exists('fs_file_get_contents_github_api')
+                ? @fs_file_get_contents_github_api($apiUrl, $token, 5)
+                : false;
+        } else {
+            $rawUrl = "https://raw.githubusercontent.com/{$user}/{$repo}/{$branch}/releases.json";
+            $content = $this->fetchRemoteContents($rawUrl, 5);
+        }
+
+        if (!is_string($content) || $content === '' || $content === 'ERROR') {
+            return [];
+        }
+
+        $decoded = json_decode($content, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+
+        require_once __DIR__ . '/plugin_compatibility_checker.php';
+
+        return plugin_compatibility_checker::normalizeReleaseHistory($decoded);
+    }
+
+    /**
+     * Indica si una entrada de catálogo ya trae un historial de releases válido.
+     *
+     * @param array<string, mixed> $entry
+     */
+    private function entryHasReleaseHistory(array $entry): bool
+    {
+        foreach (['releases', 'versions'] as $key) {
+            if (isset($entry[$key]) && is_array($entry[$key]) && $entry[$key] !== []) {
+                return true;
             }
         }
 

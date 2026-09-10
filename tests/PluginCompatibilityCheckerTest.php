@@ -235,6 +235,81 @@ final class PluginCompatibilityCheckerTest extends TestCase
         $this->assertSame('blocked_by_core', $enriched[0]['update_status']);
     }
 
+    public function testNormalizeReleaseHistoryDropsInvalidEntries(): void
+    {
+        $result = \plugin_compatibility_checker::normalizeReleaseHistory([
+            'not-an-array',
+            42,
+            null,
+            ['min_version' => '0.13'],
+            ['version' => ''],
+            ['version' => '1.8.1', 'min_version' => '0.13', 'max_version' => '0.16'],
+        ]);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('1.8.1', $result[0]['version']);
+        $this->assertSame('0.13', $result[0]['min_version']);
+        $this->assertSame('0.16', $result[0]['max_version']);
+    }
+
+    public function testNormalizeReleaseHistoryPreservesDownloadReference(): void
+    {
+        $result = \plugin_compatibility_checker::normalizeReleaseHistory([
+            [
+                'version' => '1.8.1',
+                'min_version' => '0.13',
+                'max_version' => '0.16',
+                'zip_url' => 'https://example.com/v1.8.1.zip',
+                'catalog_id' => 97,
+            ],
+        ]);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('https://example.com/v1.8.1.zip', $result[0]['zip_url']);
+        $this->assertSame(97, $result[0]['catalog_id']);
+    }
+
+    public function testNormalizeReleaseHistoryDefaultsMissingBoundsToEmpty(): void
+    {
+        $result = \plugin_compatibility_checker::normalizeReleaseHistory([
+            ['version' => '1.8.1', 'zip_url' => 'https://example.com/v1.8.1.zip'],
+        ]);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('', $result[0]['min_version']);
+        $this->assertSame('', $result[0]['max_version']);
+    }
+
+    public function testNormalizeReleaseHistoryReturnsEmptyForInvalidHistory(): void
+    {
+        $this->assertSame([], \plugin_compatibility_checker::normalizeReleaseHistory([]));
+        $this->assertSame([], \plugin_compatibility_checker::normalizeReleaseHistory(['a', 'b', 1]));
+    }
+
+    public function testNormalizeReleaseHistoryNeverThrowsOnOddEntries(): void
+    {
+        $result = \plugin_compatibility_checker::normalizeReleaseHistory([
+            ['version' => ['nested'], 'min_version' => ['x']],
+            ['version' => '2.0', 'min_version' => null, 'max_version' => false],
+        ]);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('2.0', $result[0]['version']);
+        $this->assertSame('', $result[0]['min_version']);
+        $this->assertSame('', $result[0]['max_version']);
+    }
+
+    public function testNormalizeReleaseHistoryCoercesNonScalarBoundsToEmpty(): void
+    {
+        $result = \plugin_compatibility_checker::normalizeReleaseHistory([
+            ['version' => '1.8.1', 'min_version' => ['x'], 'max_version' => (object) ['y' => 1]],
+        ]);
+
+        $this->assertCount(1, $result);
+        $this->assertSame('', $result[0]['min_version']);
+        $this->assertSame('', $result[0]['max_version']);
+    }
+
     private function removeTree(string $dir): void
     {
         if (!is_dir($dir)) {

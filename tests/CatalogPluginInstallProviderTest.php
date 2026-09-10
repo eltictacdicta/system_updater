@@ -92,7 +92,7 @@ class CatalogPluginInstallProviderTest extends TestCase
                 ];
             }
 
-            public function download($plugin_id)
+            public function download($plugin_id, ?string $zipUrlOverride = null)
             {
                 $this->downloadedIds[] = (int) $plugin_id;
                 mkdir($this->tempRoot . '/plugins/catalogo_core', 0777, true);

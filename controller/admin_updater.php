@@ -419,7 +419,8 @@ class admin_updater extends fs_controller
 
         // Comprobar actualizaciones de plugins instalados (públicos y privados)
         $updates['plugins'] = $this->plugin_downloader->getAvailableUpdates(
-            $this->plugin_manager->installed()
+            $this->plugin_manager->installed(),
+            (string) $this->plugin_manager->version
         );
 
         // Comprobar actualización del core
@@ -471,7 +472,7 @@ class admin_updater extends fs_controller
         $targetCoreVersion = $this->checkCoreUpdate() ?: '';
 
         foreach (plugin_compatibility_checker::enrichPluginUpdatesWithCoreCompatibility(
-            $this->plugin_downloader->getAvailableUpdates($this->plugin_manager->installed()),
+            $this->plugin_downloader->getAvailableUpdates($this->plugin_manager->installed(), $coreVersion),
             $coreVersion,
             (string) $targetCoreVersion
         ) as $plugin) {
@@ -723,7 +724,10 @@ class admin_updater extends fs_controller
 
         $pending = array_values(array_filter(
             plugin_compatibility_checker::enrichPluginUpdatesWithCoreCompatibility(
-                $this->plugin_downloader->getAvailableUpdates($this->plugin_manager->installed()),
+                $this->plugin_downloader->getAvailableUpdates(
+                    $this->plugin_manager->installed(),
+                    (string) $this->plugin_manager->version
+                ),
                 (string) $this->plugin_manager->version,
                 (string) ($this->checkCoreUpdate() ?: '')
             ),
@@ -957,16 +961,31 @@ class admin_updater extends fs_controller
 
         $publicEntry = $this->plugin_downloader->findPublicEntryByName($pluginName);
         if (is_array($publicEntry) && isset($publicEntry['id'])) {
-            if (!$this->assertRemotePluginCompatible($pluginName, $publicEntry, $coreVersion)) {
+            // La actualización efectiva puede ser un release histórico resuelto
+            // (punta de rama incompatible, release compatible). La decisión de
+            // compatibilidad usa los límites de ese release, no los de la punta.
+            $resolvedEntry = $this->plugin_downloader->findPublicUpdateByName(
+                $pluginName,
+                $this->plugin_manager->installed(),
+                $coreVersion
+            );
+
+            if (!$this->assertRemotePluginCompatible($pluginName, $publicEntry, $coreVersion, $resolvedEntry)) {
                 return false;
             }
+
+            // Propagación del ZIP del release histórico resuelto: si la entrada
+            // viene del historial (`resolved_from_history`) y tiene `zip_link`
+            // utilizable, se pasa como override; en cualquier otro caso el
+            // override es null y `download()` mantiene su comportamiento actual.
+            $zipUrlOverride = $this->resolvedHistoryZipOverride($resolvedEntry);
 
             // Visibilidad de dependencias en memoria durante download() →
             // syncPluginDatabaseSchema() para que los XMLs de tablas resuelvan
             // aunque la dependencia esté desactivada (PU-09).
             $downloaded = PluginSchemaResyncer::withDependencyVisibility(
                 $pluginName,
-                fn(): bool => $this->plugin_downloader->download((int) $publicEntry['id']),
+                fn(): bool => $this->plugin_downloader->download((int) $publicEntry['id'], $zipUrlOverride),
                 $this->catalogRequirementsFn()
             );
             if (!$downloaded) {
@@ -991,18 +1010,31 @@ class admin_updater extends fs_controller
         }
 
         if ($this->plugin_downloader->is_private_plugins_enabled()) {
+            // Simetría con el camino público: si la entrada privada proviene del
+            // historial resuelto, la compatibilidad y el ZIP usan ese release.
+            $resolvedEntry = $this->plugin_downloader->findPublicUpdateByName(
+                $pluginName,
+                $this->plugin_manager->installed(),
+                $coreVersion
+            );
+            if (($resolvedEntry['source'] ?? '') !== 'private') {
+                $resolvedEntry = null;
+            }
+
             foreach ($this->plugin_downloader->private_downloads() as $remote) {
                 if (($remote['nombre'] ?? '') !== $pluginName || !isset($remote['id'])) {
                     continue;
                 }
 
-                if (!$this->assertRemotePluginCompatible($pluginName, $remote, $coreVersion)) {
+                if (!$this->assertRemotePluginCompatible($pluginName, $remote, $coreVersion, $resolvedEntry)) {
                     return false;
                 }
 
+                $zipUrlOverride = $this->resolvedHistoryZipOverride($resolvedEntry);
+
                 $downloaded = PluginSchemaResyncer::withDependencyVisibility(
                     $pluginName,
-                    fn(): bool => $this->plugin_downloader->download_private($remote['id']),
+                    fn(): bool => $this->plugin_downloader->download_private($remote['id'], $zipUrlOverride),
                     $this->catalogRequirementsFn()
                 );
                 if (!$downloaded) {
@@ -1031,6 +1063,24 @@ class admin_updater extends fs_controller
     }
 
     /**
+     * Devuelve el `zip_link` de un release histórico resuelto, o null cuando la
+     * actualización proviene del camino de punta de rama (sin historial, sin
+     * release resuelto o sin `zip_link` utilizable).
+     *
+     * @param array<string, mixed>|null $resolvedEntry
+     */
+    private function resolvedHistoryZipOverride(?array $resolvedEntry): ?string
+    {
+        if ($resolvedEntry === null || ($resolvedEntry['resolved_from_history'] ?? false) !== true) {
+            return null;
+        }
+
+        $zipLink = trim((string) ($resolvedEntry['zip_link'] ?? ''));
+
+        return $zipLink !== '' ? $zipLink : null;
+    }
+
+    /**
      * Muestra avisos de sincronización de esquema tras descargar/actualizar un plugin.
      */
     private function reportPluginSchemaSyncAdvisories(): void
@@ -1043,18 +1093,34 @@ class admin_updater extends fs_controller
     }
 
     /**
-     * @param array<string, mixed> $remoteEntry
+     * Valida que una actualización pueda aplicarse contra el núcleo actual.
+     *
+     * Si `$resolvedEntry` proviene del historial (`resolved_from_history`), la
+     * decisión se toma con los límites del release resuelto; si no, con los de
+     * la punta de rama (`$remoteEntry`), preservando el comportamiento previo.
+     *
+     * @param array<string, mixed> $remoteEntry Fila del catálogo en la punta de rama
+     * @param array<string, mixed>|null $resolvedEntry Entrada de actualización resuelta (opcional)
      */
-    private function assertRemotePluginCompatible(string $pluginName, array $remoteEntry, string $coreVersion): bool
-    {
-        $evaluation = plugin_compatibility_checker::validateRemotePluginForCore(
+    private function assertRemotePluginCompatible(
+        string $pluginName,
+        array $remoteEntry,
+        string $coreVersion,
+        ?array $resolvedEntry = null
+    ): bool {
+        $evaluation = plugin_compatibility_checker::evaluateUpdateEntryForCore(
             $coreVersion,
-            plugin_compatibility_checker::boundsFromCatalogEntry($remoteEntry)
+            $resolvedEntry ?? [],
+            $remoteEntry
         );
 
         if ($evaluation['compatible']) {
             return true;
         }
+
+        $boundsSource = (($resolvedEntry['resolved_from_history'] ?? false) === true)
+            ? $resolvedEntry
+            : $remoteEntry;
 
         $hint = '';
         $targetCore = $this->checkCoreUpdate();
@@ -1062,7 +1128,7 @@ class admin_updater extends fs_controller
             $targetEval = plugin_compatibility_checker::classifyPluginUpdateAgainstCore(
                 $coreVersion,
                 (string) $targetCore,
-                plugin_compatibility_checker::boundsFromCatalogEntry($remoteEntry)
+                plugin_compatibility_checker::boundsFromCatalogEntry($boundsSource)
             );
             if ($targetEval['blocked_by_core']) {
                 $hint = ' Actualiza primero el núcleo a v' . $targetCore . '.';
@@ -1084,7 +1150,10 @@ class admin_updater extends fs_controller
     {
         $map = [];
 
-        foreach ($this->plugin_downloader->getAvailableUpdates($this->plugin_manager->installed()) as $update) {
+        foreach ($this->plugin_downloader->getAvailableUpdates(
+            $this->plugin_manager->installed(),
+            (string) $this->plugin_manager->version
+        ) as $update) {
             $name = (string) ($update['name'] ?? '');
             if ($name === '') {
                 continue;
