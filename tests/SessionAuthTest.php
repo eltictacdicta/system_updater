@@ -87,10 +87,8 @@ final class SessionAuthTest extends TestCase
         ]));
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+    #[\PHPUnit\Framework\Attributes\PreserveGlobalState(false)]
     public function testEnsureFsPathForProcessScriptMatchesIndexRoot(): void
     {
         $_SERVER['REQUEST_URI'] = '/plugins/system_updater/process_core_update.php?action=start';
@@ -102,10 +100,8 @@ final class SessionAuthTest extends TestCase
         $this->assertSame('/', system_updater_resolve_cookie_path());
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+    #[\PHPUnit\Framework\Attributes\PreserveGlobalState(false)]
     public function testPrimeFsPathBeforeConfigAvoidsPluginSubdirectory(): void
     {
         $_SERVER['REQUEST_URI'] = '/plugins/system_updater/process_backup.php?action=start';
@@ -118,10 +114,8 @@ final class SessionAuthTest extends TestCase
         $this->assertSame('/', system_updater_resolve_cookie_path());
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+    #[\PHPUnit\Framework\Attributes\PreserveGlobalState(false)]
     public function testCookiePathUsesAppRootWhenConfigDefinedPluginPath(): void
     {
         if (!defined('FS_PATH')) {
