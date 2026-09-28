@@ -178,14 +178,56 @@ NOT rely on this rule for its security.
 
 ### Requirement: Restore Compatibility
 
-The existing `process_restore.php` flow MUST continue to work against
-the new `BACKUP_DIR` without any UI or behavior change.
+`process_restore.php` MUST resolve the backup from the new `BACKUP_DIR`.
+
+> Changed 2026-09-28: the restore is no longer a single long-lived SSE request.
+> The UI and transport changed on purpose; see "Stepped Resumable Restore".
 
 #### Scenario: Restore reads from the new directory
 
 - GIVEN a backup file exists in the new `BACKUP_DIR`
 - WHEN an admin triggers a restore from `admin_updater`
-- THEN the restore succeeds and the source file matches the new path
+- THEN the restore resolves the source file from the new path
+
+### Requirement: Stepped Resumable Restore
+
+`process_restore.php` MUST expose `action=begin` and `action=chunk` so that no
+single HTTP request performs more than a bounded amount of restore work. The
+production host kills the PHP process a few seconds into a request, so a single
+request restore can never complete.
+
+The restore state MUST be persisted so an interrupted restore resumes from the
+last executed statement instead of restarting the import.
+
+#### Scenario: begin arms state, heartbeat and maintenance
+
+- GIVEN an authenticated admin with a valid plugin CSRF token
+- WHEN `action=begin` is requested for a backup
+- THEN it heals any stale restore lock, activates maintenance with a heartbeat,
+  creates the restore state and executes only the first bounded unit
+
+#### Scenario: chunk resumes from the persisted checkpoint
+
+- GIVEN an in-progress restore state
+- WHEN `action=chunk` is requested
+- THEN it executes one bounded unit, persists the checkpoint after every executed
+  statement, refreshes the maintenance heartbeat, and reports `done` on the last step
+
+#### Scenario: a killed process does not leave the site in maintenance
+
+- GIVEN a restore lock whose heartbeat is older than the stale threshold
+- WHEN any plugin request evaluates the lock
+- THEN the orphan lock is cleared and public routes stop returning 503
+
+#### Scenario: chunk requires CSRF
+
+- GIVEN `action=chunk` without a valid `su_csrf_token`
+- THEN the guard responds with an SSE error and no state is mutated
+
+#### Scenario: state never carries credentials
+
+- GIVEN a persisted restore state
+- THEN it contains no database password or other secret
 
 ### Requirement: UI Download Action
 
