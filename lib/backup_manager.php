@@ -3827,7 +3827,9 @@ class backup_manager
             // cada paso es otra conexión y no puede ser atómico. Ejecutarlo
             // dejaría trabajo sin commitear que MySQL revierte al cerrar la
             // conexión. Se neutraliza y el import queda durable por sentencia.
-            if (!$this->restore_is_transaction_control($sql)) {
+            if (!$this->restore_is_transaction_control($sql)
+                && !$this->restore_restores_foreign_session_state($sql)
+            ) {
                 try {
                     $mysqli->query($sql);
                 } catch (\Throwable $e) {
@@ -3888,6 +3890,25 @@ class backup_manager
     }
 
     /**
+     * Normaliza una sentencia del dump para poder clasificarla.
+     *
+     * MySQL envuelve sentencias de sesión en comentarios condicionales
+     * (`/*!40101 SET ... *\/`), así que hay que quitar el envoltorio antes de
+     * comparar.
+     *
+     * @param string $sql
+     * @return string
+     */
+    private function restore_normalize_statement(string $sql): string
+    {
+        $normalized = strtoupper((string) preg_replace('/\s+/', ' ', trim($sql)));
+        $normalized = (string) preg_replace('#^/\*!\d*\s*#', '', $normalized);
+        $normalized = (string) preg_replace('#\s*\*/$#', '', $normalized);
+
+        return trim($normalized);
+    }
+
+    /**
      * Indica si una sentencia del dump sólo controla transacciones.
      *
      * El import por pasos usa una conexión por paso y no puede ser atómico, así
@@ -3900,13 +3921,73 @@ class backup_manager
      */
     private function restore_is_transaction_control(string $sql): bool
     {
-        $normalized = strtoupper((string) preg_replace('/\s+/', ' ', trim($sql)));
+        $normalized = $this->restore_normalize_statement($sql);
 
         if (in_array($normalized, array('START TRANSACTION', 'BEGIN', 'BEGIN WORK', 'COMMIT', 'ROLLBACK'), true)) {
             return true;
         }
 
         return (bool) preg_match('/^SET\s+(SESSION\s+|GLOBAL\s+|LOCAL\s+)?AUTOCOMMIT\s*=/', $normalized);
+    }
+
+    /**
+     * Indica si una sentencia restaura estado de sesión guardado en otra conexión.
+     *
+     * El pie del volcado hace `SET character_set_client = @OLD_CHARACTER_SET_CLIENT`,
+     * pero esa variable de usuario la guardó el encabezado en la conexión del
+     * primer paso. En un paso posterior llega `NULL` y MySQL rechaza el SET:
+     * "Variable 'character_set_client' can't be set to the value of 'NULL'".
+     * Sólo restauran ajustes de la sesión del dump, así que se omiten.
+     *
+     * @param string $sql
+     * @return bool
+     */
+    private function restore_restores_foreign_session_state(string $sql): bool
+    {
+        $normalized = $this->restore_normalize_statement($sql);
+
+        return (bool) preg_match(
+            '/^SET\s+(SESSION\s+|LOCAL\s+|GLOBAL\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*@(?!@)/',
+            $normalized
+        );
+    }
+
+    /**
+     * Comprueba si alguna tabla de usuarios quedó con filas tras el import.
+     *
+     * Sirve para no descartar una tabla de usuarios correctamente restaurada
+     * sólo porque hubo errores sin relación (por ejemplo, un SET de sesión).
+     *
+     * @param \mysqli $mysqli
+     * @return bool
+     */
+    private function restore_users_tables_have_rows($mysqli): bool
+    {
+        foreach ($this->get_user_table_names() as $table) {
+            $quoted = $this->mysqlHelper->quoteIdentifier($table);
+            if ($quoted === false) {
+                continue;
+            }
+
+            try {
+                $result = $mysqli->query('SELECT COUNT(*) FROM ' . $quoted);
+            } catch (\Throwable $e) {
+                continue;
+            }
+
+            if (!$result) {
+                continue;
+            }
+
+            $row = $result->fetch_row();
+            $result->free();
+
+            if ($row && (int) $row[0] > 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -3927,13 +4008,23 @@ class backup_manager
             if ($mysqli !== null) {
                 try {
                     if ($errorCount > 0) {
-                        // Mismo criterio que el flujo legacy: si la importación
-                        // falló, se recuperan las tablas de usuarios anteriores.
-                        // Borrarlas dejaba el sitio sin login y sin recovery.php.
-                        $recovered = $this->restore_users_from_temp($mysqli);
-                        $state['warnings'][] = $recovered
-                            ? 'La importación tuvo ' . $errorCount . ' error(es): se restauraron las tablas de usuarios anteriores para conservar el acceso.'
-                            : 'La importación tuvo ' . $errorCount . ' error(es) y no había copia temporal de usuarios.';
+                        if ($this->restore_users_tables_have_rows($mysqli)) {
+                            // Hubo errores, pero no afectaron a los usuarios: la
+                            // tabla del backup quedó con datos, así que se
+                            // conserva. Descartarla era destruir un import
+                            // correcto por errores ajenos (p. ej. un SET de sesión).
+                            $this->cleanup_temp_users($mysqli);
+                            $state['warnings'][] = 'La importación tuvo ' . $errorCount . ' error(es), '
+                                . 'pero las tablas de usuarios quedaron con datos: se conserva la del backup.';
+                        } else {
+                            // La importación falló en serio: se recuperan las
+                            // tablas de usuarios anteriores, igual que el flujo
+                            // legacy, para no perder el acceso a recovery.php.
+                            $recovered = $this->restore_users_from_temp($mysqli);
+                            $state['warnings'][] = $recovered
+                                ? 'La importación tuvo ' . $errorCount . ' error(es): se restauraron las tablas de usuarios anteriores para conservar el acceso.'
+                                : 'La importación tuvo ' . $errorCount . ' error(es) y no había copia temporal de usuarios.';
+                        }
                     } else {
                         $this->cleanup_temp_users($mysqli);
                     }

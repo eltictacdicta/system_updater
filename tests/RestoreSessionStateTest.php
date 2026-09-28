@@ -348,4 +348,59 @@ class RestoreSessionStateTest extends TestCase
             'clasificación incorrecta para: ' . $sql
         );
     }
+
+    /**
+     * Sentencias reales del encabezado y el pie del exportador nativo.
+     *
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function foreignSessionStateProvider(): array
+    {
+        return [
+            'pie: character_set_client' => [
+                '/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */',
+                true,
+            ],
+            'pie: character_set_results' => [
+                '/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */',
+                true,
+            ],
+            'pie: collation_connection' => [
+                '/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */',
+                true,
+            ],
+            'sin envoltorio' => ['SET character_set_client = @OLD_X', true],
+            'con scope session' => ['SET SESSION character_set_client = @OLD_X', true],
+            'encabezado (guarda, no restaura)' => [
+                '/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */',
+                false,
+            ],
+            'set names' => ['/*!40101 SET NAMES utf8mb4 */', false],
+            'time zone' => ['SET time_zone = "+00:00"', false],
+            'sql mode' => ['SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO"', false],
+            'foreign key checks' => ['SET FOREIGN_KEY_CHECKS = 0', false],
+        ];
+    }
+
+    #[DataProvider('foreignSessionStateProvider')]
+    public function testDetectsStatementsThatRestoreForeignSessionState(string $sql, bool $expected): void
+    {
+        $this->assertSame(
+            $expected,
+            (bool) $this->invoke('restore_restores_foreign_session_state', [$sql]),
+            'clasificación incorrecta para: ' . $sql
+        );
+    }
+
+    public function testTransactionControlAlsoSeesThroughConditionalComments(): void
+    {
+        $this->assertTrue((bool) $this->invoke(
+            'restore_is_transaction_control',
+            ['/*!40101 SET AUTOCOMMIT=0 */']
+        ));
+        $this->assertTrue((bool) $this->invoke(
+            'restore_is_transaction_control',
+            ['/*!40101 START TRANSACTION */']
+        ));
+    }
 }
