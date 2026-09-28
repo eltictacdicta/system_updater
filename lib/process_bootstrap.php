@@ -126,7 +126,7 @@ function system_updater_process_init(array $options = []): array
 
     $action = (string) ($_GET['action'] ?? '');
 
-    if ($action === 'start') {
+    if ($action === 'start' || $action === 'begin') {
         system_updater_start_authenticated_session();
 
         if ($mode === 'sse') {

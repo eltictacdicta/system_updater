@@ -157,6 +157,9 @@ function system_updater_get_operation_warnings(string $excludeNick = '', int $mi
 
 /**
  * Activa el modo mantenimiento cuando el core lo soporta.
+ *
+ * El estado incluye `source` y `heartbeat`: son los que permiten distinguir un
+ * lock del restore y detectar que quedó huérfano tras un kill del host.
  */
 function system_updater_begin_maintenance(array $state = []): bool
 {
@@ -167,11 +170,20 @@ function system_updater_begin_maintenance(array $state = []): bool
         return true;
     }
 
+    $state = array_merge(
+        array(
+            'source' => 'system_updater',
+            'heartbeat' => time(),
+        ),
+        $state
+    );
+
     if (function_exists('system_updater_debug_log')) {
         system_updater_debug_log('MM', 'begin_maintenance: calling fs_maintenance_mode::writeLock', [
             'lock_path' => method_exists('fs_maintenance_mode', 'lockFilePath')
                 ? (string) fs_maintenance_mode::lockFilePath()
                 : '(no lockFilePath method)',
+            'source' => $state['source'],
         ]);
     }
     $result = fs_maintenance_mode::writeLock($state);
@@ -179,6 +191,78 @@ function system_updater_begin_maintenance(array $state = []): bool
         system_updater_debug_log('MM', 'begin_maintenance: writeLock returned', ['success' => $result]);
     }
     return $result;
+}
+
+/**
+ * Refresca el heartbeat del lock de mantenimiento si (y sólo si) es nuestro.
+ * Nunca pisa un lock de otro origen.
+ */
+function system_updater_refresh_restore_heartbeat(string $source = 'system_updater.restore'): void
+{
+    if (!system_updater_maintenance_mode_available()) {
+        return;
+    }
+
+    $state = fs_maintenance_mode::readLockState();
+    if (!is_array($state)) {
+        return;
+    }
+
+    if ((string) ($state['source'] ?? '') !== $source) {
+        return;
+    }
+
+    $state['active'] = true;
+    $state['heartbeat'] = time();
+    fs_maintenance_mode::writeLock($state);
+}
+
+/**
+ * Libera un lock de mantenimiento del restore que quedó huérfano.
+ *
+ * Un SIGKILL no ejecuta `finally`, así que el lock creado por el restore queda
+ * puesto y el sitio sigue devolviendo 503 en las rutas públicas. Esto lo
+ * detecta por heartbeat y lo limpia desde cualquier request del plugin.
+ *
+ * @return bool True si limpió un lock huérfano.
+ */
+function system_updater_heal_stale_restore_lock(
+    string $source = 'system_updater.restore',
+    int $staleSeconds = 120
+): bool {
+    if (!system_updater_maintenance_mode_available()) {
+        return false;
+    }
+
+    $state = fs_maintenance_mode::readLockState();
+    if (!is_array($state)) {
+        return false;
+    }
+
+    if ((string) ($state['source'] ?? '') !== $source) {
+        return false;
+    }
+
+    $heartbeat = (int) ($state['heartbeat'] ?? 0);
+    if ($heartbeat <= 0) {
+        $heartbeat = (int) strtotime((string) ($state['updated_at'] ?? ''));
+    }
+
+    if ($heartbeat > 0 && (time() - $heartbeat) <= $staleSeconds) {
+        return false;
+    }
+
+    $cleared = fs_maintenance_mode::clearLock();
+
+    if (function_exists('system_updater_debug_log')) {
+        system_updater_debug_log('MM', 'heal_stale_restore_lock: lock huérfano liberado', [
+            'heartbeat' => $heartbeat,
+            'age' => $heartbeat > 0 ? (time() - $heartbeat) : -1,
+            'cleared' => $cleared,
+        ]);
+    }
+
+    return $cleared;
 }
 
 /**
