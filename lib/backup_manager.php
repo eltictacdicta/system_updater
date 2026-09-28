@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/SqlDumpReader.php';
+
 /**
  * MySQL helper used by the standalone backup manager.
  */
@@ -3206,5 +3208,928 @@ class backup_manager
         @chmod($tempFile, 0600);
 
         return $tempFile;
+    }
+
+    // =========================================================================
+    // Restauración resumible por pasos (API aditiva; no altera restore_* existente)
+    // =========================================================================
+
+    const RESTORE_STEP_BUDGET = 5.0;
+
+    /**
+     * Ruta del archivo de estado para una sesión de restauración.
+     *
+     * @param string $sessionId
+     * @return string
+     */
+    public function restore_session_state_file(string $sessionId): string
+    {
+        return sys_get_temp_dir() . DIRECTORY_SEPARATOR
+            . 'fs_restore_state_' . $this->restore_session_safe_id($sessionId) . '.json';
+    }
+
+    /**
+     * Carga el estado de una sesión de restauración, o `null` si no existe.
+     *
+     * @param string $sessionId
+     * @return array|null
+     */
+    public function restore_session_load(string $sessionId): ?array
+    {
+        $file = $this->restore_session_state_file($sessionId);
+        if (!is_file($file)) {
+            return null;
+        }
+
+        $raw = @file_get_contents($file);
+        if ($raw === false) {
+            return null;
+        }
+
+        $decoded = json_decode($raw, true);
+        if (!is_array($decoded)) {
+            return null;
+        }
+
+        return $this->restore_session_normalize($decoded);
+    }
+
+    /**
+     * Inicia (o reinicia) una restauración por pasos y ejecuta el primer tramo.
+     *
+     * @param string $backupFile
+     * @param string $restoreType complete|files|database
+     * @param string $sessionId
+     * @param float|null $budget Segundos de trabajo máximos para este paso
+     * @return array
+     */
+    public function restore_session_start(string $backupFile, string $restoreType, string $sessionId, ?float $budget = null): array
+    {
+        $restoreType = in_array($restoreType, array('complete', 'files', 'database'), true)
+            ? $restoreType
+            : 'complete';
+
+        $state = $this->restore_session_initial_state($sessionId, $backupFile, $restoreType);
+
+        if ($restoreType !== 'files' && $this->get_database_type() === 'POSTGRESQL') {
+            $message = 'El modo de restauración resumible solo soporta MySQL. '
+                . 'PostgreSQL requiere shell, deshabilitado en producción.';
+            $this->errors[] = $message;
+            return $this->restore_session_response(false, false, $message, 'prepare', $message, 0, $state);
+        }
+
+        $this->restore_session_save($state);
+
+        return $this->restore_session_step($state, $budget);
+    }
+
+    /**
+     * Ejecuta un tramo acotado por presupuesto del paso actual y persiste el estado.
+     *
+     * @param array $state
+     * @param float|null $budget
+     * @return array
+     */
+    public function restore_session_step(array $state, ?float $budget = null): array
+    {
+        $state = $this->restore_session_normalize($state);
+        $budget = $this->restore_session_resolve_budget($budget);
+        $deadline = microtime(true) + $budget;
+
+        $lastStep = (string) $state['phase'];
+        $lastMessage = 'Continuando restauración...';
+        $lastPercent = $this->restore_phase_percent($state);
+
+        try {
+            $firstUnit = true;
+            while (true) {
+                if ($state['phase'] === 'done') {
+                    break;
+                }
+
+                // Garantiza al menos una unidad de trabajo por paso: nunca un
+                // chunk sin avance aunque el presupuesto llegue agotado.
+                if (!$firstUnit && microtime(true) >= $deadline) {
+                    break;
+                }
+                $firstUnit = false;
+
+                $unit = $this->restore_session_run_phase($state, $deadline);
+
+                $lastStep = (string) $unit['step'];
+                $lastMessage = (string) $unit['message'];
+                $lastPercent = (int) $unit['percent'];
+
+                if (!empty($unit['fatal'])) {
+                    $state['updated_at'] = time();
+                    $this->restore_session_save($state);
+                    return $this->restore_session_response(
+                        false,
+                        false,
+                        (string) $unit['error'],
+                        $lastStep,
+                        $lastMessage,
+                        $lastPercent,
+                        $state
+                    );
+                }
+
+                if (!empty($unit['complete'])) {
+                    $state['phase'] = (string) $unit['next'];
+                }
+            }
+        } catch (\Throwable $e) {
+            $message = 'Error inesperado en la restauración por pasos: ' . $e->getMessage();
+            $this->errors[] = $message;
+            $state['errors'][] = $message;
+            $state['updated_at'] = time();
+            $this->restore_session_save($state);
+            return $this->restore_session_response(false, false, $message, (string) $state['phase'], $message, $lastPercent, $state);
+        }
+
+        $done = ($state['phase'] === 'done');
+
+        if ($done) {
+            $state['done'] = true;
+            $lastStep = 'done';
+            $lastMessage = 'Restauración completada correctamente.';
+            $lastPercent = 100;
+            $this->restore_session_forget((string) $state['session_id']);
+        } else {
+            $state['updated_at'] = time();
+            $this->restore_session_save($state);
+        }
+
+        return $this->restore_session_response(true, $done, null, $lastStep, $lastMessage, $lastPercent, $state);
+    }
+
+    /**
+     * Elimina el archivo de estado de una sesión.
+     *
+     * @param string $sessionId
+     * @return void
+     */
+    public function restore_session_forget(string $sessionId): void
+    {
+        $file = $this->restore_session_state_file($sessionId);
+        if (is_file($file)) {
+            @unlink($file);
+        }
+        if (is_file($file . '.tmp')) {
+            @unlink($file . '.tmp');
+        }
+    }
+
+    /**
+     * Indica si el estado de una sesión no existe o está viejo (sin heartbeat).
+     *
+     * @param string $sessionId
+     * @param int $maxAgeSeconds
+     * @return bool
+     */
+    public function restore_session_is_stale(string $sessionId, int $maxAgeSeconds = 120): bool
+    {
+        $state = $this->restore_session_load($sessionId);
+        if ($state === null) {
+            return true;
+        }
+
+        $updated = (int) $state['updated_at'];
+        if ($updated <= 0) {
+            return true;
+        }
+
+        return (time() - $updated) > $maxAgeSeconds;
+    }
+
+    /**
+     * Ejecuta el manejador de la fase actual.
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_session_run_phase(array &$state, float $deadline): array
+    {
+        switch ((string) $state['phase']) {
+            case 'prepare':
+                return $this->restore_step_prepare($state, $deadline);
+
+            case 'files':
+                return $this->restore_step_files($state, $deadline);
+
+            case 'drop':
+                return $this->restore_step_drop($state, $deadline);
+
+            case 'import':
+                return $this->restore_step_import($state, $deadline);
+
+            case 'cleanup':
+                return $this->restore_step_cleanup($state, $deadline);
+
+            default:
+                return $this->restore_unit(true, 'done', 'done', 'Restauración completada.', 100);
+        }
+    }
+
+    /**
+     * Fase prepare: resuelve el backup, extrae el paquete, valida el motor,
+     * respalda usuarios, lista tablas y descomprime el dump.
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_step_prepare(array &$state, float $deadline): array
+    {
+        $type = (string) $state['type'];
+        $needsDatabase = in_array($type, array('complete', 'database'), true);
+
+        $backupPath = $this->get_backup_file_path((string) $state['file']);
+        if (!$backupPath) {
+            return $this->restore_fatal('prepare', 'Archivo de backup no encontrado: ' . $state['file'], 5, 'done');
+        }
+
+        $tempDir = !empty($state['temp_dir']) ? (string) $state['temp_dir'] : null;
+        $dbBackupPath = null;
+
+        if ($type === 'files') {
+            if (substr($backupPath, -4) !== '.zip' || strpos(basename($backupPath), '_complete.zip') !== false) {
+                $resolved = $this->resolve_database_backup_source((string) $state['file']);
+                if (!$resolved) {
+                    return $this->restore_fatal('prepare', $this->last_error_message('No se pudo resolver el paquete de backup.'), 5, 'done');
+                }
+                $tempDir = $resolved['temp_dir'];
+            }
+        } else {
+            $resolved = $this->resolve_database_backup_source((string) $state['file']);
+            if (!$resolved) {
+                return $this->restore_fatal('prepare', $this->last_error_message('No se pudo resolver el backup de base de datos.'), 5, 'done');
+            }
+            $dbBackupPath = $resolved['path'];
+            $tempDir = $resolved['temp_dir'];
+        }
+
+        if ($needsDatabase && ($tempDir === null || $tempDir === '')) {
+            $tempDir = $this->restore_create_temp_dir((string) $state['session_id']);
+            if ($tempDir === null) {
+                return $this->restore_fatal('prepare', 'No se pudo crear el directorio temporal de restauración.', 5, 'done');
+            }
+        }
+
+        if ($tempDir !== null && $tempDir !== '') {
+            $state['temp_dir'] = $tempDir;
+        }
+
+        if ($needsDatabase) {
+            if (!$dbBackupPath || !is_file($dbBackupPath)) {
+                return $this->restore_fatal('prepare', 'No se encontró backup de base de datos dentro del paquete: ' . $state['file'], 5, 'done');
+            }
+
+            $metadata = $this->read_package_metadata((string) $tempDir);
+            $backupDbType = $this->get_backup_database_type_from_metadata($metadata);
+            if ($backupDbType === 'UNKNOWN') {
+                $backupDbType = $this->detect_database_backup_type($dbBackupPath);
+            }
+            $currentDbType = $this->get_database_type();
+            if (!$this->is_database_restore_compatible($backupDbType, $currentDbType)) {
+                $message = 'El backup fue generado para ' . $backupDbType . ' y la instalación actual usa '
+                    . $currentDbType . '. La restauración de base de datos entre motores distintos no es compatible.';
+                return $this->restore_fatal('prepare', $message, 5, 'done');
+            }
+
+            $dumpPath = rtrim((string) $tempDir, '/\\') . DIRECTORY_SEPARATOR . 'dump.sql';
+            if (!$this->restore_decompress_sql($dbBackupPath, $dumpPath)) {
+                return $this->restore_fatal('prepare', $this->last_error_message('No se pudo descomprimir el dump de base de datos.'), 30, 'done');
+            }
+            $state['dump_path'] = $dumpPath;
+
+            $connectionError = null;
+            $mysqli = $this->restore_open_mysqli($connectionError);
+            if ($mysqli === null) {
+                return $this->restore_fatal('prepare', (string) $connectionError, 30, 'done');
+            }
+
+            try {
+                $mysqli->query('SET FOREIGN_KEY_CHECKS = 0');
+                $this->backup_users_to_temp($mysqli);
+
+                $tables = array();
+                $result = $mysqli->query('SHOW TABLES');
+                if ($result) {
+                    while ($row = $result->fetch_array(MYSQLI_NUM)) {
+                        if (strpos((string) $row[0], '_backup_temp') === false) {
+                            $tables[] = (string) $row[0];
+                        }
+                    }
+                    $result->free();
+                }
+                $state['tables'] = $tables;
+            } catch (\Throwable $e) {
+                $mysqli->close();
+                return $this->restore_fatal('prepare', 'Error preparando la base de datos: ' . $e->getMessage(), 30, 'done');
+            }
+
+            $mysqli->close();
+        }
+
+        $next = $type === 'database' ? 'drop' : 'files';
+        $message = $needsDatabase ? 'Backup preparado. Listo para restaurar.' : 'Archivos preparados para restaurar.';
+        $percent = $needsDatabase ? 58 : 20;
+
+        return $this->restore_unit(true, $next, 'prepare', $message, $percent);
+    }
+
+    /**
+     * Fase files: delega en el restore_files() existente (un solo paso).
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_step_files(array &$state, float $deadline): array
+    {
+        $type = (string) $state['type'];
+        $filesZip = null;
+
+        // Un paquete completo extraído expone los archivos en <temp_dir>/files.
+        if (!empty($state['temp_dir'])) {
+            $filesZip = $this->restore_find_files_zip((string) $state['temp_dir']);
+        }
+
+        // Backup de archivos independiente (_files.zip).
+        if ($filesZip === null) {
+            $candidate = $this->get_backup_file_path((string) $state['file']);
+            if ($candidate && substr($candidate, -4) === '.zip' && strpos(basename($candidate), '_complete.zip') === false) {
+                $filesZip = $candidate;
+            }
+        }
+
+        if ($filesZip === null || !is_file($filesZip)) {
+            return $this->restore_fatal('files', 'No se encontró backup de archivos en el paquete.', 20, 'cleanup');
+        }
+
+        $result = $this->restore_files($filesZip);
+        if (!($result['success'] ?? false)) {
+            return $this->restore_fatal('files', $this->last_error_message('Error al restaurar archivos.'), 20, 'cleanup');
+        }
+
+        $state['files_done'] = true;
+        $next = $type === 'complete' ? 'drop' : 'cleanup';
+
+        return $this->restore_unit(true, $next, 'files', 'Archivos restaurados correctamente.', 50);
+    }
+
+    /**
+     * Fase drop: elimina tablas en lotes de 25.
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_step_drop(array &$state, float $deadline): array
+    {
+        $tables = (array) $state['tables'];
+        $total = count($tables);
+        $index = (int) $state['drop_index'];
+
+        if ($total === 0 || $index >= $total) {
+            $state['drop_index'] = $total;
+            return $this->restore_unit(true, 'import', 'drop', 'No hay tablas pendientes de eliminar.', 65);
+        }
+
+        $connectionError = null;
+        $mysqli = $this->restore_open_mysqli($connectionError);
+        if ($mysqli === null) {
+            return $this->restore_fatal('drop', (string) $connectionError, 60, 'import');
+        }
+
+        try {
+            $mysqli->query('SET FOREIGN_KEY_CHECKS = 0');
+        } catch (\Throwable $e) {
+            $this->errors[] = 'No se pudo desactivar FOREIGN_KEY_CHECKS: ' . $e->getMessage();
+        }
+
+        $processed = 0;
+        do {
+            $table = (string) $tables[$index];
+            try {
+                $this->mysqlHelper->dropTableIfExists($mysqli, $table);
+            } catch (\Throwable $e) {
+                $message = 'Error al eliminar la tabla ' . $table . ': ' . $e->getMessage();
+                $this->errors[] = $message;
+                $state['errors'][] = $message;
+            }
+
+            $index++;
+            $processed++;
+        } while ($index < $total && $processed < 25 && microtime(true) < $deadline);
+
+        $state['drop_index'] = $index;
+        $mysqli->close();
+
+        if ($index >= $total) {
+            return $this->restore_unit(true, 'import', 'drop', 'Tablas eliminadas.', 65);
+        }
+
+        $percent = 60 + (int) floor(($index / max(1, $total)) * 5);
+        return $this->restore_unit(false, 'import', 'drop', 'Eliminando tablas (' . $index . '/' . $total . ')...', min(65, $percent));
+    }
+
+    /**
+     * Fase import: ejecuta el dump por offset de bytes usando el reader seguro.
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_step_import(array &$state, float $deadline): array
+    {
+        $dumpPath = isset($state['dump_path']) ? (string) $state['dump_path'] : '';
+        if ($dumpPath === '' || !is_file($dumpPath)) {
+            return $this->restore_fatal('import', 'No se encontró el dump SQL temporal.', 65, 'cleanup');
+        }
+
+        $connectionError = null;
+        $mysqli = $this->restore_open_mysqli($connectionError);
+        if ($mysqli === null) {
+            return $this->restore_fatal('import', (string) $connectionError, 65, 'cleanup');
+        }
+
+        try {
+            $mysqli->query('SET FOREIGN_KEY_CHECKS = 0');
+            $mysqli->query("SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO'");
+        } catch (\Throwable $e) {
+            $this->errors[] = 'No se pudieron preparar las variables de sesión: ' . $e->getMessage();
+        }
+
+        $reader = new \SystemUpdaterSqlDumpReader($dumpPath);
+        $reader->seek((int) $state['sql_offset']);
+
+        $executed = 0;
+        $eof = false;
+
+        // Al menos una sentencia por paso para garantizar avance con cualquier
+        // presupuesto; luego se corta al agotarlo.
+        do {
+            $statement = $reader->nextStatement();
+            if ($statement === null) {
+                $eof = true;
+                break;
+            }
+
+            $sql = (string) $statement['sql'];
+            if (trim($sql) === '') {
+                continue;
+            }
+
+            try {
+                $mysqli->query($sql);
+            } catch (\Throwable $e) {
+                $message = 'Error SQL: ' . $e->getMessage();
+                $this->errors[] = $message;
+                $state['errors'][] = $message;
+            }
+
+            $executed++;
+            $state['sql_offset'] = $reader->tell();
+        } while (microtime(true) < $deadline);
+
+        $state['sql_offset'] = $reader->tell();
+        $state['statement_count'] = (int) $state['statement_count'] + $executed;
+
+        $mysqli->close();
+
+        if ($eof) {
+            return $this->restore_unit(
+                true,
+                'cleanup',
+                'import',
+                'Importación completada (' . (int) $state['statement_count'] . ' sentencias).',
+                88
+            );
+        }
+
+        $size = (int) @filesize($dumpPath);
+        $fraction = $size > 0 ? min(1.0, ((int) $state['sql_offset']) / $size) : 0.0;
+        $percent = 65 + (int) floor($fraction * 23);
+
+        return $this->restore_unit(
+            false,
+            'cleanup',
+            'import',
+            'Importando sentencias (' . (int) $state['statement_count'] . ')...',
+            min(88, $percent)
+        );
+    }
+
+    /**
+     * Fase cleanup: limpia tablas temporales de usuarios y borra temporales.
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_step_cleanup(array &$state, float $deadline): array
+    {
+        $type = (string) $state['type'];
+
+        if (in_array($type, array('complete', 'database'), true)) {
+            $connectionError = null;
+            $mysqli = $this->restore_open_mysqli($connectionError);
+            if ($mysqli !== null) {
+                try {
+                    $this->cleanup_temp_users($mysqli);
+                } catch (\Throwable $e) {
+                    $this->errors[] = 'No se pudieron limpiar las tablas temporales: ' . $e->getMessage();
+                }
+
+                try {
+                    $mysqli->query('SET FOREIGN_KEY_CHECKS = 1');
+                } catch (\Throwable $e) {
+                    // El ajuste es por conexión; se reaplica en cada paso.
+                }
+
+                $mysqli->close();
+            }
+        }
+
+        if (!empty($state['temp_dir']) && is_dir((string) $state['temp_dir'])) {
+            $this->delete_directory((string) $state['temp_dir']);
+        }
+        if (!empty($state['dump_path']) && is_file((string) $state['dump_path'])) {
+            @unlink((string) $state['dump_path']);
+        }
+
+        $state['temp_dir'] = null;
+        $state['dump_path'] = null;
+
+        return $this->restore_unit(true, 'done', 'cleanup', 'Temporales limpiados.', 95);
+    }
+
+    /**
+     * Construye la respuesta estándar de start/step.
+     *
+     * @return array
+     */
+    private function restore_session_response(bool $ok, bool $done, ?string $error, string $step, string $message, int $percent, array $state): array
+    {
+        return array(
+            'ok' => $ok,
+            'done' => $done,
+            'error' => $error,
+            'progress' => array(
+                'step' => $step,
+                'message' => $message,
+                'percent' => $percent,
+            ),
+            'state' => $state,
+        );
+    }
+
+    /**
+     * @return array
+     */
+    private function restore_session_initial_state(string $sessionId, string $backupFile, string $restoreType): array
+    {
+        $now = time();
+
+        return array(
+            'version' => 1,
+            'session_id' => $sessionId,
+            'type' => $restoreType,
+            'file' => basename($backupFile),
+            'started_at' => $now,
+            'updated_at' => $now,
+            'phase' => 'prepare',
+            'temp_dir' => null,
+            'dump_path' => null,
+            'tables' => array(),
+            'drop_index' => 0,
+            'sql_offset' => 0,
+            'statement_count' => 0,
+            'files_done' => false,
+            'errors' => array(),
+        );
+    }
+
+    /**
+     * Normaliza un estado cargado para garantizar todas las claves esperadas.
+     *
+     * @return array
+     */
+    private function restore_session_normalize(array $state): array
+    {
+        $defaults = array(
+            'version' => 1,
+            'session_id' => '',
+            'type' => 'complete',
+            'file' => '',
+            'started_at' => 0,
+            'updated_at' => 0,
+            'phase' => 'prepare',
+            'temp_dir' => null,
+            'dump_path' => null,
+            'tables' => array(),
+            'drop_index' => 0,
+            'sql_offset' => 0,
+            'statement_count' => 0,
+            'files_done' => false,
+            'errors' => array(),
+        );
+
+        $state = array_merge($defaults, $state);
+        $state['version'] = 1;
+        $state['type'] = in_array($state['type'], array('complete', 'files', 'database'), true) ? $state['type'] : 'complete';
+        $state['file'] = (string) $state['file'];
+        $state['tables'] = is_array($state['tables']) ? array_values(array_map('strval', $state['tables'])) : array();
+        $state['errors'] = is_array($state['errors']) ? array_values(array_map('strval', $state['errors'])) : array();
+        $state['drop_index'] = max(0, (int) $state['drop_index']);
+        $state['sql_offset'] = max(0, (int) $state['sql_offset']);
+        $state['statement_count'] = max(0, (int) $state['statement_count']);
+        $state['files_done'] = (bool) $state['files_done'];
+
+        return $state;
+    }
+
+    /**
+     * Persiste el estado de forma atómica, sin credenciales ni rutas no permitidas.
+     *
+     * @return void
+     */
+    private function restore_session_save(array $state): void
+    {
+        $state['temp_dir'] = $this->restore_session_allowed_path($state['temp_dir']) ? $state['temp_dir'] : null;
+        $state['dump_path'] = $this->restore_session_allowed_path($state['dump_path']) ? $state['dump_path'] : null;
+
+        $file = $this->restore_session_state_file((string) $state['session_id']);
+        $json = json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            return;
+        }
+
+        $tmp = $file . '.tmp';
+        if (@file_put_contents($tmp, $json, LOCK_EX) === false) {
+            return;
+        }
+
+        @rename($tmp, $file);
+    }
+
+    /**
+     * Sólo se admiten rutas dentro del directorio temporal del sistema o de backups.
+     *
+     * @param mixed $path
+     * @return bool
+     */
+    private function restore_session_allowed_path($path): bool
+    {
+        if ($path === null || $path === '') {
+            return true;
+        }
+
+        $path = (string) $path;
+        $roots = array(
+            rtrim(sys_get_temp_dir(), '/\\'),
+            rtrim($this->backupPath, '/\\'),
+        );
+
+        foreach ($roots as $root) {
+            if ($root !== '' && strpos($path, $root . DIRECTORY_SEPARATOR) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return string
+     */
+    private function restore_session_safe_id(string $sessionId): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9_-]/', '', $sessionId);
+        if ($safe === null || $safe === '') {
+            $safe = sha1($sessionId);
+        }
+
+        return $safe;
+    }
+
+    /**
+     * Resuelve el presupuesto del paso (paramétrico > constante > default).
+     *
+     * @return float
+     */
+    private function restore_session_resolve_budget(?float $budget): float
+    {
+        if ($budget !== null && $budget > 0) {
+            return $budget;
+        }
+
+        if (defined('FS_RESTORE_STEP_BUDGET')) {
+            $configured = (float) FS_RESTORE_STEP_BUDGET;
+            if ($configured > 0) {
+                return $configured;
+            }
+        }
+
+        return self::RESTORE_STEP_BUDGET;
+    }
+
+    /**
+     * Porcentaje inicial de la fase actual.
+     *
+     * @return int
+     */
+    private function restore_phase_percent(array $state): int
+    {
+        switch ((string) $state['phase']) {
+            case 'prepare':
+                return 5;
+            case 'files':
+                return 20;
+            case 'drop':
+                return 60;
+            case 'import':
+                return 65;
+            case 'cleanup':
+                return 92;
+            case 'done':
+                return 100;
+            default:
+                return 0;
+        }
+    }
+
+    /**
+     * Unidad de trabajo de una fase.
+     *
+     * @return array
+     */
+    private function restore_unit(bool $complete, string $next, string $step, string $message, int $percent): array
+    {
+        return array(
+            'complete' => $complete,
+            'next' => $next,
+            'step' => $step,
+            'message' => $message,
+            'percent' => $percent,
+            'fatal' => false,
+            'error' => '',
+        );
+    }
+
+    /**
+     * Unidad fatal: registra el error y corta el paso.
+     *
+     * @return array
+     */
+    private function restore_fatal(string $step, string $message, int $percent, string $next): array
+    {
+        $this->errors[] = $message;
+
+        return array(
+            'complete' => false,
+            'next' => $next,
+            'step' => $step,
+            'message' => $message,
+            'percent' => $percent,
+            'fatal' => true,
+            'error' => $message,
+        );
+    }
+
+    /**
+     * Abre una conexión mysqli fresca leyendo credenciales de las constantes FS_DB_*.
+     *
+     * @param string|null $error
+     * @return mysqli|null
+     */
+    private function restore_open_mysqli(?string &$error = null)
+    {
+        $error = null;
+
+        $dbHost = defined('FS_DB_HOST') ? FS_DB_HOST : 'localhost';
+        $dbType = $this->get_database_type();
+        $dbPort = (int) $this->get_database_port($dbType);
+        $dbUser = defined('FS_DB_USER') ? FS_DB_USER : 'root';
+        $dbPass = defined('FS_DB_PASS') ? FS_DB_PASS : '';
+        $dbName = defined('FS_DB_NAME') ? FS_DB_NAME : 'facturascripts';
+
+        try {
+            $mysqli = new \mysqli($dbHost, $dbUser, $dbPass, $dbName, $dbPort);
+        } catch (\Throwable $e) {
+            $error = 'Error de conexión a la base de datos: ' . $e->getMessage();
+            return null;
+        }
+
+        if ($mysqli->connect_error) {
+            $error = 'Error de conexión a la base de datos: ' . $mysqli->connect_error;
+            return null;
+        }
+
+        @$mysqli->set_charset('utf8mb4');
+
+        return $mysqli;
+    }
+
+    /**
+     * Crea un directorio temporal de trabajo para la restauración.
+     *
+     * @return string|null
+     */
+    private function restore_create_temp_dir(string $sessionId): ?string
+    {
+        $dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'fs_restore_'
+            . $this->restore_session_safe_id($sessionId) . '_' . time() . '_' . mt_rand(1000, 9999);
+
+        if (!@mkdir($dir, 0700, true)) {
+            $this->errors[] = 'No se pudo crear el directorio temporal: ' . $dir;
+            return null;
+        }
+
+        return $dir;
+    }
+
+    /**
+     * Descomprime un dump .sql.gz a un archivo .sql en streaming.
+     *
+     * @return bool
+     */
+    private function restore_decompress_sql(string $gzPath, string $dumpPath): bool
+    {
+        $gz = @gzopen($gzPath, 'rb');
+        if (!$gz) {
+            $this->errors[] = 'No se puede abrir el dump comprimido: ' . basename($gzPath);
+            return false;
+        }
+
+        $out = @fopen($dumpPath, 'wb');
+        if (!$out) {
+            gzclose($gz);
+            $this->errors[] = 'No se puede crear el dump temporal: ' . basename($dumpPath);
+            return false;
+        }
+
+        while (!gzeof($gz)) {
+            $chunk = @gzread($gz, 1048576);
+            if ($chunk === false) {
+                break;
+            }
+            if ($chunk !== '') {
+                fwrite($out, $chunk);
+            }
+        }
+
+        gzclose($gz);
+        fclose($out);
+
+        if (!is_file($dumpPath) || filesize($dumpPath) === 0) {
+            $this->errors[] = 'El dump descomprimido quedó vacío.';
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Busca el primer .zip dentro de `<tempDir>/files`.
+     *
+     * @return string|null
+     */
+    private function restore_find_files_zip(?string $tempDir): ?string
+    {
+        if ($tempDir === null || $tempDir === '' || !is_dir($tempDir)) {
+            return null;
+        }
+
+        $filesDir = rtrim($tempDir, '/\\') . DIRECTORY_SEPARATOR . 'files';
+        if (!is_dir($filesDir)) {
+            return null;
+        }
+
+        foreach ((array) scandir($filesDir) as $file) {
+            if (substr((string) $file, -4) === '.zip') {
+                return $filesDir . DIRECTORY_SEPARATOR . $file;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Último error registrado, o un texto de respaldo.
+     *
+     * @return string
+     */
+    private function last_error_message(string $fallback): string
+    {
+        $count = count($this->errors);
+        if ($count > 0) {
+            return (string) $this->errors[$count - 1];
+        }
+
+        return $fallback;
     }
 }
