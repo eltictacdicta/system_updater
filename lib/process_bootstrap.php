@@ -126,7 +126,13 @@ function system_updater_process_init(array $options = []): array
 
     $action = (string) ($_GET['action'] ?? '');
 
-    if ($action === 'start' || $action === 'begin') {
+    // 'begin' y 'chunk' autentican con la sesión del plugin + su CSRF, igual que
+    // 'start'. NO pueden depender de la sesión de la aplicación: cada chunk es un
+    // request nuevo que vuelve a leer la app del disco, y la restauración de
+    // archivos reescribe base/ y src/ a mitad del proceso. Validar contra el
+    // código/sesión recién restaurado dejaba el siguiente chunk con "Sesión no
+    // válida" aunque el token del plugin fuera correcto.
+    if ($action === 'start' || $action === 'begin' || $action === 'chunk') {
         system_updater_start_authenticated_session();
 
         if ($mode === 'sse') {

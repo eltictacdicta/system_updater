@@ -76,12 +76,16 @@ class ProcessRestoreTest extends TestCase
         );
     }
 
-    public function testBeginIsAuthenticatedByTheBootstrap(): void
+    public function testBeginAndChunkAreAuthenticatedByTheBootstrap(): void
     {
+        // chunk NO puede pasar por require_authenticated_session(): cada chunk
+        // relee la app del disco y la restauración de archivos reescribe base/ y
+        // src/, así que la sesión de la aplicación puede quedar inválida a mitad
+        // del proceso aunque el CSRF del plugin sea correcto.
         $this->assertStringContainsString(
-            "\$action === 'start' || \$action === 'begin'",
+            "\$action === 'start' || \$action === 'begin' || \$action === 'chunk'",
             $this->bootstrapSource(),
-            "begin debe recibir sesión autenticada + CSRF como start"
+            "begin y chunk deben recibir sesión del plugin + CSRF como start"
         );
     }
 
