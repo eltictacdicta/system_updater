@@ -3415,6 +3415,12 @@ class backup_manager
             case 'prepare':
                 return $this->restore_step_prepare($state, $deadline);
 
+            case 'decompress':
+                return $this->restore_step_decompress($state, $deadline);
+
+            case 'users':
+                return $this->restore_step_users($state, $deadline);
+
             case 'files':
                 return $this->restore_step_files($state, $deadline);
 
@@ -3442,6 +3448,7 @@ class backup_manager
      */
     private function restore_step_prepare(array &$state, float $deadline): array
     {
+        $startedAt = microtime(true);
         $type = (string) $state['type'];
         $needsDatabase = in_array($type, array('complete', 'database'), true);
 
@@ -3498,46 +3505,139 @@ class backup_manager
                 return $this->restore_fatal('prepare', $message, 5, 'done');
             }
 
-            $dumpPath = rtrim((string) $tempDir, '/\\') . DIRECTORY_SEPARATOR . 'dump.sql';
-            if (!$this->restore_decompress_sql($dbBackupPath, $dumpPath)) {
-                return $this->restore_fatal('prepare', $this->last_error_message('No se pudo descomprimir el dump de base de datos.'), 30, 'done');
-            }
-            $state['dump_path'] = $dumpPath;
-
-            $connectionError = null;
-            $mysqli = $this->restore_open_mysqli($connectionError);
-            if ($mysqli === null) {
-                return $this->restore_fatal('prepare', (string) $connectionError, 30, 'done');
-            }
-
-            try {
-                $mysqli->query('SET FOREIGN_KEY_CHECKS = 0');
-                $this->backup_users_to_temp($mysqli);
-
-                $tables = array();
-                $result = $mysqli->query('SHOW TABLES');
-                if ($result) {
-                    while ($row = $result->fetch_array(MYSQLI_NUM)) {
-                        if (strpos((string) $row[0], '_backup_temp') === false) {
-                            $tables[] = (string) $row[0];
-                        }
-                    }
-                    $result->free();
-                }
-                $state['tables'] = $tables;
-            } catch (\Throwable $e) {
-                $mysqli->close();
-                return $this->restore_fatal('prepare', 'Error preparando la base de datos: ' . $e->getMessage(), 30, 'done');
-            }
-
-            $mysqli->close();
+            // La descompresión y el respaldo de usuarios viven en sus propias
+            // fases (decompress / users): juntarlos acá hacía que un solo
+            // request superara el límite del host y lo mataran.
+            $state['db_backup_path'] = $dbBackupPath;
         }
 
-        $next = $type === 'database' ? 'drop' : 'files';
-        $message = $needsDatabase ? 'Backup preparado. Listo para restaurar.' : 'Archivos preparados para restaurar.';
-        $percent = $needsDatabase ? 58 : 20;
+        if ($needsDatabase) {
+            $next = 'decompress';
+            $message = 'Paquete preparado. Descomprimiendo el dump...';
+        } else {
+            $next = 'files';
+            $message = 'Archivos preparados para restaurar.';
+        }
 
-        return $this->restore_unit(true, $next, 'prepare', $message, $percent);
+        $this->restore_add_warning_if_slow($state, 'prepare', $startedAt, $deadline);
+
+        return $this->restore_unit(true, $next, 'prepare', $message, 20);
+    }
+
+    /**
+     * Fase decompress: descomprime el dump en su propia unidad de trabajo.
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_step_decompress(array &$state, float $deadline): array
+    {
+        $startedAt = microtime(true);
+
+        $dbBackupPath = isset($state['db_backup_path']) ? (string) $state['db_backup_path'] : '';
+        if ($dbBackupPath === '' || !is_file($dbBackupPath)) {
+            return $this->restore_fatal('decompress', 'No se encontró el dump comprimido del backup.', 25, 'done');
+        }
+
+        $tempDir = isset($state['temp_dir']) ? (string) $state['temp_dir'] : '';
+        if ($tempDir === '') {
+            return $this->restore_fatal('decompress', 'No hay directorio temporal para descomprimir el dump.', 25, 'done');
+        }
+
+        $dumpPath = rtrim($tempDir, '/\\') . DIRECTORY_SEPARATOR . 'dump.sql';
+        if (!$this->restore_decompress_sql($dbBackupPath, $dumpPath)) {
+            return $this->restore_fatal(
+                'decompress',
+                $this->last_error_message('No se pudo descomprimir el dump de base de datos.'),
+                25,
+                'done'
+            );
+        }
+
+        $state['dump_path'] = $dumpPath;
+        $this->restore_add_warning_if_slow($state, 'decompress', $startedAt, $deadline);
+
+        return $this->restore_unit(true, 'users', 'decompress', 'Dump descomprimido.', 30);
+    }
+
+    /**
+     * Fase users: respalda las tablas de usuarios y lista las tablas a eliminar.
+     *
+     * @param array $state
+     * @param float $deadline
+     * @return array
+     */
+    private function restore_step_users(array &$state, float $deadline): array
+    {
+        $startedAt = microtime(true);
+
+        $connectionError = null;
+        $mysqli = $this->restore_open_mysqli($connectionError);
+        if ($mysqli === null) {
+            return $this->restore_fatal('users', (string) $connectionError, 30, 'done');
+        }
+
+        try {
+            $mysqli->query('SET FOREIGN_KEY_CHECKS = 0');
+            $this->backup_users_to_temp($mysqli);
+
+            $tables = array();
+            $result = $mysqli->query('SHOW TABLES');
+            if ($result) {
+                while ($row = $result->fetch_array(MYSQLI_NUM)) {
+                    if (strpos((string) $row[0], '_backup_temp') === false) {
+                        $tables[] = (string) $row[0];
+                    }
+                }
+                $result->free();
+            }
+            $state['tables'] = $tables;
+        } catch (\Throwable $e) {
+            $mysqli->close();
+            return $this->restore_fatal('users', 'Error preparando la base de datos: ' . $e->getMessage(), 30, 'done');
+        }
+
+        $mysqli->close();
+        $this->restore_add_warning_if_slow($state, 'users', $startedAt, $deadline);
+
+        return $this->restore_unit(
+            true,
+            ((string) $state['type'] === 'complete') ? 'files' : 'drop',
+            'users',
+            'Usuarios respaldados y tablas listadas (' . count($state['tables']) . ').',
+            58
+        );
+    }
+
+    /**
+     * Registra una advertencia cuando una fase no interrumpible supera el
+     * presupuesto: no se puede cortar a la mitad, así que queda visible.
+     *
+     * @param array $state
+     * @param string $phase
+     * @param float $startedAt
+     * @param float $deadline
+     * @return void
+     */
+    private function restore_add_warning_if_slow(array &$state, string $phase, float $startedAt, float $deadline): void
+    {
+        $elapsed = microtime(true) - $startedAt;
+        $budget = max(0.0, $deadline - $startedAt);
+        if ($elapsed <= $budget) {
+            return;
+        }
+
+        $message = sprintf(
+            'La fase "%s" tardó %.1fs y superó el presupuesto de %.1fs; es una operación no interrumpible.',
+            $phase,
+            $elapsed,
+            $budget
+        );
+
+        if (!in_array($message, $state['warnings'], true)) {
+            $state['warnings'][] = $message;
+        }
     }
 
     /**
@@ -3549,6 +3649,7 @@ class backup_manager
      */
     private function restore_step_files(array &$state, float $deadline): array
     {
+        $startedAt = microtime(true);
         $type = (string) $state['type'];
         $filesZip = null;
 
@@ -3576,6 +3677,7 @@ class backup_manager
 
         $state['files_done'] = true;
         $next = $type === 'complete' ? 'drop' : 'cleanup';
+        $this->restore_add_warning_if_slow($state, 'files', $startedAt, $deadline);
 
         return $this->restore_unit(true, $next, 'files', 'Archivos restaurados correctamente.', 50);
     }
@@ -3664,9 +3766,8 @@ class backup_manager
         }
 
         $reader = new \SystemUpdaterSqlDumpReader($dumpPath);
-        $reader->seek((int) $state['sql_offset']);
+        $reader->seek((int) $state['sql_offset'], (string) $state['delimiter']);
 
-        $executed = 0;
         $eof = false;
 
         // Al menos una sentencia por paso para garantizar avance con cualquier
@@ -3691,12 +3792,30 @@ class backup_manager
                 $state['errors'][] = $message;
             }
 
-            $executed++;
             $state['sql_offset'] = $reader->tell();
+            $state['delimiter'] = $reader->delimiter();
+            // El contador se incrementa DENTRO del bucle para que el checkpoint
+            // por sentencia lo persista: si no, tras un kill quedaba en 0 aunque
+            // el offset ya hubiera avanzado.
+            $state['statement_count'] = (int) $state['statement_count'] + 1;
+
+            // Checkpoint POR SENTENCIA. Si el host mata el proceso a mitad de
+            // paso, el próximo chunk reanuda desde acá. Residual honesto: como
+            // máximo la sentencia en vuelo puede reejecutarse. Antes el estado
+            // se guardaba sólo al final del paso, así que un kill reejecutaba
+            // TODAS las sentencias del paso (filas duplicadas).
+            $state['updated_at'] = time();
+            $this->restore_session_save($state);
         } while (microtime(true) < $deadline);
 
         $state['sql_offset'] = $reader->tell();
-        $state['statement_count'] = (int) $state['statement_count'] + $executed;
+        $state['delimiter'] = $reader->delimiter();
+
+        foreach ($reader->issues() as $issue) {
+            if (!in_array($issue, $state['warnings'], true)) {
+                $state['warnings'][] = $issue;
+            }
+        }
 
         $mysqli->close();
 
@@ -3804,12 +3923,15 @@ class backup_manager
             'phase' => 'prepare',
             'temp_dir' => null,
             'dump_path' => null,
+            'db_backup_path' => null,
             'tables' => array(),
             'drop_index' => 0,
             'sql_offset' => 0,
+            'delimiter' => ';',
             'statement_count' => 0,
             'files_done' => false,
             'errors' => array(),
+            'warnings' => array(),
         );
     }
 
@@ -3830,12 +3952,15 @@ class backup_manager
             'phase' => 'prepare',
             'temp_dir' => null,
             'dump_path' => null,
+            'db_backup_path' => null,
             'tables' => array(),
             'drop_index' => 0,
             'sql_offset' => 0,
+            'delimiter' => ';',
             'statement_count' => 0,
             'files_done' => false,
             'errors' => array(),
+            'warnings' => array(),
         );
 
         $state = array_merge($defaults, $state);
@@ -3844,6 +3969,8 @@ class backup_manager
         $state['file'] = (string) $state['file'];
         $state['tables'] = is_array($state['tables']) ? array_values(array_map('strval', $state['tables'])) : array();
         $state['errors'] = is_array($state['errors']) ? array_values(array_map('strval', $state['errors'])) : array();
+        $state['warnings'] = is_array($state['warnings']) ? array_values(array_map('strval', $state['warnings'])) : array();
+        $state['delimiter'] = trim((string) $state['delimiter']) === '' ? ';' : (string) $state['delimiter'];
         $state['drop_index'] = max(0, (int) $state['drop_index']);
         $state['sql_offset'] = max(0, (int) $state['sql_offset']);
         $state['statement_count'] = max(0, (int) $state['statement_count']);
@@ -3861,6 +3988,9 @@ class backup_manager
     {
         $state['temp_dir'] = $this->restore_session_allowed_path($state['temp_dir']) ? $state['temp_dir'] : null;
         $state['dump_path'] = $this->restore_session_allowed_path($state['dump_path']) ? $state['dump_path'] : null;
+        $state['db_backup_path'] = $this->restore_session_allowed_path($state['db_backup_path'] ?? null)
+            ? $state['db_backup_path']
+            : null;
 
         $file = $this->restore_session_state_file((string) $state['session_id']);
         $json = json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -3873,6 +4003,9 @@ class backup_manager
             return;
         }
 
+        // El estado no lleva credenciales, pero el nombre es predecible en el
+        // directorio temporal compartido: se restringe a 0600.
+        @chmod($tmp, 0600);
         @rename($tmp, $file);
     }
 
@@ -3947,8 +4080,12 @@ class backup_manager
         switch ((string) $state['phase']) {
             case 'prepare':
                 return 5;
+            case 'decompress':
+                return 25;
+            case 'users':
+                return 30;
             case 'files':
-                return 20;
+                return 30;
             case 'drop':
                 return 60;
             case 'import':

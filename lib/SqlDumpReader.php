@@ -72,6 +72,14 @@ class SystemUpdaterSqlDumpReader
     private $inBlockComment = false;
 
     /**
+     * Anomalías no fatales del dump que el import debe reportar en vez de
+     * resolver en silencio (por ejemplo, varias sentencias en una línea).
+     *
+     * @var list<string>
+     */
+    private $issues = array();
+
+    /**
      * @param string $path Ruta al archivo SQL.
      */
     public function __construct(string $path)
@@ -94,7 +102,7 @@ class SystemUpdaterSqlDumpReader
      * @param int $offset
      * @return void
      */
-    public function seek(int $offset): void
+    public function seek(int $offset, ?string $delimiter = null): void
     {
         if ($offset < 0) {
             $offset = 0;
@@ -109,11 +117,33 @@ class SystemUpdaterSqlDumpReader
         }
 
         fseek($this->handle, $offset, SEEK_SET);
-        $this->delimiter = ';';
+        $this->delimiter = ($delimiter === null || $delimiter === '') ? ';' : $delimiter;
         $this->buffer = '';
         $this->inBlockComment = false;
         $this->resumeOffset = $offset;
         $this->lastOffsetAfter = $offset;
+    }
+
+    /**
+     * Delimitador vigente. Hay que persistirlo entre pasos: si se reanuda
+     * dentro de una región con DELIMITER custom y se vuelve a `;`, la sentencia
+     * siguiente se corta mal.
+     *
+     * @return string
+     */
+    public function delimiter(): string
+    {
+        return $this->delimiter;
+    }
+
+    /**
+     * Anomalías detectadas durante la lectura.
+     *
+     * @return list<string>
+     */
+    public function issues(): array
+    {
+        return $this->issues;
     }
 
     /**
@@ -212,17 +242,33 @@ class SystemUpdaterSqlDumpReader
                 continue;
             }
 
-            // Comentarios de bloque reales (no condicionales).
+            // Comentarios de bloque reales (no condicionales). Si el bloque
+            // cierra en la misma línea se conserva el SQL que venga después;
+            // antes se descartaba la línea entera y se perdía la sentencia.
             if (strpos($trimmed, '/*') === 0 && strpos($trimmed, '/*!') !== 0) {
                 if (strpos($line, '*/') === false) {
                     $this->inBlockComment = true;
-                }
-                if ($this->buffer === '') {
-                    $this->advanceSafeOffset();
+                    if ($this->buffer === '') {
+                        $this->advanceSafeOffset();
+                        continue;
+                    }
+                    $this->buffer .= $line;
                     continue;
                 }
-                $this->buffer .= $line;
-                continue;
+
+                $remainder = substr($line, strpos($line, '*/') + 2);
+                if (trim($remainder) === '') {
+                    if ($this->buffer === '') {
+                        $this->advanceSafeOffset();
+                    } else {
+                        $this->buffer .= $line;
+                    }
+                    continue;
+                }
+
+                $line = $remainder;
+                $rtrimmed = rtrim($line, "\r\n");
+                $trimmed = trim($rtrimmed);
             }
 
             // Línea SQL real: acumular.
@@ -236,6 +282,18 @@ class SystemUpdaterSqlDumpReader
 
             $sql = trim(substr($rtrimmedBuffer, 0, -$delimiterLength));
             $this->buffer = '';
+
+            // Varias sentencias en una misma línea física: no se parten (haría
+            // falta un parser con estado de comillas y debilitaría el
+            // invariante de reanudación exacta de la cola pendiente). Se
+            // reporta para que el import lo muestre en vez de perderlas en
+            // silencio.
+            if ($this->findUnquotedDelimiter($sql) !== null) {
+                $this->addIssue(
+                    'El dump tiene varias sentencias en una misma línea física (offset '
+                    . $lineStart . '): se importa como una sola y MySQL la rechazará.'
+                );
+            }
 
             $offsetAfter = ftell($this->handle);
             if ($offsetAfter === false) {
@@ -255,6 +313,70 @@ class SystemUpdaterSqlDumpReader
                 'offset_after' => $offsetAfter,
             );
         }
+    }
+
+    /**
+     * Registra una anomalía una sola vez.
+     *
+     * @param string $message
+     * @return void
+     */
+    private function addIssue(string $message): void
+    {
+        if (in_array($message, $this->issues, true)) {
+            return;
+        }
+
+        $this->issues[] = $message;
+    }
+
+    /**
+     * Busca el delimitador vigente fuera de comillas simples, dobles o backticks.
+     * Sirve para detectar varias sentencias en una línea sin confundirse con un
+     * `;` dentro de un literal.
+     *
+     * @param string $text
+     * @return int|null
+     */
+    private function findUnquotedDelimiter(string $text): ?int
+    {
+        $delimiterLength = strlen($this->delimiter);
+        if ($delimiterLength === 0) {
+            return null;
+        }
+
+        $length = strlen($text);
+        $quote = '';
+
+        for ($i = 0; $i < $length; $i++) {
+            $char = $text[$i];
+
+            if ($quote !== '') {
+                if ($char === '\\' && $quote !== '`') {
+                    $i++;
+                    continue;
+                }
+                if ($char === $quote) {
+                    if ($i + 1 < $length && $text[$i + 1] === $quote) {
+                        $i++;
+                        continue;
+                    }
+                    $quote = '';
+                }
+                continue;
+            }
+
+            if ($char === "'" || $char === '"' || $char === '`') {
+                $quote = $char;
+                continue;
+            }
+
+            if (substr($text, $i, $delimiterLength) === $this->delimiter) {
+                return $i;
+            }
+        }
+
+        return null;
     }
 
     /**

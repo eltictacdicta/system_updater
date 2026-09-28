@@ -195,4 +195,114 @@ class SqlDumpReaderTest extends TestCase
         $this->assertSame(0, $reader->tell());
         $this->assertSame(0, $reader->statementCount());
     }
+
+    public function testSeekRestoresCustomDelimiterOnResume(): void
+    {
+        $sql = "DELIMITER //\n"
+            . "CREATE PROCEDURE p() BEGIN SELECT 1; END//\n"
+            . "SELECT 20//\n"
+            . "SELECT 30//\n";
+        $path = $this->writeSql($sql);
+
+        $first = new \SystemUpdaterSqlDumpReader($path);
+        $statement = $first->nextStatement();
+        $this->assertNotNull($statement);
+        $this->assertSame('CREATE PROCEDURE p() BEGIN SELECT 1; END', $statement['sql']);
+        $this->assertSame('//', $first->delimiter(), 'debe exponer el delimitador vigente');
+
+        $offset = $first->tell();
+        $delimiter = $first->delimiter();
+        unset($first);
+
+        $resumed = new \SystemUpdaterSqlDumpReader($path);
+        $resumed->seek($offset, $delimiter);
+
+        $second = $resumed->nextStatement();
+        $this->assertNotNull($second);
+        $this->assertSame('SELECT 20', $second['sql'], 'reanudar no debe corromper la sentencia');
+
+        $third = $resumed->nextStatement();
+        $this->assertNotNull($third);
+        $this->assertSame('SELECT 30', $third['sql']);
+    }
+
+    public function testBlockCommentWithTrailingSqlKeepsTheStatement(): void
+    {
+        $statements = $this->readAll($this->writeSql("/* comentario */ SELECT 1;\nSELECT 2;\n"));
+
+        $this->assertCount(2, $statements);
+        $this->assertSame('SELECT 1', $statements[0]['sql']);
+        $this->assertSame('SELECT 2', $statements[1]['sql']);
+    }
+
+    public function testMultipleStatementsOnOneLineAreReported(): void
+    {
+        $reader = new \SystemUpdaterSqlDumpReader($this->writeSql("SELECT 1; SELECT 2;\n"));
+
+        $statement = $reader->nextStatement();
+        $this->assertNotNull($statement);
+        $this->assertNotEmpty(
+            $reader->issues(),
+            'una línea con dos sentencias debe reportarse en vez de perderse en silencio'
+        );
+    }
+
+    public function testUnquotedDelimiterInsideStringIsNotReported(): void
+    {
+        $reader = new \SystemUpdaterSqlDumpReader(
+            $this->writeSql("INSERT INTO t VALUES ('a;b');\n")
+        );
+
+        $statement = $reader->nextStatement();
+        $this->assertNotNull($statement);
+        $this->assertSame("INSERT INTO t VALUES ('a;b')", $statement['sql']);
+        $this->assertSame([], $reader->issues(), 'un ; dentro de un literal no es multi-sentencia');
+    }
+
+    public function testEofWithoutTrailingDelimiterStillReturnsTheStatement(): void
+    {
+        $statements = $this->readAll($this->writeSql('SELECT 1'));
+
+        $this->assertCount(1, $statements);
+        $this->assertSame('SELECT 1', $statements[0]['sql']);
+    }
+
+    public function testEmptyFileProducesNoStatements(): void
+    {
+        $reader = new \SystemUpdaterSqlDumpReader($this->writeSql(''));
+
+        $this->assertNull($reader->nextStatement());
+        $this->assertSame(0, $reader->tell());
+        $this->assertSame(0, $reader->statementCount());
+    }
+
+    public function testCommentsOnlyFileProducesNoStatements(): void
+    {
+        $reader = new \SystemUpdaterSqlDumpReader(
+            $this->writeSql("-- uno\n/* dos */\n\n-- tres\n")
+        );
+
+        $this->assertNull($reader->nextStatement());
+        $this->assertSame(0, $reader->statementCount());
+        $this->assertSame(strlen("-- uno\n/* dos */\n\n-- tres\n"), $reader->tell());
+    }
+
+    public function testResumeExactlyAtEofReturnsNull(): void
+    {
+        $sql = "SELECT 1;\nSELECT 2;\n";
+        $path = $this->writeSql($sql);
+
+        $reader = new \SystemUpdaterSqlDumpReader($path);
+        $this->readAllStatements($reader);
+
+        $reader->seek(strlen($sql));
+        $this->assertNull($reader->nextStatement());
+        $this->assertSame(strlen($sql), $reader->tell());
+    }
+
+    private function readAllStatements(\SystemUpdaterSqlDumpReader $reader): void
+    {
+        while ($reader->nextStatement() !== null) {
+        }
+    }
 }
