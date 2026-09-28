@@ -2,6 +2,7 @@
 
 namespace Tests\SystemUpdater;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
@@ -294,5 +295,57 @@ class RestoreSessionStateTest extends TestCase
 
         $this->assertSame(2, $response['progress']['errors_count']);
         $this->assertSame(1, $response['progress']['warnings_count']);
+        $this->assertSame(['uno', 'dos'], $response['progress']['errors']);
+        $this->assertSame(['aviso'], $response['progress']['warnings']);
+    }
+
+    public function testResponseBoundsTheErrorDetail(): void
+    {
+        $errors = [];
+        for ($i = 1; $i <= 25; $i++) {
+            $errors[] = 'error ' . $i;
+        }
+
+        $state = $this->invoke('restore_session_normalize', [['errors' => $errors]]);
+        $response = $this->invoke('restore_session_response', [true, false, null, 'import', 'ok', 50, $state]);
+
+        $this->assertSame(25, $response['progress']['errors_count'], 'el contador es el total');
+        $this->assertCount(10, $response['progress']['errors'], 'el detalle va acotado');
+        $this->assertSame('error 25', $response['progress']['errors'][9], 'debe traer los últimos');
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function transactionControlProvider(): array
+    {
+        return [
+            'start transaction' => ['START TRANSACTION', true],
+            'start transaction minuscula' => ['start transaction', true],
+            'begin' => ['BEGIN', true],
+            'begin work' => ['BEGIN WORK', true],
+            'commit' => ['COMMIT', true],
+            'rollback' => ['ROLLBACK', true],
+            'set autocommit 0' => ['SET AUTOCOMMIT = 0', true],
+            'set autocommit sin espacios' => ['SET autocommit=0', true],
+            'set session autocommit' => ['SET SESSION autocommit = 0', true],
+            'set global autocommit' => ['SET GLOBAL autocommit = 0', true],
+            'foreign key checks' => ['SET FOREIGN_KEY_CHECKS = 0', false],
+            'sql mode' => ['SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO"', false],
+            'time zone' => ['SET time_zone = "+00:00"', false],
+            'insert' => ["INSERT INTO t VALUES (1)", false],
+            'create table' => ['CREATE TABLE t (id INT)', false],
+            'commit como prefijo de otra cosa' => ['COMMIT_TABLE', false],
+        ];
+    }
+
+    #[DataProvider('transactionControlProvider')]
+    public function testDetectsTransactionControlStatements(string $sql, bool $expected): void
+    {
+        $this->assertSame(
+            $expected,
+            (bool) $this->invoke('restore_is_transaction_control', [$sql]),
+            'clasificación incorrecta para: ' . $sql
+        );
     }
 }

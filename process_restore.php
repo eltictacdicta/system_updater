@@ -84,6 +84,8 @@ function system_updater_emit_restore_progress(string $progressFile, array $resul
     $data['done'] = !empty($result['done']);
     $data['errors_count'] = (int) ($progress['errors_count'] ?? 0);
     $data['warnings_count'] = (int) ($progress['warnings_count'] ?? 0);
+    $data['errors'] = array_slice((array) ($progress['errors'] ?? array()), -10);
+    $data['warnings'] = array_slice((array) ($progress['warnings'] ?? array()), -10);
 
     system_updater_send_sse('progress', $data);
 }
@@ -308,6 +310,8 @@ switch ($action) {
                 'done' => !empty($result['done']),
                 'errors' => (int) ($result['progress']['errors_count'] ?? 0),
                 'warnings' => (int) ($result['progress']['warnings_count'] ?? 0),
+                'last_errors' => array_slice((array) ($result['progress']['errors'] ?? array()), -3),
+                'last_warnings' => array_slice((array) ($result['progress']['warnings'] ?? array()), -3),
                 'sql_offset' => (int) ($result['state']['sql_offset'] ?? 0),
                 'statements' => (int) ($result['state']['statement_count'] ?? 0),
             ]);
@@ -322,6 +326,8 @@ switch ($action) {
                 system_updater_send_sse('error', [
                     'message' => (string) ($result['error'] ?? 'Error durante la restauración.'),
                     'percent' => (int) ($result['progress']['percent'] ?? 0),
+                    'errors' => array_slice((array) ($result['progress']['errors'] ?? array()), -10),
+                    'warnings' => array_slice((array) ($result['progress']['warnings'] ?? array()), -10),
                 ]);
             }
         } finally {

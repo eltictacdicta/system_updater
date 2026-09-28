@@ -82,4 +82,15 @@ class RestoreSteppedUiTest extends TestCase
         $this->assertStringContainsString("evt.data.step === 'busy'", $source);
         $this->assertStringContainsString("}, 2000);", $source);
     }
+
+    public function testMuestraElDetalleDeErroresYNoSoloElContador(): void
+    {
+        $source = $this->viewSource();
+
+        $this->assertStringContainsString('function logRestoreDetail(payload)', $source);
+        $this->assertStringContainsString('payload.errors', $source);
+        $this->assertStringContainsString('payload.warnings', $source);
+        $this->assertStringContainsString('logRestoreDetail(doneData);', $source);
+        $this->assertStringContainsString('logRestoreDetail(errorData);', $source);
+    }
 }

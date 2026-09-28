@@ -1190,6 +1190,7 @@ $(document).ready(function() {
             }
 
             if (errorData) {
+                logRestoreDetail(errorData);
                 finishRestoreAsError(
                     errorData.message || 'La restauración falló.',
                     errorData.percent || 0
@@ -1200,8 +1201,12 @@ $(document).ready(function() {
             if (doneData) {
                 // Terminar con errores SQL no es un éxito aunque el proceso haya acabado.
                 if ((doneData.errors_count || 0) > 0) {
+                    logRestoreDetail(doneData);
                     finishRestoreAsError(doneData.message, 100);
                     return;
+                }
+                if ((doneData.warnings_count || 0) > 0) {
+                    logRestoreDetail(doneData);
                 }
                 finishRestoreAsSuccess(doneData.warnings_count || 0);
                 return;
@@ -1269,6 +1274,21 @@ $(document).ready(function() {
         }
 
         return events;
+    }
+
+    // Vuelca el detalle de errores y avisos al panel. Un contador sin los
+    // mensajes no le sirve al operador para saber qué falló.
+    function logRestoreDetail(payload) {
+        var errors = payload.errors || [];
+        var warnings = payload.warnings || [];
+
+        for (var i = 0; i < errors.length; i++) {
+            addLogEntry('   ✗ ' + errors[i]);
+        }
+
+        for (var j = 0; j < warnings.length; j++) {
+            addLogEntry('   ⚠ ' + warnings[j]);
+        }
     }
 
     function finishRestoreAsSuccess(warningCount) {

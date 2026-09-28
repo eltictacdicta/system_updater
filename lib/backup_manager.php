@@ -3796,6 +3796,10 @@ class backup_manager
         try {
             $mysqli->query('SET FOREIGN_KEY_CHECKS = 0');
             $mysqli->query("SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO'");
+            // Cada paso usa una conexión propia. Si el dump deja `autocommit=0`
+            // y abre una transacción, al cerrar la conexión MySQL revierte todo
+            // lo ejecutado en el paso: se perdían las filas del primer tramo.
+            $mysqli->query('SET SESSION autocommit = 1');
         } catch (\Throwable $e) {
             $this->errors[] = 'No se pudieron preparar las variables de sesión: ' . $e->getMessage();
         }
@@ -3819,12 +3823,18 @@ class backup_manager
                 continue;
             }
 
-            try {
-                $mysqli->query($sql);
-            } catch (\Throwable $e) {
-                $message = 'Error SQL: ' . $e->getMessage();
-                $this->errors[] = $message;
-                $state['errors'][] = $message;
+            // El control transaccional del dump no aplica a un import por pasos:
+            // cada paso es otra conexión y no puede ser atómico. Ejecutarlo
+            // dejaría trabajo sin commitear que MySQL revierte al cerrar la
+            // conexión. Se neutraliza y el import queda durable por sentencia.
+            if (!$this->restore_is_transaction_control($sql)) {
+                try {
+                    $mysqli->query($sql);
+                } catch (\Throwable $e) {
+                    $message = 'Error SQL: ' . $e->getMessage();
+                    $this->errors[] = $message;
+                    $state['errors'][] = $message;
+                }
             }
 
             $state['sql_offset'] = $reader->tell();
@@ -3875,6 +3885,28 @@ class backup_manager
             'Importando sentencias (' . (int) $state['statement_count'] . ')...',
             min(88, $percent)
         );
+    }
+
+    /**
+     * Indica si una sentencia del dump sólo controla transacciones.
+     *
+     * El import por pasos usa una conexión por paso y no puede ser atómico, así
+     * que `START TRANSACTION` / `COMMIT` / `ROLLBACK` / `SET AUTOCOMMIT` del dump
+     * se neutralizan: ejecutarlos dejaría trabajo sin commitear que MySQL
+     * revierte al cerrar la conexión del paso.
+     *
+     * @param string $sql
+     * @return bool
+     */
+    private function restore_is_transaction_control(string $sql): bool
+    {
+        $normalized = strtoupper((string) preg_replace('/\s+/', ' ', trim($sql)));
+
+        if (in_array($normalized, array('START TRANSACTION', 'BEGIN', 'BEGIN WORK', 'COMMIT', 'ROLLBACK'), true)) {
+            return true;
+        }
+
+        return (bool) preg_match('/^SET\s+(SESSION\s+|GLOBAL\s+|LOCAL\s+)?AUTOCOMMIT\s*=/', $normalized);
     }
 
     /**
@@ -3949,6 +3981,10 @@ class backup_manager
                 'percent' => $percent,
                 'errors_count' => count((array) ($state['errors'] ?? array())),
                 'warnings_count' => count((array) ($state['warnings'] ?? array())),
+                // Detalle acotado: un contador sin los mensajes no le sirve al
+                // operador para saber qué falló.
+                'errors' => array_slice(array_values((array) ($state['errors'] ?? array())), -10),
+                'warnings' => array_slice(array_values((array) ($state['warnings'] ?? array())), -10),
             ),
             'state' => $state,
         );
