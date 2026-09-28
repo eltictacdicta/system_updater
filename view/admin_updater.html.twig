@@ -1155,26 +1155,56 @@ $(document).ready(function() {
         }).then(function(body) {
             var events = parseRestoreSseEvents(body);
             var sawProgress = false;
+            var doneData = null;
+            var errorData = null;
+            var busy = false;
 
             for (var i = 0; i < events.length; i++) {
                 var evt = events[i];
 
                 if (evt.event === 'progress') {
                     sawProgress = true;
+
+                    if (evt.data.step === 'busy') {
+                        busy = true;
+                        continue;
+                    }
+
                     updateProgress(evt.data.percent || 0, evt.data.message);
                     addLogEntry(evt.data.message);
 
                     if (evt.data.done) {
-                        finishRestoreAsSuccess();
-                        return;
+                        doneData = evt.data;
                     }
                 } else if (evt.event === 'error') {
-                    finishRestoreAsError(
-                        evt.data.message || 'La restauración falló.',
-                        evt.data.percent || 0
-                    );
+                    errorData = evt.data;
+                }
+            }
+
+            // Otro proceso tiene el lock del estado: no es un fallo, es esperar.
+            if (busy && !doneData && !errorData) {
+                window.setTimeout(function() {
+                    runRestoreStep('chunk');
+                }, 2000);
+                return;
+            }
+
+            if (errorData) {
+                finishRestoreAsError(
+                    errorData.message || 'La restauración falló.',
+                    errorData.percent || 0
+                );
+                return;
+            }
+
+            if (doneData) {
+                // Terminar con errores SQL no es un éxito aunque el proceso haya acabado.
+                if ((doneData.errors_count || 0) > 0) {
+                    finishRestoreAsError(doneData.message, 100);
                     return;
                 }
+                finishRestoreAsSuccess(doneData.warnings_count || 0);
+                return;
             }
 
             if (!sawProgress) {
@@ -1201,9 +1231,9 @@ $(document).ready(function() {
             }
 
             finishRestoreAsError(
-                'No se pudo continuar tras varios intentos (' + error.message + '). El avance queda guardado: '
-                + 'volvé a iniciar la restauración para reanudar desde el último punto. Si el sitio quedó en '
-                + 'mantenimiento, se libera solo al usar el panel.'
+                'No se pudo continuar tras varios intentos (' + error.message + '). El avance queda guardado en el '
+                + 'servidor, pero volver a iniciar la restauración la reinicia desde el principio. Si el sitio quedó '
+                + 'en mantenimiento, se libera solo al usar el panel.'
             );
         });
     }
@@ -1241,10 +1271,16 @@ $(document).ready(function() {
         return events;
     }
 
-    function finishRestoreAsSuccess() {
+    function finishRestoreAsSuccess(warningCount) {
         restoreFinished = true;
-        updateProgress(100, '¡Restauración completada con éxito!', 'success');
-        addLogEntry('✓ Restauración completada con éxito');
+
+        var message = '¡Restauración completada con éxito!';
+        if (warningCount > 0) {
+            message += ' (' + warningCount + ' aviso(s) en el registro)';
+        }
+
+        updateProgress(100, message, 'success');
+        addLogEntry('✓ ' + message);
         $('#restoreCompleteBtn').show();
     }
 

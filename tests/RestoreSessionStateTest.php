@@ -258,4 +258,41 @@ class RestoreSessionStateTest extends TestCase
         $this->assertSame(5.0, (float) $this->invoke('restore_session_resolve_budget', [null]));
         $this->assertSame(5.0, (float) $this->invoke('restore_session_resolve_budget', [0.0]));
     }
+
+    public function testSaveSurvivesInvalidUtf8InMessages(): void
+    {
+        $sessionId = $this->uniqueSessionId();
+        $state = $this->invoke('restore_session_normalize', [[
+            'session_id' => $sessionId,
+            'phase' => 'import',
+            'sql_offset' => 120,
+            // Bytes inválidos: sin JSON_INVALID_UTF8_SUBSTITUTE el guardado
+            // fallaba en silencio y el chunk siguiente reejecutaba sentencias.
+            'errors' => ["Error SQL: \xB0\xC0\xFE latin1"],
+        ]]);
+
+        $this->invoke('restore_session_save', [$state]);
+
+        $file = $this->manager->restore_session_state_file($sessionId);
+        $this->assertFileExists($file);
+        $this->assertNotFalse(json_decode((string) file_get_contents($file), true));
+
+        $loaded = $this->manager->restore_session_load($sessionId);
+        $this->assertNotNull($loaded);
+        $this->assertSame(120, $loaded['sql_offset']);
+        $this->assertNotEmpty($loaded['errors']);
+    }
+
+    public function testResponseExposesErrorAndWarningCounts(): void
+    {
+        $state = $this->invoke('restore_session_normalize', [[
+            'errors' => ['uno', 'dos'],
+            'warnings' => ['aviso'],
+        ]]);
+
+        $response = $this->invoke('restore_session_response', [true, false, null, 'import', 'ok', 50, $state]);
+
+        $this->assertSame(2, $response['progress']['errors_count']);
+        $this->assertSame(1, $response['progress']['warnings_count']);
+    }
 }

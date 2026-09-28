@@ -3321,6 +3321,19 @@ class backup_manager
                 $lastPercent = (int) $unit['percent'];
 
                 if (!empty($unit['fatal'])) {
+                    // Un fallo fatal no ejecuta cleanup: sin esto quedaban en
+                    // disco el paquete extraído y el dump descomprimido (gigas
+                    // invisibles para el operador).
+                    if (!empty($state['temp_dir']) && is_dir((string) $state['temp_dir'])) {
+                        $this->delete_directory((string) $state['temp_dir']);
+                    }
+                    if (!empty($state['dump_path']) && is_file((string) $state['dump_path'])) {
+                        @unlink((string) $state['dump_path']);
+                    }
+                    $state['temp_dir'] = null;
+                    $state['dump_path'] = null;
+                    $state['db_backup_path'] = null;
+
                     $state['updated_at'] = time();
                     $this->restore_session_save($state);
                     return $this->restore_session_response(
@@ -3348,12 +3361,34 @@ class backup_manager
         }
 
         $done = ($state['phase'] === 'done');
+        $errorCount = count((array) $state['errors']);
 
         if ($done) {
             $state['done'] = true;
             $lastStep = 'done';
-            $lastMessage = 'Restauración completada correctamente.';
             $lastPercent = 100;
+            $lastMessage = $errorCount > 0
+                ? 'Restauración terminada con ' . $errorCount . ' error(es). Revisá el detalle antes de dar por buena la copia.'
+                : 'Restauración completada correctamente.';
+            // Terminar con errores NO es un éxito: el endpoint y la UI tienen
+            // que poder distinguirlo, si no se reporta como copia buena una
+            // importación incompleta. En ese caso se conserva el estado para
+            // que el operador pueda leer los errores.
+            if ($errorCount > 0) {
+                $state['updated_at'] = time();
+                $this->restore_session_save($state);
+
+                return $this->restore_session_response(
+                    false,
+                    true,
+                    $lastMessage,
+                    $lastStep,
+                    $lastMessage,
+                    $lastPercent,
+                    $state
+                );
+            }
+
             $this->restore_session_forget((string) $state['session_id']);
         } else {
             $state['updated_at'] = time();
@@ -3852,13 +3887,24 @@ class backup_manager
     private function restore_step_cleanup(array &$state, float $deadline): array
     {
         $type = (string) $state['type'];
+        $errorCount = count((array) $state['errors']);
 
         if (in_array($type, array('complete', 'database'), true)) {
             $connectionError = null;
             $mysqli = $this->restore_open_mysqli($connectionError);
             if ($mysqli !== null) {
                 try {
-                    $this->cleanup_temp_users($mysqli);
+                    if ($errorCount > 0) {
+                        // Mismo criterio que el flujo legacy: si la importación
+                        // falló, se recuperan las tablas de usuarios anteriores.
+                        // Borrarlas dejaba el sitio sin login y sin recovery.php.
+                        $recovered = $this->restore_users_from_temp($mysqli);
+                        $state['warnings'][] = $recovered
+                            ? 'La importación tuvo ' . $errorCount . ' error(es): se restauraron las tablas de usuarios anteriores para conservar el acceso.'
+                            : 'La importación tuvo ' . $errorCount . ' error(es) y no había copia temporal de usuarios.';
+                    } else {
+                        $this->cleanup_temp_users($mysqli);
+                    }
                 } catch (\Throwable $e) {
                     $this->errors[] = 'No se pudieron limpiar las tablas temporales: ' . $e->getMessage();
                 }
@@ -3901,6 +3947,8 @@ class backup_manager
                 'step' => $step,
                 'message' => $message,
                 'percent' => $percent,
+                'errors_count' => count((array) ($state['errors'] ?? array())),
+                'warnings_count' => count((array) ($state['warnings'] ?? array())),
             ),
             'state' => $state,
         );
@@ -3993,8 +4041,16 @@ class backup_manager
             : null;
 
         $file = $this->restore_session_state_file((string) $state['session_id']);
-        $json = json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        // JSON_INVALID_UTF8_SUBSTITUTE: los errores de mysqli y los textos del
+        // dump pueden traer UTF-8 inválido. Sin esto, json_encode devolvía false
+        // y el checkpoint se perdía en silencio, con lo que el chunk siguiente
+        // volvía a ejecutar las mismas sentencias.
+        $json = json_encode(
+            $state,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE
+        );
         if ($json === false) {
+            $this->errors[] = 'No se pudo serializar el estado de restauración: ' . json_last_error_msg();
             return;
         }
 

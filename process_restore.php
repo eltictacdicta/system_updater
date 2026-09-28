@@ -82,8 +82,47 @@ function system_updater_emit_restore_progress(string $progressFile, array $resul
         (int) ($progress['percent'] ?? 0)
     );
     $data['done'] = !empty($result['done']);
+    $data['errors_count'] = (int) ($progress['errors_count'] ?? 0);
+    $data['warnings_count'] = (int) ($progress['warnings_count'] ?? 0);
 
     system_updater_send_sse('progress', $data);
+}
+
+/**
+ * Toma el lock del estado de la sesión. Devuelve el handle, `false` si otro
+ * proceso lo tiene, o `null` si no se pudo abrir el archivo.
+ *
+ * `ignore_user_abort(true)` + `set_time_limit(0)` hacen que el proceso siga
+ * trabajando aunque un proxy corte la respuesta; la UI reintenta a los 1,5 s y
+ * los dos procesos pisarían el mismo offset. El lock lo evita. Un SIGKILL
+ * libera el lock solo, porque el sistema operativo lo suelta con el proceso.
+ *
+ * @return resource|false|null
+ */
+function system_updater_acquire_restore_lock(string $stateFile)
+{
+    $handle = @fopen($stateFile . '.lock', 'c');
+    if ($handle === false) {
+        return null;
+    }
+
+    if (!@flock($handle, LOCK_EX | LOCK_NB)) {
+        @fclose($handle);
+        return false;
+    }
+
+    return $handle;
+}
+
+/**
+ * @param resource|false|null $handle
+ */
+function system_updater_release_restore_lock($handle): void
+{
+    if (is_resource($handle)) {
+        @flock($handle, LOCK_UN);
+        @fclose($handle);
+    }
 }
 
 $progressCallback = function($step, $message, $percent) use ($progressFile) {
@@ -185,25 +224,44 @@ switch ($action) {
         }
 
         $backupManager = new backup_manager(FS_FOLDER);
-        $result = $backupManager->restore_session_start(
-            $file,
-            $restoreType,
-            $sessionId,
-            system_updater_restore_budget()
-        );
+        $stateFile = $backupManager->restore_session_state_file($sessionId);
+        $lock = system_updater_acquire_restore_lock($stateFile);
 
-        if (empty($result['ok'])) {
-            system_updater_end_maintenance();
-            $error = (string) ($result['error'] ?? 'No se pudo iniciar la restauración.');
-            system_updater_save_progress($progressFile, 'error', $error, 0, $error);
-            system_updater_send_sse('error', ['message' => $error, 'percent' => 0]);
+        // Un segundo `begin` (otra pestaña) reiniciaría el estado mientras un
+        // `chunk` sigue trabajando.
+        if ($lock === false) {
+            system_updater_send_sse('progress', [
+                'step' => 'busy',
+                'message' => 'Hay una restauración en curso; esperando al paso actual...',
+                'percent' => 0,
+                'done' => false,
+            ]);
             break;
         }
 
-        system_updater_emit_restore_progress($progressFile, $result);
+        try {
+            $result = $backupManager->restore_session_start(
+                $file,
+                $restoreType,
+                $sessionId,
+                system_updater_restore_budget()
+            );
 
-        if (!empty($result['done'])) {
-            system_updater_end_maintenance();
+            if (empty($result['ok'])) {
+                system_updater_end_maintenance();
+                $error = (string) ($result['error'] ?? 'No se pudo iniciar la restauración.');
+                system_updater_save_progress($progressFile, 'error', $error, 0, $error);
+                system_updater_send_sse('error', ['message' => $error, 'percent' => 0]);
+                break;
+            }
+
+            system_updater_emit_restore_progress($progressFile, $result);
+
+            if (!empty($result['done'])) {
+                system_updater_end_maintenance();
+            }
+        } finally {
+            system_updater_release_restore_lock($lock);
         }
         break;
 
@@ -213,39 +271,61 @@ switch ($action) {
         ensure_request_csrf();
 
         $backupManager = new backup_manager(FS_FOLDER);
-        $state = $backupManager->restore_session_load($sessionId);
+        $stateFile = $backupManager->restore_session_state_file($sessionId);
+        $lock = system_updater_acquire_restore_lock($stateFile);
 
-        if ($state === null) {
-            system_updater_heal_stale_restore_lock();
-            $error = 'No hay una restauración activa. Si el proceso anterior murió, el modo '
-                . 'mantenimiento ya quedó liberado: reintentá la restauración.';
-            system_updater_save_progress($progressFile, 'error', $error, 0, $error);
-            system_updater_send_sse('error', ['message' => $error, 'percent' => 0]);
+        // El proceso anterior puede seguir vivo aunque la respuesta se haya
+        // cortado (`ignore_user_abort` + `set_time_limit(0)`): si no se toma el
+        // lock, los dos ejecutarían las mismas sentencias y duplicarían filas.
+        if ($lock === false) {
+            system_updater_send_sse('progress', [
+                'step' => 'busy',
+                'message' => 'El paso anterior sigue en ejecución; esperando...',
+                'percent' => 0,
+                'done' => false,
+            ]);
             break;
         }
 
-        system_updater_refresh_restore_heartbeat();
+        try {
+            $state = $backupManager->restore_session_load($sessionId);
 
-        $result = $backupManager->restore_session_step($state, system_updater_restore_budget());
+            if ($state === null) {
+                system_updater_heal_stale_restore_lock();
+                $error = 'No hay una restauración activa. Si el proceso anterior murió, el modo '
+                    . 'mantenimiento ya quedó liberado: reintentá la restauración.';
+                system_updater_save_progress($progressFile, 'error', $error, 0, $error);
+                system_updater_send_sse('error', ['message' => $error, 'percent' => 0]);
+                break;
+            }
 
-        system_updater_debug_log('RESTORE', 'chunk ejecutado', [
-            'phase' => (string) ($result['state']['phase'] ?? '?'),
-            'done' => !empty($result['done']),
-            'sql_offset' => (int) ($result['state']['sql_offset'] ?? 0),
-            'statements' => (int) ($result['state']['statement_count'] ?? 0),
-        ]);
+            system_updater_refresh_restore_heartbeat();
 
-        system_updater_emit_restore_progress($progressFile, $result);
+            $result = $backupManager->restore_session_step($state, system_updater_restore_budget());
 
-        if (empty($result['ok']) || !empty($result['done'])) {
-            system_updater_end_maintenance();
-        }
-
-        if (empty($result['ok'])) {
-            system_updater_send_sse('error', [
-                'message' => (string) ($result['error'] ?? 'Error durante la restauración.'),
-                'percent' => (int) ($result['progress']['percent'] ?? 0),
+            system_updater_debug_log('RESTORE', 'chunk ejecutado', [
+                'phase' => (string) ($result['state']['phase'] ?? '?'),
+                'done' => !empty($result['done']),
+                'errors' => (int) ($result['progress']['errors_count'] ?? 0),
+                'warnings' => (int) ($result['progress']['warnings_count'] ?? 0),
+                'sql_offset' => (int) ($result['state']['sql_offset'] ?? 0),
+                'statements' => (int) ($result['state']['statement_count'] ?? 0),
             ]);
+
+            system_updater_emit_restore_progress($progressFile, $result);
+
+            if (empty($result['ok']) || !empty($result['done'])) {
+                system_updater_end_maintenance();
+            }
+
+            if (empty($result['ok'])) {
+                system_updater_send_sse('error', [
+                    'message' => (string) ($result['error'] ?? 'Error durante la restauración.'),
+                    'percent' => (int) ($result['progress']['percent'] ?? 0),
+                ]);
+            }
+        } finally {
+            system_updater_release_restore_lock($lock);
         }
         break;
 

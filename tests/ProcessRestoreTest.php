@@ -112,4 +112,41 @@ class ProcessRestoreTest extends TestCase
         $this->assertStringContainsString('restore_session_load(', $source);
         $this->assertStringContainsString('system_updater_restore_budget()', $source);
     }
+
+    public function testSerializesStateMutationsWithASessionLock(): void
+    {
+        $source = $this->source();
+
+        $this->assertStringContainsString('function system_updater_acquire_restore_lock(', $source);
+        $this->assertStringContainsString('flock($handle, LOCK_EX | LOCK_NB)', $source);
+        $this->assertStringContainsString('system_updater_release_restore_lock(', $source);
+        $this->assertSame(
+            2,
+            substr_count($source, 'system_updater_acquire_restore_lock($stateFile)'),
+            'begin y chunk deben tomar el lock del estado'
+        );
+        $this->assertSame(
+            2,
+            substr_count($source, 'system_updater_release_restore_lock($lock);'),
+            'begin y chunk deben liberar el lock'
+        );
+        $this->assertGreaterThanOrEqual(
+            2,
+            substr_count($source, '} finally {'),
+            'el lock debe liberarse en finally para no quedar tomado'
+        );
+    }
+
+    public function testReportsBusyInsteadOfAdvancingWithoutTheLock(): void
+    {
+        $this->assertStringContainsString("'step' => 'busy'", $this->source());
+    }
+
+    public function testForwardsErrorAndWarningCountsToTheUi(): void
+    {
+        $source = $this->source();
+
+        $this->assertStringContainsString('errors_count', $source);
+        $this->assertStringContainsString('warnings_count', $source);
+    }
 }

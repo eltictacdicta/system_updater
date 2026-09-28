@@ -61,9 +61,25 @@ class RestoreSteppedUiTest extends TestCase
     {
         $source = $this->viewSource();
 
-        $this->assertStringContainsString('function finishRestoreAsSuccess()', $source);
+        $this->assertStringContainsString('function finishRestoreAsSuccess(warningCount)', $source);
         $this->assertStringContainsString('function finishRestoreAsError(', $source);
         $this->assertStringContainsString("\$('#restoreCompleteBtn').show()", $source);
         $this->assertStringContainsString("\$('#restoreErrorBtn').show()", $source);
+    }
+
+    public function testDistingueErroresDeExitoAlTerminar(): void
+    {
+        $source = $this->viewSource();
+
+        $this->assertStringContainsString('doneData.errors_count', $source);
+        $this->assertStringContainsString('doneData.warnings_count', $source);
+    }
+
+    public function testEsperaCuandoOtroProcesoTieneElLock(): void
+    {
+        $source = $this->viewSource();
+
+        $this->assertStringContainsString("evt.data.step === 'busy'", $source);
+        $this->assertStringContainsString("}, 2000);", $source);
     }
 }
