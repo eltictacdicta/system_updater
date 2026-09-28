@@ -308,9 +308,12 @@
 $(document).ready(function() {
     var csrfToken = $('meta[name="csrf-token"]').attr('content') || '';
     var suCsrfToken = $('meta[name="su-csrf-token"]').attr('content') || '';
-    var restoreEventSource = null;
     var restoreLog = [];
     var restoreFinished = false;
+    var restoreConsecutiveFailures = 0;
+    var restoreStepCount = 0;
+    var restoreLastFile = '';
+    var restoreLastType = '';
     var backupLastStatusMessage = '';
     var backupLog = [];
     var backupFinished = false;
@@ -1103,80 +1106,153 @@ $(document).ready(function() {
         startCoreUpdate(false, pendingCoreAction.isReinstall);
     });
 
-    // Restaurar con SSE (Server-Sent Events)
+    // Restaurar por pasos: un `begin` + N x `chunk`. Cada request queda corto y
+    // reanudable, porque el host puede matar el proceso a los pocos segundos y
+    // un stream SSE único no sobrevive a eso.
     function startRestore(file, type) {
         restoreLog = [];
         restoreFinished = false;
+        restoreConsecutiveFailures = 0;
+        restoreStepCount = 0;
+        restoreLastFile = file;
+        restoreLastType = type;
         updateProgress(0, 'Iniciando restauración...');
         $('#restoreDetails').html('<small class="text-muted">Conectando al servidor...</small>');
         $('#restoreCompleteBtn').hide();
         $('#restoreErrorBtn').hide();
-        
+
         // Show modal
         $('#restoreProgressModal').modal('show');
-        
-        // Start SSE connection
-        var sseUrl = 'plugins/system_updater/process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type) + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
-        
-        restoreEventSource = new EventSource(sseUrl, { withCredentials: true });
-        
-        restoreEventSource.addEventListener('start', function(e) {
-            var data = JSON.parse(e.data);
-            addLogEntry('Iniciando: ' + data.message);
-        });
-        
-        restoreEventSource.addEventListener('init', function(e) {
-            var data = JSON.parse(e.data);
-            updateProgress(data.percent, data.message);
-            addLogEntry(data.message);
-        });
-        
-        restoreEventSource.addEventListener('phase', function(e) {
-            var data = JSON.parse(e.data);
-            addLogEntry('=== Fase: ' + data.message + ' ===');
-        });
-        
-        restoreEventSource.addEventListener('progress', function(e) {
-            var data = JSON.parse(e.data);
-            updateProgress(data.percent, data.message);
-            if (data.step && data.step.indexOf('_progress') === -1) {
-                addLogEntry(data.message);
+
+        runRestoreStep('begin');
+    }
+
+    function runRestoreStep(action) {
+        if (restoreFinished) {
+            return;
+        }
+
+        restoreStepCount++;
+        if (restoreStepCount > 100000) {
+            finishRestoreAsError('La restauración no termina de avanzar. Se detuvo por seguridad.');
+            return;
+        }
+
+        var url = 'plugins/system_updater/process_restore.php?action=' + action
+            + '&file=' + encodeURIComponent(restoreLastFile)
+            + '&type=' + encodeURIComponent(restoreLastType)
+            + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
+
+        fetch(url, {
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { 'Accept': 'text/event-stream' }
+        }).then(function(response) {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
             }
-        });
-        
-        restoreEventSource.addEventListener('complete', function(e) {
-            var data = JSON.parse(e.data);
-            restoreFinished = true;
-            updateProgress(100, data.message, 'success');
-            addLogEntry('✓ ' + data.message);
-            $('#restoreCompleteBtn').show();
-            restoreEventSource.close();
-        });
-        
-        restoreEventSource.addEventListener('error', function(e) {
-            restoreFinished = true;
-            try {
-                var data = JSON.parse(e.data);
-                updateProgress(data.percent || 0, data.message, 'danger');
-                addLogEntry('✗ ERROR: ' + data.message);
-            } catch(err) {
-                updateProgress(0, 'Error de conexión con el servidor', 'danger');
-                addLogEntry('✗ Error de conexión');
+            return response.text();
+        }).then(function(body) {
+            var events = parseRestoreSseEvents(body);
+            var sawProgress = false;
+
+            for (var i = 0; i < events.length; i++) {
+                var evt = events[i];
+
+                if (evt.event === 'progress') {
+                    sawProgress = true;
+                    updateProgress(evt.data.percent || 0, evt.data.message);
+                    addLogEntry(evt.data.message);
+
+                    if (evt.data.done) {
+                        finishRestoreAsSuccess();
+                        return;
+                    }
+                } else if (evt.event === 'error') {
+                    finishRestoreAsError(
+                        evt.data.message || 'La restauración falló.',
+                        evt.data.percent || 0
+                    );
+                    return;
+                }
             }
-            $('#restoreErrorBtn').show();
-            restoreEventSource.close();
-        });
-        
-        restoreEventSource.onerror = function() {
+
+            if (!sawProgress) {
+                throw new Error('respuesta sin progreso');
+            }
+
+            restoreConsecutiveFailures = 0;
+            runRestoreStep('chunk');
+        }).catch(function(error) {
             if (restoreFinished) {
                 return;
             }
-            restoreFinished = true;
-            updateProgress(0, 'Error de conexión con el servidor', 'danger');
-            addLogEntry('✗ Error de conexión');
-            $('#restoreErrorBtn').show();
-            restoreEventSource.close();
-        };
+
+            restoreConsecutiveFailures++;
+
+            // Un corte no pierde trabajo: el checkpoint queda en disco, así que
+            // se reintenta y se reanuda desde el último punto guardado.
+            if (restoreConsecutiveFailures <= 5) {
+                addLogEntry('↻ Corte o error de red (' + error.message + '). Reintentando desde el último punto guardado...');
+                window.setTimeout(function() {
+                    runRestoreStep('chunk');
+                }, 1500);
+                return;
+            }
+
+            finishRestoreAsError(
+                'No se pudo continuar tras varios intentos (' + error.message + '). El avance queda guardado: '
+                + 'volvé a iniciar la restauración para reanudar desde el último punto. Si el sitio quedó en '
+                + 'mantenimiento, se libera solo al usar el panel.'
+            );
+        });
+    }
+
+    // El servidor responde con framing SSE (los guards de sesión/CSRF dependen
+    // del script por URI), así que se parsea el cuerpo completo del request.
+    function parseRestoreSseEvents(body) {
+        var events = [];
+        var blocks = String(body).split(/\r?\n\r?\n/);
+
+        for (var i = 0; i < blocks.length; i++) {
+            var lines = blocks[i].split(/\r?\n/);
+            var name = '';
+            var data = '';
+
+            for (var j = 0; j < lines.length; j++) {
+                if (lines[j].indexOf('event:') === 0) {
+                    name = lines[j].substring(6).trim();
+                } else if (lines[j].indexOf('data:') === 0) {
+                    data += lines[j].substring(5).trim();
+                }
+            }
+
+            if (!name || !data) {
+                continue;
+            }
+
+            try {
+                events.push({ event: name, data: JSON.parse(data) });
+            } catch (err) {
+                // Bloque no parseable: se ignora y se sigue con el resto.
+            }
+        }
+
+        return events;
+    }
+
+    function finishRestoreAsSuccess() {
+        restoreFinished = true;
+        updateProgress(100, '¡Restauración completada con éxito!', 'success');
+        addLogEntry('✓ Restauración completada con éxito');
+        $('#restoreCompleteBtn').show();
+    }
+
+    function finishRestoreAsError(message, percent) {
+        restoreFinished = true;
+        updateProgress(percent || 0, message, 'danger');
+        addLogEntry('✗ ERROR: ' + message);
+        $('#restoreErrorBtn').show();
     }
     
     function updateProgress(percent, message, type) {
