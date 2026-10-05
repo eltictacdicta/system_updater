@@ -161,36 +161,9 @@ class plugin_downloader
                 $downloadList[$key]['autor'] = isset($value['creador']) ? $value['creador'] : (isset($value['nick']) ? $value['nick'] : 'Desconocido');
             }
 
-            if (!isset($downloadList[$key]['version']) || $downloadList[$key]['version'] == 'N/A' || !isset($downloadList[$key]['descripcion'])) {
-                $remote_data = $this->get_remote_plugin_ini($value);
-                if ($remote_data) {
-                    if ((!isset($downloadList[$key]['version']) || $downloadList[$key]['version'] == 'N/A') && isset($remote_data['version'])) {
-                        $downloadList[$key]['version'] = $remote_data['version'];
-                    }
-                    if ((!isset($downloadList[$key]['descripcion']) || empty($downloadList[$key]['descripcion'])) && isset($remote_data['description'])) {
-                        $downloadList[$key]['descripcion'] = $remote_data['description'];
-                    }
-                    if (isset($remote_data['require'])) {
-                        $downloadList[$key]['require'] = $remote_data['require'];
-                    }
-                    if (isset($remote_data['min_version'])) {
-                        $downloadList[$key]['min_version'] = $remote_data['min_version'];
-                    }
-                    if (isset($remote_data['max_version'])) {
-                        $downloadList[$key]['max_version'] = $remote_data['max_version'];
-                    }
-                    if (isset($remote_data['repository_url'])) {
-                        $downloadList[$key]['repository_url'] = $remote_data['repository_url'];
-                    }
-                }
-            }
-
-            if (!empty($downloadList[$key]['instalado']) && !$this->entryHasReleaseHistory($downloadList[$key])) {
-                $releases = $this->get_remote_plugin_releases($value);
-                if ($releases !== []) {
-                    $downloadList[$key]['releases'] = $releases;
-                }
-            }
+            // El catálogo local es la única fuente de verdad: los metadatos y el
+            // historial de releases salen del propio custom_plugins.json, nunca
+            // de la red (evita el cuelgue por plugin cuando no hay egress).
         }
 
         return $downloadList;
