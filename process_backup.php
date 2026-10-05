@@ -35,6 +35,15 @@ $progressCallback = function ($step, $message, $percent) use ($progressFile, &$l
     system_updater_send_sse('progress', $data);
     $lastEventTime = time();
     usleep(10000);
+
+    // The next step (ZipArchive::close()) compresses every file and emits
+    // nothing for minutes, so a proxy/FastCGI idle timeout would cut the SSE
+    // stream. Emit a 'finalizing' event, then end the HTTP response: the backup
+    // finishes in background (ignore_user_abort) and the UI polls action=status.
+    if ($step === 'files_close') {
+        system_updater_send_sse('finalizing', $data);
+        system_updater_finish_response();
+    }
 };
 
 switch ($action) {
@@ -49,11 +58,12 @@ switch ($action) {
             $result = $backupManager->create_backup_with_progress('', true, $progressCallback);
 
             if (isset($result['complete']) && !empty($result['complete']['success'])) {
-                system_updater_save_progress($progressFile, 'complete', '¡Copia de seguridad creada con éxito!', 100);
+                $backupName = $result['complete']['backup_name'] ?? '';
+                system_updater_save_progress($progressFile, 'complete', '¡Copia de seguridad creada con éxito!', 100, null, ['backup_name' => $backupName]);
                 system_updater_send_sse('complete', [
                     'message' => '¡Copia de seguridad creada con éxito!',
                     'percent' => 100,
-                    'backup_name' => $result['complete']['backup_name'] ?? '',
+                    'backup_name' => $backupName,
                     'redirect' => 'index.php?page=admin_updater&success=backup',
                 ]);
             } else {
@@ -68,7 +78,38 @@ switch ($action) {
             system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
         }
 
-        @unlink($progressFile);
+        // When the response was ended early (background ZIP finalization) keep
+        // the progress file so the UI can read the terminal state via
+        // action=status. It is overwritten on the next backup.
+        if (!system_updater_response_finished()) {
+            @unlink($progressFile);
+        }
+        break;
+
+    case 'progress':
+        header('Content-Type: application/json; charset=UTF-8');
+        header('Cache-Control: no-store');
+        if (file_exists($progressFile)) {
+            $raw = (string) file_get_contents($progressFile);
+            echo $raw !== '' ? $raw : json_encode(['step' => 'waiting', 'message' => 'Esperando inicio...', 'percent' => 0], JSON_UNESCAPED_UNICODE);
+        } else {
+            echo json_encode(['step' => 'waiting', 'message' => 'Esperando inicio...', 'percent' => 0], JSON_UNESCAPED_UNICODE);
+        }
+        break;
+
+    case 'status':
+        header('Content-Type: application/json; charset=UTF-8');
+        header('Cache-Control: no-store');
+        if (file_exists($progressFile)) {
+            $data = json_decode((string) file_get_contents($progressFile), true);
+            if (!is_array($data)) {
+                $data = null;
+            }
+            $isAlive = is_array($data) && (time() - (int) ($data['timestamp'] ?? 0)) < 120;
+            echo json_encode(['active' => $isAlive, 'data' => $data], JSON_UNESCAPED_UNICODE);
+        } else {
+            echo json_encode(['active' => false, 'data' => null], JSON_UNESCAPED_UNICODE);
+        }
         break;
 
     default:

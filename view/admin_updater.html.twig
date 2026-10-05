@@ -317,6 +317,8 @@ $(document).ready(function() {
     var backupLastStatusMessage = '';
     var backupLog = [];
     var backupFinished = false;
+    var backupFinalizing = false;
+    var backupPollTimer = null;
     var coreUpdateEventSource = null;
     var coreUpdateLog = [];
     var coreUpdateFinished = false;
@@ -823,6 +825,8 @@ $(document).ready(function() {
         pendingBackupChain = chainConfig || null;
         backupLog = [];
         backupFinished = false;
+        backupFinalizing = false;
+        stopBackupStatusPolling();
         backupLastStatusMessage = '';
         configureBackupModal(pendingBackupChain);
         updateBackupProgress(0, pendingBackupChain ? 'Iniciando copia previa...' : 'Iniciando copia de seguridad...');
@@ -855,6 +859,17 @@ $(document).ready(function() {
                 backupLastStatusMessage = data.message;
                 addBackupLogEntry(data.message);
             }
+        });
+
+        backupEventSource.addEventListener('finalizing', function(e) {
+            var data = {};
+            try { data = JSON.parse(e.data); } catch (ex) {}
+            backupFinalizing = true;
+            updateBackupProgress(data.percent || 88, 'Finalizando archivo ZIP en el servidor (puede tardar unos minutos)...');
+            addBackupLogEntry('El servidor está cerrando el ZIP; la copia continúa en segundo plano.');
+            // The server ends the SSE stream on purpose; switch to polling status.
+            backupEventSource.close();
+            startBackupStatusPolling();
         });
 
         backupEventSource.addEventListener('complete', function(e) {
@@ -890,10 +905,16 @@ $(document).ready(function() {
         });
 
         backupEventSource.onerror = function() {
-            if (!backupFinished) {
-                finishBackupAsError('Error de conexión con el servidor');
+            if (backupFinished) {
+                backupEventSource.close();
+                return;
             }
+            // The connection may be cut by a proxy timeout while the ZIP
+            // finalizes in the background. Poll the status endpoint instead of
+            // failing outright: it reports complete/error, or times out.
+            backupFinalizing = true;
             backupEventSource.close();
+            startBackupStatusPolling();
         };
     }
 
@@ -908,6 +929,66 @@ $(document).ready(function() {
             pendingBackupChain = null;
         }
         hideLoading();
+    }
+
+    function startBackupStatusPolling() {
+        if (backupPollTimer) {
+            return;
+        }
+        var attempts = 0;
+        var maxAttempts = 450; // ~15 min at 2s
+        backupPollTimer = setInterval(function() {
+            attempts++;
+            if (attempts > maxAttempts) {
+                stopBackupStatusPolling();
+                finishBackupAsError('El backup no terminó a tiempo.');
+                return;
+            }
+            fetch('plugins/system_updater/process_backup.php?action=status', { credentials: 'same-origin', cache: 'no-store' })
+                .then(function(r) { return r.json(); })
+                .then(function(resp) {
+                    var data = resp ? resp.data : null;
+                    if (data && data.step === 'complete') {
+                        stopBackupStatusPolling();
+                        backupFinished = true;
+                        updateBackupProgress(100, data.message || '¡Completado!', 'success');
+                        addBackupLogEntry('✓ ' + (data.message || 'Completado'));
+                        if (data.backup_name) {
+                            addBackupLogEntry('Backup: ' + data.backup_name);
+                        }
+                        $('#btn-create-backup').prop('disabled', false);
+                        hideLoading();
+                        if (pendingBackupChain) {
+                            addBackupLogEntry('Iniciando automáticamente el siguiente paso...');
+                            var nextAction = pendingBackupChain;
+                            pendingBackupChain = null;
+                            setTimeout(function() {
+                                $('#backupProgressModal').modal('hide');
+                                startCoreUpdate(false, nextAction.isReinstall);
+                            }, 500);
+                            return;
+                        }
+                        $('#backupCompleteBtn').show();
+                        return;
+                    }
+                    if (data && data.step === 'error') {
+                        stopBackupStatusPolling();
+                        finishBackupAsError(data.message || data.error || 'Error durante el backup');
+                        return;
+                    }
+                    if (data && data.message) {
+                        updateBackupProgress(data.percent || 88, data.message);
+                    }
+                })
+                .catch(function() { /* keep polling until maxAttempts */ });
+        }, 2000);
+    }
+
+    function stopBackupStatusPolling() {
+        if (backupPollTimer) {
+            clearInterval(backupPollTimer);
+            backupPollTimer = null;
+        }
     }
 
     function updateBackupProgress(percent, message, type) {

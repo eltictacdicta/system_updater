@@ -175,6 +175,10 @@ function system_updater_process_init(array $options = []): array
  */
 function system_updater_send_sse(string $event, array $data): void
 {
+    if (system_updater_response_finished()) {
+        return;
+    }
+
     echo "event: {$event}\n";
     echo 'data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) . "\n\n";
 
@@ -191,6 +195,10 @@ function system_updater_send_sse(string $event, array $data): void
  */
 function system_updater_send_sse_keepalive(): void
 {
+    if (system_updater_response_finished()) {
+        return;
+    }
+
     // SSE spec: lines starting with ':' are ignored by the browser
     echo ": keepalive " . time() . "\n\n";
 
@@ -198,6 +206,30 @@ function system_updater_send_sse_keepalive(): void
         @ob_flush();
     }
     @flush();
+}
+
+/**
+ * Ends the HTTP response while letting the PHP script keep running.
+ *
+ * Long blocking steps with no output — e.g. ZipArchive::close() compressing
+ * thousands of files — would otherwise exceed a proxy / FastCGI idle timeout
+ * and kill the connection mid-flight. Finishing the response first lets the
+ * client switch to polling an action=status endpoint while the work continues
+ * in the background (ignore_user_abort is already enabled), so the result no
+ * longer depends on proxy timeouts. After this call, SSE output is discarded.
+ */
+function system_updater_finish_response(): void
+{
+    $GLOBALS['system_updater_response_finished'] = true;
+
+    if (function_exists('fastcgi_finish_request')) {
+        @fastcgi_finish_request();
+    }
+}
+
+function system_updater_response_finished(): bool
+{
+    return !empty($GLOBALS['system_updater_response_finished']);
 }
 
 /**
@@ -215,15 +247,16 @@ function system_updater_save_progress(
     string $step,
     string $message,
     int $percent,
-    ?string $error = null
+    ?string $error = null,
+    array $extra = []
 ): array {
-    $data = [
+    $data = array_merge([
         'step' => $step,
         'message' => $message,
         'percent' => $percent,
         'timestamp' => time(),
         'error' => $error,
-    ];
+    ], $extra);
 
     $fp = @fopen($progressFile, 'c');
     if ($fp) {

@@ -28,6 +28,15 @@ class ProcessBackupTest extends TestCase
         $this->assertStringContainsString("system_updater_process_init(['mode' => 'sse'", $content);
     }
 
+    public function testProcessBackupFinishesResponseBeforeZipAndSupportsStatusPolling(): void
+    {
+        $file = FS_FOLDER . '/plugins/system_updater/process_backup.php';
+        $content = file_get_contents($file);
+        $this->assertStringContainsString('system_updater_finish_response', $content);
+        $this->assertStringContainsString("case 'status':", $content);
+        $this->assertStringContainsString("case 'progress':", $content);
+    }
+
     public function testProcessBackupDoesNotContainWorkerMachinery(): void
     {
         $file = FS_FOLDER . '/plugins/system_updater/process_backup.php';
