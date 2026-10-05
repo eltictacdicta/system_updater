@@ -230,7 +230,7 @@ class updater_manager
         }
 
         if (function_exists('fs_file_get_contents')) {
-            $content = @fs_file_get_contents($url, 20);
+            $content = @fs_file_get_contents($url, 4);
             if ($content !== false && $content !== 'ERROR') {
                 return $content;
             }
@@ -238,7 +238,7 @@ class updater_manager
 
         $context = stream_context_create([
             'http' => [
-                'timeout' => 20,
+                'timeout' => 4,
                 'header' => "User-Agent: FSFramework-System-Updater\r\n",
             ],
             'ssl' => [
@@ -456,7 +456,13 @@ class updater_manager
     public function check_for_updates()
     {
         try {
+            $deadline = microtime(true) + 6.0;
+
             foreach ($this->getRemoteVersionUrls() as $url) {
+                if (microtime(true) >= $deadline) {
+                    break;
+                }
+
                 $remoteIni = $this->fetchRemoteContents($url);
 
                 if ($remoteIni === false) {

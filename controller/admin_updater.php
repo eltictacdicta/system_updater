@@ -403,6 +403,8 @@ class admin_updater extends fs_controller
      */
     private function checkUpdates()
     {
+        $deadline = microtime(true) + 10.0;
+
         $updates = [
             'updater' => false,
             'updater_pending' => $this->updater_mgr->get_pending_self_update(),
@@ -412,23 +414,29 @@ class admin_updater extends fs_controller
         ];
 
         // Comprobar actualización del actualizador
-        $updaterUpdate = $this->updater_mgr->check_for_updates();
-        if ($updaterUpdate && isset($updaterUpdate['available']) && $updaterUpdate['available']) {
-            $updates['updater'] = $updaterUpdate;
+        if (microtime(true) < $deadline) {
+            $updaterUpdate = $this->updater_mgr->check_for_updates();
+            if ($updaterUpdate && isset($updaterUpdate['available']) && $updaterUpdate['available']) {
+                $updates['updater'] = $updaterUpdate;
+            }
         }
 
         // Comprobar actualizaciones de plugins instalados (públicos y privados)
-        $updates['plugins'] = $this->plugin_downloader->getAvailableUpdates(
-            $this->plugin_manager->installed(),
-            (string) $this->plugin_manager->version
-        );
+        if (microtime(true) < $deadline) {
+            $updates['plugins'] = $this->plugin_downloader->getAvailableUpdates(
+                $this->plugin_manager->installed(),
+                (string) $this->plugin_manager->version
+            );
+        }
 
         // Comprobar actualización del core
         // El core se compara contra la versión remota del repositorio
-        $coreUpdate = $this->checkCoreUpdate();
-        if ($coreUpdate) {
-            $updates['core'] = true;
-            $updates['core_new_version'] = $coreUpdate;
+        if (microtime(true) < $deadline) {
+            $coreUpdate = $this->checkCoreUpdate();
+            if ($coreUpdate) {
+                $updates['core'] = true;
+                $updates['core_new_version'] = $coreUpdate;
+            }
         }
 
         $currentCoreVersion = (string) $this->plugin_manager->version;
@@ -544,8 +552,14 @@ class admin_updater extends fs_controller
             'https://api.github.com/repos/eltictacdicta/fs-framework/contents/VERSION?ref=main',
         ];
 
+        $deadline = microtime(true) + 6.0;
+
         foreach ($urls as $url) {
-            $payload = @fs_file_get_contents($url, 15);
+            if (microtime(true) >= $deadline) {
+                break;
+            }
+
+            $payload = @fs_file_get_contents($url, 4);
             $version = $this->extractVersionFromRemotePayload($payload);
             if ($version !== '') {
                 return $version;

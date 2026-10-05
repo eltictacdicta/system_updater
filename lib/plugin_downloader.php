@@ -17,10 +17,6 @@ class plugin_downloader
      * Evita que nuevas altas en el repositorio tarden demasiado en mostrarse.
      */
     private const PUBLIC_DOWNLOAD_CACHE_TTL = 180;
-    private const PUBLIC_DOWNLOAD_CATALOG_URLS = [
-        'https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/main/custom_plugins.json',
-        'https://raw.githubusercontent.com/eltictacdicta/fs-cusmtom-plugins/master/custom_plugins.json',
-    ];
 
     /**
      * @var array Lista de plugins públicos
@@ -113,28 +109,9 @@ class plugin_downloader
             }
         }
 
-        // Descargar lista de plugins de la comunidad
-        $json = false;
-        foreach ($this->getPublicDownloadCatalogUrls() as $url) {
-            $json = $this->fetchRemoteContents($url, 10);
-            if ($json && $json !== 'ERROR') {
-                break;
-            }
-        }
-
-        if ($json && $json !== 'ERROR') {
-            $this->download_list = json_decode($json, true);
-            if (is_array($this->download_list)) {
-                $this->download_list = $this->mergeWithLocalCatalog($this->download_list);
-                $this->download_list = $this->hydrateDownloadList($this->download_list);
-
-                if ($this->cache) {
-                    $this->cache->set('download_list', $this->download_list, self::PUBLIC_DOWNLOAD_CACHE_TTL);
-                }
-                return $this->download_list;
-            }
-        }
-
+        // El catálogo público es local (data/custom_plugins.json) y es la única
+        // fuente de verdad de esta instalación. Se edita desde la tienda de
+        // plugins; la comprobación no debe depender de la red.
         $localCatalog = $this->loadLocalCatalogEntries();
         if ($localCatalog !== []) {
             $this->download_list = $this->hydrateDownloadList($localCatalog);
@@ -144,8 +121,9 @@ class plugin_downloader
             return $this->download_list;
         }
 
-        $this->errors[] = 'Error al descargar la lista de plugins.';
+        $this->errors[] = 'No hay catálogo local de plugins (data/custom_plugins.json).';
         $this->download_list = [];
+
         return $this->download_list;
     }
 
@@ -161,36 +139,6 @@ class plugin_downloader
 
         $decoded = json_decode((string) file_get_contents($path), true);
         return is_array($decoded) ? $decoded : [];
-    }
-
-    /**
-     * @param array<int, array<string, mixed>> $remoteEntries
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    protected function mergeWithLocalCatalog(array $remoteEntries)
-    {
-        $localEntries = $this->loadLocalCatalogEntries();
-        if ($localEntries === []) {
-            return $remoteEntries;
-        }
-
-        $merged = [];
-        foreach ($remoteEntries as $entry) {
-            if (!is_array($entry) || empty($entry['nombre'])) {
-                continue;
-            }
-            $merged[$entry['nombre']] = $entry;
-        }
-
-        foreach ($localEntries as $entry) {
-            if (!is_array($entry) || empty($entry['nombre'])) {
-                continue;
-            }
-            $merged[$entry['nombre']] = array_merge($merged[$entry['nombre']] ?? [], $entry);
-        }
-
-        return array_values($merged);
     }
 
     /**
@@ -246,14 +194,6 @@ class plugin_downloader
         }
 
         return $downloadList;
-    }
-
-    /**
-     * @return array
-     */
-    protected function getPublicDownloadCatalogUrls()
-    {
-        return self::PUBLIC_DOWNLOAD_CATALOG_URLS;
     }
 
     /**
