@@ -329,6 +329,7 @@ class admin_updater extends fs_controller
             'plugins' => [],
             'public_plugin_updates' => [],
             'checked' => false,
+            'partial' => false,
         ];
     }
 
@@ -411,6 +412,7 @@ class admin_updater extends fs_controller
             'core' => false,
             'core_new_version' => '',
             'plugins' => [],
+            'partial' => false,
         ];
 
         // Comprobar actualización del actualizador
@@ -419,6 +421,8 @@ class admin_updater extends fs_controller
             if ($updaterUpdate && isset($updaterUpdate['available']) && $updaterUpdate['available']) {
                 $updates['updater'] = $updaterUpdate;
             }
+        } else {
+            $updates['partial'] = true;
         }
 
         // Comprobar actualizaciones de plugins instalados (públicos y privados)
@@ -427,6 +431,8 @@ class admin_updater extends fs_controller
                 $this->plugin_manager->installed(),
                 (string) $this->plugin_manager->version
             );
+        } else {
+            $updates['partial'] = true;
         }
 
         // Comprobar actualización del core
@@ -437,6 +443,8 @@ class admin_updater extends fs_controller
                 $updates['core'] = true;
                 $updates['core_new_version'] = $coreUpdate;
             }
+        } else {
+            $updates['partial'] = true;
         }
 
         $currentCoreVersion = (string) $this->plugin_manager->version;

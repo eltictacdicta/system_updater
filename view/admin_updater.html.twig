@@ -318,6 +318,7 @@ $(document).ready(function() {
     var backupLog = [];
     var backupFinished = false;
     var backupFinalizing = false;
+    var backupStarted = false;
     var backupPollTimer = null;
     var coreUpdateEventSource = null;
     var coreUpdateLog = [];
@@ -355,6 +356,11 @@ $(document).ready(function() {
         var updaterVersion = meta && meta.updater_version ? meta.updater_version : '';
         var coreVersion = meta && meta.core_version ? meta.core_version : '';
 
+        if (updates.partial) {
+            html += '<div class="alert alert-warning"><i class="fa fa-exclamation-triangle"></i> '
+                + 'La comprobación no se completó (timeout de red); puede que falten actualizaciones del núcleo o de plugins.</div>';
+        }
+
         if (updates.updater && updates.updater.available) {
             html += '<div class="alert alert-danger">';
             html += '<strong><i class="fa fa-wrench"></i> Nueva versión del actualizador disponible</strong>';
@@ -382,6 +388,11 @@ $(document).ready(function() {
             }
             html += '<button type="button" class="btn btn-warning btn-sm" id="btn-update-core">';
             html += '<i class="fa fa-sync"></i> Actualizar solo núcleo</button></div>';
+        } else if (updates.partial) {
+            html += '<div class="alert alert-warning clearfix">';
+            html += '<i class="fa fa-exclamation-triangle"></i> No se pudo comprobar el núcleo (timeout de red).';
+            html += '<button type="button" class="btn btn-danger btn-xs pull-right" id="btn-reinstall-core" style="margin-top: -2px;">';
+            html += '<i class="fa fa-exclamation-triangle"></i> Reinstalar Core</button></div>';
         } else {
             html += '<div class="alert alert-success clearfix">';
             html += '<i class="fa fa-check"></i> El núcleo está actualizado (v' + escapeHtml(coreVersion) + ')';
@@ -826,6 +837,7 @@ $(document).ready(function() {
         backupLog = [];
         backupFinished = false;
         backupFinalizing = false;
+        backupStarted = false;
         stopBackupStatusPolling();
         backupLastStatusMessage = '';
         configureBackupModal(pendingBackupChain);
@@ -843,6 +855,7 @@ $(document).ready(function() {
         var backupEventSource = new EventSource(sseUrl, { withCredentials: true });
 
         backupEventSource.addEventListener('start', function(e) {
+            backupStarted = true;
             var data = JSON.parse(e.data);
             addBackupLogEntry(data.message || 'Proceso iniciado');
         });
@@ -853,6 +866,7 @@ $(document).ready(function() {
         });
 
         backupEventSource.addEventListener('progress', function(e) {
+            backupStarted = true;
             var data = JSON.parse(e.data);
             updateBackupProgress(data.percent || 0, data.message || 'Procesando...');
             if (data.message && data.message !== backupLastStatusMessage) {
@@ -862,6 +876,7 @@ $(document).ready(function() {
         });
 
         backupEventSource.addEventListener('finalizing', function(e) {
+            backupStarted = true;
             var data = {};
             try { data = JSON.parse(e.data); } catch (ex) {}
             backupFinalizing = true;
@@ -909,11 +924,17 @@ $(document).ready(function() {
                 backupEventSource.close();
                 return;
             }
+            backupEventSource.close();
+            if (!backupStarted) {
+                // The stream failed before the backup started (network error,
+                // 403, invalid CSRF): there is no result to poll for.
+                finishBackupAsError('Error de conexión con el servidor');
+                return;
+            }
             // The connection may be cut by a proxy timeout while the ZIP
             // finalizes in the background. Poll the status endpoint instead of
             // failing outright: it reports complete/error, or times out.
             backupFinalizing = true;
-            backupEventSource.close();
             startBackupStatusPolling();
         };
     }

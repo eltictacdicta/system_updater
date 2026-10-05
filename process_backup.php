@@ -48,6 +48,9 @@ $progressCallback = function ($step, $message, $percent) use ($progressFile, &$l
 
 switch ($action) {
     case 'start':
+        // Clear any previous run's progress so a concurrent action=status poll
+        // can never read a stale 'complete' from an earlier backup.
+        @unlink($progressFile);
         system_updater_send_sse('start', ['message' => 'Iniciando copia de seguridad...', 'percent' => 0]);
         system_updater_save_progress($progressFile, 'init', 'Preparando copia de seguridad...', 0);
 

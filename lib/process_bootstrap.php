@@ -220,11 +220,16 @@ function system_updater_send_sse_keepalive(): void
  */
 function system_updater_finish_response(): void
 {
-    $GLOBALS['system_updater_response_finished'] = true;
-
-    if (function_exists('fastcgi_finish_request')) {
-        @fastcgi_finish_request();
+    // Only the FastCGI SAPI can end the response while the script keeps
+    // running. On other SAPIs (mod_php, CGI) there is no way to detach, so the
+    // response stays open and the SSE delivers the final 'complete' event; the
+    // UI polling fallback covers a proxy cut instead.
+    if (!function_exists('fastcgi_finish_request')) {
+        return;
     }
+
+    $GLOBALS['system_updater_response_finished'] = true;
+    @fastcgi_finish_request();
 }
 
 function system_updater_response_finished(): bool
