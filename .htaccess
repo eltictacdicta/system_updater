@@ -16,17 +16,21 @@
     SetEnvIfNoCase Request_URI "download_backup\.php$" no-gzip dont-vary
 </IfModule>
 
-# Disable mod_security (OWASP CRS) for process scripts.
+# Disable mod_security (OWASP CRS) for the plugin directory.
 # SSE streams with long query strings and continuous output trigger false positives.
+#
+# IMPORTANT: SecRuleEngine is only valid in server/vhost/directory/.htaccess
+# context, NOT inside <FilesMatch> (File context). Wrapping it in <FilesMatch>
+# makes Apache reject the whole .htaccess with
+#   "SecRuleEngine not allowed in <FilesMatch> context"
+# and return HTTP 500 for every request under this directory. Directory level is
+# the finest granularity .htaccess offers, so the engine is disabled for the
+# whole plugin folder (all of its endpoints are admin-only).
 <IfModule mod_security2.c>
-    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery|download_backup)\.php$">
-        SecRuleEngine Off
-    </FilesMatch>
+    SecRuleEngine Off
 </IfModule>
 <IfModule security2_module>
-    <FilesMatch "^(process_backup|process_core_update|process_restore|recovery|download_backup)\.php$">
-        SecRuleEngine Off
-    </FilesMatch>
+    SecRuleEngine Off
 </IfModule>
 
 # Override root .htaccess caching headers for SSE process scripts.
