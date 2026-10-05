@@ -148,6 +148,19 @@
                         Pulsa «Comprobar actualizaciones» para consultar el núcleo, el actualizador y los plugins instalados.
                     </p>
                 </div>
+
+                <hr>
+                <h4 style="margin-top: 0;"><i class="fa fa-upload"></i> Instalar núcleo desde un ZIP</h4>
+                <p class="text-muted" style="margin-bottom: 8px;">
+                    Para servidores sin acceso a GitHub: descargá el ZIP de la versión (tag) del núcleo, subilo y reinstalá desde ese archivo.
+                </p>
+                <div class="form-group" style="margin-bottom: 8px;">
+                    <input type="file" id="coreZipFile" accept=".zip">
+                </div>
+                <button type="button" class="btn btn-warning btn-sm" id="btn-upload-core-zip">
+                    <i class="fa fa-upload"></i> Subir e instalar núcleo
+                </button>
+                <div id="coreZipUploadStatus" class="text-muted" style="margin-top: 8px;"></div>
             </div>
         </div>
     </div>
@@ -757,7 +770,7 @@ $(document).ready(function() {
         };
     }
 
-    function openCoreActionWizard(isReinstall) {
+    function openCoreActionWizard(isReinstall, source) {
         var labels = getCoreOperationLabels(isReinstall);
         var chainedHint = '';
         if (pendingChainedPluginUpdates.length) {
@@ -770,7 +783,8 @@ $(document).ready(function() {
             'Esta operación puede interrumpir el servicio para otros usuarios.' + chainedHint + ' ¿Deseas continuar?',
             function() {
                 pendingCoreAction = {
-                    isReinstall: isReinstall
+                    isReinstall: isReinstall,
+                    source: source || null
                 };
 
                 $('#coreActionWizardTitle').text('Asistente de ' + labels.nounDisplay.charAt(0).toUpperCase() + labels.nounDisplay.slice(1) + ' del Nucleo');
@@ -903,7 +917,7 @@ $(document).ready(function() {
                 pendingBackupChain = null;
                 setTimeout(function() {
                     $('#backupProgressModal').modal('hide');
-                    startCoreUpdate(false, nextAction.isReinstall);
+                    startCoreUpdate(false, nextAction.isReinstall, nextAction.source);
                 }, 500);
                 return;
             }
@@ -985,7 +999,7 @@ $(document).ready(function() {
                             pendingBackupChain = null;
                             setTimeout(function() {
                                 $('#backupProgressModal').modal('hide');
-                                startCoreUpdate(false, nextAction.isReinstall);
+                                startCoreUpdate(false, nextAction.isReinstall, nextAction.source);
                             }, 500);
                             return;
                         }
@@ -1052,7 +1066,7 @@ $(document).ready(function() {
         }
     });
 
-    function startCoreUpdate(createBackup, isReinstall) {
+    function startCoreUpdate(createBackup, isReinstall, source) {
         configureCoreUpdateModal(isReinstall);
         coreUpdateLog = [];
         coreUpdateFinished = false;
@@ -1063,7 +1077,7 @@ $(document).ready(function() {
         setCoreActionButtonsEnabled(false);
         $('#coreUpdateProgressModal').modal('show');
 
-        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0') + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
+        var sseUrl = 'plugins/system_updater/process_core_update.php?action=start&mode=' + (isReinstall ? 'reinstall' : 'update') + '&create_backup=' + (createBackup ? '1' : '0') + (source ? '&source=' + encodeURIComponent(source) : '') + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
         coreUpdateEventSource = new EventSource(sseUrl, { withCredentials: true });
 
         coreUpdateEventSource.addEventListener('start', function(e) {
@@ -1183,6 +1197,43 @@ $(document).ready(function() {
         openCoreActionWizard(true);
     });
 
+    $('#btn-upload-core-zip').on('click', function(e) {
+        e.preventDefault();
+        var input = document.getElementById('coreZipFile');
+        var $btn = $(this);
+        var $status = $('#coreZipUploadStatus');
+        if (!input || !input.files || !input.files.length) {
+            $status.html('<span class="text-danger">Elegí un archivo .zip del núcleo.</span>');
+            return;
+        }
+        var file = input.files[0];
+        var fd = new FormData();
+        fd.append('core_zip', file);
+        $btn.prop('disabled', true);
+        $status.text('Subiendo ' + file.name + '...');
+        fetch(updaterBaseUrl + '&action=upload_core&ajax=1&_csrf_token=' + encodeURIComponent(csrfToken), {
+            method: 'POST',
+            body: fd,
+            credentials: 'same-origin'
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(resp) {
+            $btn.prop('disabled', false);
+            if (!resp || !resp.success) {
+                $status.html('<span class="text-danger">' + escapeHtml((resp && resp.message) || 'Error al subir el ZIP.') + '</span>');
+                return;
+            }
+            $status.html('<span class="text-success">' + escapeHtml(resp.message || 'ZIP subido.') + '</span>');
+            pendingChainedPluginUpdates = [];
+            // Ask whether to create a backup first (same wizard as core update).
+            openCoreActionWizard(true, 'upload');
+        })
+        .catch(function() {
+            $btn.prop('disabled', false);
+            $status.html('<span class="text-danger">Error de conexión al subir el ZIP.</span>');
+        });
+    });
+
     $(document).on('click', '#btn-chained-core-plugins-update', function(e) {
         e.preventDefault();
         openChainedCorePluginWizard();
@@ -1200,12 +1251,13 @@ $(document).ready(function() {
 
         if (createBackup) {
             startBackup({
-                isReinstall: pendingCoreAction.isReinstall
+                isReinstall: pendingCoreAction.isReinstall,
+                source: pendingCoreAction.source
             });
             return;
         }
 
-        startCoreUpdate(false, pendingCoreAction.isReinstall);
+        startCoreUpdate(false, pendingCoreAction.isReinstall, pendingCoreAction.source);
     });
 
     // Restaurar por pasos: un `begin` + N x `chunk`. Cada request queda corto y

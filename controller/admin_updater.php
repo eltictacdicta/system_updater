@@ -291,6 +291,10 @@ class admin_updater extends fs_controller
                 $this->actionOperationWarnings();
                 break;
 
+            case 'upload_core':
+                $this->actionUploadCore();
+                break;
+
             case 'check_updates':
                 $this->actionCheckUpdates();
                 break;
@@ -1395,6 +1399,81 @@ class admin_updater extends fs_controller
         }
 
         exit;
+    }
+
+    /**
+     * Acción AJAX: sube un ZIP del núcleo para instalarlo sin red (sin egress).
+     */
+    private function actionUploadCore()
+    {
+        header('Content-Type: application/json; charset=UTF-8');
+        $this->requireAjaxCsrf();
+
+        if (!isset($_FILES['core_zip']) || (int) ($_FILES['core_zip']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            http_response_code(400);
+            echo json_encode(['success' => false, 'message' => 'No se recibió ningún archivo .zip.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $name = (string) ($_FILES['core_zip']['name'] ?? '');
+        if (strtolower((string) pathinfo($name, PATHINFO_EXTENSION)) !== 'zip') {
+            http_response_code(400);
+            echo json_encode(['success' => false, 'message' => 'Solo se permiten archivos .zip.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if (!class_exists('ZipArchive')) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => 'La extensión ZIP no está disponible en el servidor.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $dir = rtrim((string) FS_FOLDER, '/') . '/tmp/core_upload';
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => 'No se pudo preparar el directorio de subida.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $target = $dir . '/core.zip';
+        if (!@move_uploaded_file((string) $_FILES['core_zip']['tmp_name'], $target)) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => 'No se pudo guardar el ZIP subido.'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if (!$this->uploadedZipLooksLikeCore($target)) {
+            @unlink($target);
+            http_response_code(400);
+            echo json_encode(['success' => false, 'message' => 'El ZIP no parece un núcleo FSFramework (no contiene VERSION ni index.php).'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        echo json_encode([
+            'success' => true,
+            'message' => 'ZIP del núcleo subido correctamente (' . number_format(((float) filesize($target)) / 1048576, 1) . ' MB).',
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    private function uploadedZipLooksLikeCore(string $zipPath): bool
+    {
+        $zip = new \ZipArchive();
+        if ($zip->open($zipPath) !== true) {
+            return false;
+        }
+
+        $found = false;
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entry = (string) $zip->getNameIndex($i);
+            if (preg_match('#(^|/)(VERSION|index\.php)$#', $entry) === 1) {
+                $found = true;
+                break;
+            }
+        }
+        $zip->close();
+
+        return $found;
     }
 
     /**

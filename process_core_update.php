@@ -51,6 +51,20 @@ $createBackup = isset($_GET['create_backup']) && $_GET['create_backup'] === '0' 
 $mode = isset($_GET['mode']) && $_GET['mode'] === 'reinstall' ? 'reinstall' : 'update';
 $operationLabel = $mode === 'reinstall' ? 'reinstalación' : 'actualización';
 
+// Manually uploaded core ZIP: install from the uploaded file instead of
+// downloading from GitHub (needed when the server has no egress).
+$sourceZip = '';
+if (isset($_GET['source']) && $_GET['source'] === 'upload') {
+    $candidate = rtrim((string) FS_FOLDER, '/') . '/tmp/core_upload/core.zip';
+    if (!is_file($candidate)) {
+        $msg = 'No hay un ZIP de núcleo subido. Súbelo primero.';
+        system_updater_save_progress($progressFile, 'error', $msg, 0, $msg);
+        system_updater_send_sse('error', ['message' => $msg, 'percent' => 0]);
+        exit;
+    }
+    $sourceZip = $candidate;
+}
+
 $progressCallback = function ($step, $message, $percent) use ($progressFile) {
     $data = system_updater_save_progress($progressFile, $step, $message, $percent);
     system_updater_send_sse('progress', $data);
@@ -85,7 +99,7 @@ switch ($action) {
                 system_updater_send_sse('init', ['message' => 'Verificando entorno de ' . $operationLabel . '...', 'percent' => 2]);
                 system_updater_send_sse_keepalive();
 
-                $result = $updater->update_core($createBackup, $progressCallback);
+                $result = $updater->update_core($createBackup, $progressCallback, $sourceZip ?: null);
 
                 if (!empty($result['success'])) {
                     system_updater_save_progress($progressFile, 'complete', $result['message'], 100);

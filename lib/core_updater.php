@@ -65,7 +65,7 @@ class core_updater
      *
      * @return array
      */
-    public function update_core($createBackup = true, $progressCallback = null)
+    public function update_core($createBackup = true, $progressCallback = null, $sourceZip = null)
     {
         $this->errors = [];
         $this->messages = [];
@@ -108,12 +108,21 @@ class core_updater
         $usedGitClone = false;
         $gitMetadataInstalled = false;
 
-        $reportProgress('download', 'Descargando código fuente del núcleo...', 45);
-        $sourceDir = $this->prepareCoreSource($extractPath, $usedGitClone);
+        $reportProgress('download', $sourceZip ? 'Usando el ZIP del núcleo subido...' : 'Descargando código fuente del núcleo...', 45);
+        $sourceDir = $this->prepareCoreSource($extractPath, $usedGitClone, $sourceZip);
 
         if (!$sourceDir || !is_dir($sourceDir)) {
             $this->errors[] = 'Error al descargar la actualización del núcleo.';
             $reportProgress('download_error', 'No se pudo descargar la actualización.', 45);
+            return [
+                'success' => false,
+                'errors' => $this->errors,
+            ];
+        }
+
+        if ($sourceZip && !file_exists($sourceDir . '/VERSION')) {
+            $this->errors[] = 'El ZIP subido no parece un núcleo FSFramework válido (no contiene VERSION).';
+            $reportProgress('download_error', 'El ZIP subido no es un núcleo válido.', 45);
             return [
                 'success' => false,
                 'errors' => $this->errors,
@@ -210,12 +219,22 @@ class core_updater
      *
      * @return string|false
      */
-    private function prepareCoreSource($extractPath, &$usedGitClone)
+    private function prepareCoreSource($extractPath, &$usedGitClone, $sourceZip = null)
     {
         $usedGitClone = false;
 
         if (!is_dir($extractPath) && !@mkdir($extractPath, 0755, true)) {
             return false;
+        }
+
+        // Manually uploaded core ZIP: use it as-is, never touch the network.
+        if ($sourceZip !== null && $sourceZip !== '') {
+            if (!is_file($sourceZip) || !$this->extractZipSafe($sourceZip, $extractPath)) {
+                $this->errors[] = 'No se pudo extraer el ZIP del núcleo subido.';
+                return false;
+            }
+
+            return $this->findFirstDirectory($extractPath);
         }
 
         if ($this->isGitAvailable()) {
