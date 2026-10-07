@@ -260,6 +260,7 @@ function system_updater_save_progress(
         'message' => $message,
         'percent' => $percent,
         'timestamp' => time(),
+        'pid' => function_exists('getmypid') ? getmypid() : 0,
         'error' => $error,
     ], $extra);
 

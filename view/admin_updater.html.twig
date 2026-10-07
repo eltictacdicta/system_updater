@@ -972,18 +972,46 @@ $(document).ready(function() {
         }
         var attempts = 0;
         var maxAttempts = 450; // ~15 min at 2s
+        var emptyStreak = 0;
+        var maxEmptyStreak = 20; // ~40s without a readable snapshot
+        var stalledStreak = 0;
+        var maxStalledStreak = 30; // ~60s with a provably dead worker
         backupPollTimer = setInterval(function() {
             attempts++;
             if (attempts > maxAttempts) {
                 stopBackupStatusPolling();
-                finishBackupAsError('El backup no terminó a tiempo.');
+                finishBackupAsError('El backup no terminó a tiempo. Verificá la lista de copias de seguridad.');
                 return;
             }
             fetch('plugins/system_updater/process_backup.php?action=status', { credentials: 'same-origin', cache: 'no-store' })
                 .then(function(r) { return r.json(); })
                 .then(function(resp) {
                     var data = resp ? resp.data : null;
-                    if (data && data.step === 'complete') {
+                    if (!data) {
+                        emptyStreak++;
+                        if (emptyStreak >= maxEmptyStreak) {
+                            stopBackupStatusPolling();
+                            finishBackupAsError('No se pudo leer el estado de la copia. El proceso del servidor se interrumpió; verificá la lista de copias de seguridad.');
+                        }
+                        return;
+                    }
+                    emptyStreak = 0;
+
+                    if (data.step === 'stalled') {
+                        // The worker looks dead, but keep the grace window: if it
+                        // was a false positive the backup will still write the
+                        // terminal state and complete normally.
+                        stalledStreak++;
+                        updateBackupProgress(data.percent || 88, data.message || 'El proceso de copia no responde...');
+                        if (stalledStreak >= maxStalledStreak) {
+                            stopBackupStatusPolling();
+                            finishBackupAsError(data.message || 'El proceso de copia se interrumpió antes de finalizar. Verificá la lista de copias de seguridad.');
+                        }
+                        return;
+                    }
+                    stalledStreak = 0;
+
+                    if (data.step === 'complete') {
                         stopBackupStatusPolling();
                         backupFinished = true;
                         updateBackupProgress(100, data.message || '¡Completado!', 'success');
@@ -1006,12 +1034,12 @@ $(document).ready(function() {
                         $('#backupCompleteBtn').show();
                         return;
                     }
-                    if (data && data.step === 'error') {
+                    if (data.step === 'error') {
                         stopBackupStatusPolling();
                         finishBackupAsError(data.message || data.error || 'Error durante el backup');
                         return;
                     }
-                    if (data && data.message) {
+                    if (data.message) {
                         updateBackupProgress(data.percent || 88, data.message);
                     }
                 })

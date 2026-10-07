@@ -25,8 +25,9 @@ if (!file_exists(__DIR__ . '/lib/backup_manager.php')) {
 require_once __DIR__ . '/lib/backup_manager.php';
 
 $lastEventTime = time();
+$finalizingEmitted = false;
 
-$progressCallback = function ($step, $message, $percent) use ($progressFile, &$lastEventTime) {
+$progressCallback = function ($step, $message, $percent) use ($progressFile, &$lastEventTime, &$finalizingEmitted) {
     if (time() - $lastEventTime > 10) {
         echo ":keepalive\n\n";
         @flush();
@@ -41,10 +42,40 @@ $progressCallback = function ($step, $message, $percent) use ($progressFile, &$l
     // stream. Emit a 'finalizing' event, then end the HTTP response: the backup
     // finishes in background (ignore_user_abort) and the UI polls action=status.
     if ($step === 'files_close') {
+        $finalizingEmitted = true;
         system_updater_send_sse('finalizing', $data);
         system_updater_finish_response();
     }
 };
+
+/**
+ * Best-effort liveness check for the background worker that owns the progress
+ * snapshot. Returns true unless it is reasonably certain the worker is gone,
+ * so the status endpoint never reports a false "stalled" for a live backup.
+ */
+function system_updater_worker_is_alive(array $data): bool
+{
+    $pid = (int) ($data['pid'] ?? 0);
+    if ($pid <= 0) {
+        return true; // Snapshot without a PID (older run): cannot prove death.
+    }
+
+    if (function_exists('posix_kill')) {
+        if (@posix_kill($pid, 0)) {
+            return true;
+        }
+        // EPERM (1) means the process exists but belongs to another user.
+        if (function_exists('posix_get_last_error') && posix_get_last_error() === 1) {
+            return true;
+        }
+    }
+
+    if (is_dir('/proc')) {
+        return file_exists('/proc/' . $pid);
+    }
+
+    return true;
+}
 
 switch ($action) {
     case 'start':
@@ -81,10 +112,12 @@ switch ($action) {
             system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
         }
 
-        // When the response was ended early (background ZIP finalization) keep
-        // the progress file so the UI can read the terminal state via
-        // action=status. It is overwritten on the next backup.
-        if (!system_updater_response_finished()) {
+        // Keep the terminal progress snapshot whenever the UI was handed off to
+        // polling ('finalizing' emitted), on every SAPI. On hosts without
+        // fastcgi_finish_request the response is not actually finished, but the
+        // client still polls action=status and must find the terminal state.
+        // The snapshot is cleared at the start of the next backup.
+        if (!$finalizingEmitted) {
             @unlink($progressFile);
         }
         break;
@@ -103,16 +136,38 @@ switch ($action) {
     case 'status':
         header('Content-Type: application/json; charset=UTF-8');
         header('Cache-Control: no-store');
-        if (file_exists($progressFile)) {
-            $data = json_decode((string) file_get_contents($progressFile), true);
-            if (!is_array($data)) {
-                $data = null;
+
+        // Read under a shared lock so a poll can never observe a half-written
+        // JSON snapshot (which would decode to null and look like a dead job).
+        $data = null;
+        $fp = @fopen($progressFile, 'rb');
+        if ($fp) {
+            $raw = '';
+            if (@flock($fp, LOCK_SH)) {
+                $raw = (string) stream_get_contents($fp);
+                @flock($fp, LOCK_UN);
             }
-            $isAlive = is_array($data) && (time() - (int) ($data['timestamp'] ?? 0)) < 120;
-            echo json_encode(['active' => $isAlive, 'data' => $data], JSON_UNESCAPED_UNICODE);
-        } else {
-            echo json_encode(['active' => false, 'data' => null], JSON_UNESCAPED_UNICODE);
+            fclose($fp);
+            if ($raw !== '') {
+                $decoded = json_decode($raw, true);
+                if (is_array($decoded)) {
+                    $data = $decoded;
+                }
+            }
         }
+
+        if (is_array($data)) {
+            $isTerminal = in_array((string) ($data['step'] ?? ''), ['complete', 'error'], true);
+            if (!$isTerminal && !system_updater_worker_is_alive($data)) {
+                // The background worker is gone but never wrote a terminal
+                // state: a PHP timeout / request_terminate_timeout killed it.
+                $data['step'] = 'stalled';
+                $data['message'] = 'El proceso de copia se interrumpio antes de finalizar. Verifica la lista de copias de seguridad.';
+            }
+        }
+
+        $isAlive = is_array($data) && (time() - (int) ($data['timestamp'] ?? 0)) < 120;
+        echo json_encode(['active' => $isAlive, 'data' => $data], JSON_UNESCAPED_UNICODE);
         break;
 
     default:

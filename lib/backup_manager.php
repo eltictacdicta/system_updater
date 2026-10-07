@@ -1065,6 +1065,10 @@ class backup_manager
         );
         $zip->addFromString('backup_metadata.json', json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
+        // Building the unified package re-compresses every file; keep the
+        // background phase unbounded just like the files ZIP close.
+        @set_time_limit(0);
+
         if (!$zip->close()) {
             $this->errors[] = "Error al cerrar el paquete unificado.";
             return array('success' => false, 'file' => null);
@@ -1678,7 +1682,7 @@ class backup_manager
             if ($fileCount % 100 === 0 || $fileCount === $totalFiles) {
                 $filesProgress = 55 + (($fileCount / max(1, $totalFiles)) * 33);
                 $reportProgress('files_progress', "Archivos procesados: {$fileCount}/{$totalFiles}", intval($filesProgress));
-                @set_time_limit(300);
+                @set_time_limit(0);
             }
         }
 
@@ -1691,6 +1695,11 @@ class backup_manager
         }
 
         $reportProgress('files_close', 'Finalizando archivo ZIP...', 88);
+
+        // The detached finalization (ZipArchive::close) must not be bounded by
+        // max_execution_time: the SSE response is already closed and the client
+        // polls for the terminal state.
+        @set_time_limit(0);
 
         if (!$zip->close()) {
             $this->errors[] = "Error al cerrar el archivo ZIP.";
@@ -1788,7 +1797,7 @@ class backup_manager
 
             // Prevent timeout
             if ($fileCount % 500 === 0) {
-                @set_time_limit(300);
+                @set_time_limit(0);
             }
         }
 
