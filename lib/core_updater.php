@@ -136,7 +136,7 @@ class core_updater
         
         $reportProgress('copy_files', 'Copiando archivos del núcleo...', 70);
 
-        $excludeFiles = ['config.php', 'plugins', 'backups', 'tmp', 'apk', 'imgs', '.ddev'];
+        $excludeFiles = $this->coreRootCopyExcludes();
         if (file_exists($this->rootPath . '/.git')) {
             $excludeFiles[] = '.git';
         } else {
@@ -650,6 +650,32 @@ class core_updater
                 @unlink($path);
             }
         }
+    }
+
+    /**
+     * Files and directories in the installed tree that a core update must
+     * NEVER overwrite: they are host-specific or hold local state.
+     *
+     * '.htaccess' is host-specific. The distributed file can contain
+     * 'Options' directives that some hosts (e.g. Plesk with AllowOverride
+     * excluding Options) reject with HTTP 500 "Option FollowSymLinks not
+     * allowed here", taking the whole site down. The operator's working
+     * .htaccess must therefore survive an update.
+     *
+     * @return array
+     */
+    private function coreRootCopyExcludes()
+    {
+        return [
+            'config.php',
+            '.htaccess',
+            'plugins',
+            'backups',
+            'tmp',
+            'apk',
+            'imgs',
+            '.ddev',
+        ];
     }
 
     /**

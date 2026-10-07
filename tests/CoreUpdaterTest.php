@@ -71,4 +71,52 @@ class CoreUpdaterTest extends TestCase
         $version = $this->updater->getInstalledCoreVersion();
         $this->assertIsString($version);
     }
+
+    /**
+     * Regression: a core update must not overwrite the operator's .htaccess.
+     * The distributed .htaccess can carry 'Options' directives that some hosts
+     * (e.g. Plesk) reject with HTTP 500, so it must stay host-specific and be
+     * excluded from the copy, like config.php.
+     */
+    public function testHostSpecificHtaccessIsExcludedFromCoreCopy(): void
+    {
+        $method = new \ReflectionMethod($this->updater, 'coreRootCopyExcludes');
+        $method->setAccessible(true);
+
+        $excludes = $method->invoke($this->updater);
+
+        $this->assertContains('config.php', $excludes);
+        $this->assertContains('.htaccess', $excludes);
+    }
+
+    public function testCopyDoesNotOverwriteExistingHtaccess(): void
+    {
+        $source = $this->tempDir . '/source';
+        $dest = $this->tempDir . '/dest';
+        mkdir($source);
+        mkdir($dest);
+
+        file_put_contents($source . '/index.php', '<?php // new core');
+        file_put_contents($source . '/.htaccess', "Options +FollowSymLinks\n");
+        file_put_contents($dest . '/.htaccess', "# operator htaccess\n");
+        file_put_contents($dest . '/index.php', '<?php // old core');
+
+        $excludesMethod = new \ReflectionMethod($this->updater, 'coreRootCopyExcludes');
+        $excludesMethod->setAccessible(true);
+
+        $copyMethod = new \ReflectionMethod($this->updater, 'copyDirectorySelective');
+        $copyMethod->setAccessible(true);
+        $copyMethod->invoke($this->updater, $source, $dest, $excludesMethod->invoke($this->updater));
+
+        $this->assertSame(
+            "# operator htaccess\n",
+            file_get_contents($dest . '/.htaccess'),
+            'Existing .htaccess must be preserved on update'
+        );
+        $this->assertSame(
+            '<?php // new core',
+            file_get_contents($dest . '/index.php'),
+            'Non-excluded files must still be copied'
+        );
+    }
 }
