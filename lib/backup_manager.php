@@ -2025,8 +2025,14 @@ class backup_manager
 
         $reportProgress('files_copy', 'Copiando archivos al sistema...', 30);
 
-        // Copy files to fsRoot, excluding config.php to preserve server-specific settings
-        $excludeFromRestore = array('config.php');
+        // Copy files to fsRoot, excluding host-specific files at the ROOT only:
+        // config.php holds the DB credentials and .htaccess holds the host's
+        // rewrite/security rules. Overwriting either on restore would break the
+        // running install (the core updater treats .htaccess as host-specific
+        // and never ships it over an existing one, so restore must honour the
+        // same rule). Subdirectory .htaccess/config.php are app content and are
+        // restored normally.
+        $excludeFromRestore = array('config.php', '.htaccess');
         $this->copy_directory_with_progress($tempDir, $this->fsRoot, $excludeFromRestore, $progressCallback, 30, 48);
 
         $reportProgress('files_cleanup', 'Limpiando archivos temporales...', 48);
@@ -2677,8 +2683,11 @@ class backup_manager
             // Normalize path separators
             $relativePath = str_replace('\\', '/', $relativePath);
 
-            // Check if file is in exclude list
-            if (in_array(basename($relativePath), $excludeFiles)) {
+            // Check if the file is excluded. Match the exact relative path so
+            // only root-level entries (config.php, .htaccess) are skipped:
+            // basename matching would also drop subdirectory files such as
+            // plugins/foo/.htaccess, which are app content and must be restored.
+            if (in_array($relativePath, $excludeFiles, true)) {
                 return true;
             }
 
