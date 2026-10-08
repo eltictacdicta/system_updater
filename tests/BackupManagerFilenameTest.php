@@ -347,9 +347,13 @@ class BackupManagerFilenameTest extends TestCase
         // secure-backup-access: backup dir now lives OUTSIDE fsRoot (sibling)
         // with a random suffix. Resolve the effective dir so the legacy
         // files land exactly where the manager will look for them.
-        mkdir($this->tempDir . '/tmp', 0755, true);
+        if (!is_dir($this->tempDir . '/tmp')) {
+            mkdir($this->tempDir . '/tmp', 0755, true);
+        }
         $backupPath = backup_manager::resolve_effective_backup_dir($this->tempDir);
-        mkdir($backupPath, 0755, true);
+        if (!is_dir($backupPath)) {
+            mkdir($backupPath, 0755, true);
+        }
         $legacyComplete = 'backup_2024-01-15_10-30-00_complete.zip';
         $legacyDb = 'backup_2024-01-15_10-30-00_db.sql.gz';
         $legacyFiles = 'backup_2024-01-15_10-30-00_files.zip';
