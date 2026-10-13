@@ -1237,9 +1237,12 @@ $(document).ready(function() {
         var file = input.files[0];
         var fd = new FormData();
         fd.append('core_zip', file);
+        // The token goes in the body: the framework only reads it from $_POST
+        // or the X-CSRF-TOKEN header, never from the query string on a POST.
+        fd.append('_csrf_token', csrfToken);
         $btn.prop('disabled', true);
         $status.text('Subiendo ' + file.name + '...');
-        fetch(updaterBaseUrl + '&action=upload_core&ajax=1&_csrf_token=' + encodeURIComponent(csrfToken), {
+        fetch(updaterBaseUrl + '&action=upload_core&ajax=1', {
             method: 'POST',
             body: fd,
             credentials: 'same-origin'
