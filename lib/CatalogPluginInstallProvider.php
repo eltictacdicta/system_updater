@@ -35,9 +35,16 @@ class CatalogPluginInstallProvider implements PluginInstallProvider
 
     public function getDirectRequirements(string $pluginName): array
     {
-        $local = $this->localReader->read($pluginName);
-        if ($local !== []) {
-            return $local;
+        // A plugin installed on disk is authoritative about its own
+        // requirements: an empty `require` means "no dependencies", not "no
+        // information". Only plugins that are NOT installed on disk need the
+        // catalog to resolve their dependency chain.
+        //
+        // Reading the local ini and then falling back on an empty result used to
+        // resurrect dependencies the plugin had already dropped, which broke the
+        // activation cascade with "plugin not installed on disk" errors.
+        if ($this->isInstalled($pluginName)) {
+            return $this->localReader->read($pluginName);
         }
 
         $entry = $this->findCatalogEntry($pluginName);

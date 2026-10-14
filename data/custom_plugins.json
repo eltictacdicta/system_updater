@@ -31,7 +31,7 @@
         "creado": "11-08-2026",
         "descargas": 0,
         "licencia": "LGPL",
-        "require": "catalogo_core"
+        "require": ""
     },
     {
         "id": 92,
@@ -48,7 +48,7 @@
         "creado": "11-08-2026",
         "descargas": 0,
         "licencia": "LGPL",
-        "require": ""
+        "require": "business_data"
     },
     {
         "id": 93,

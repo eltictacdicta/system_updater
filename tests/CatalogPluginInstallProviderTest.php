@@ -44,6 +44,80 @@ class CatalogPluginInstallProviderTest extends TestCase
         $this->removeTree($tempRoot);
     }
 
+    /**
+     * Regression: an installed plugin with an empty `require` declares no
+     * dependencies. It must NOT fall back to the catalog, otherwise the
+     * activation cascade resurrects dependencies the plugin already dropped.
+     */
+    public function testInstalledPluginWithEmptyRequireDoesNotFallBackToCatalog(): void
+    {
+        $tempRoot = sys_get_temp_dir() . '/fs_catalog_empty_' . uniqid('', true);
+        mkdir($tempRoot . '/plugins/business_data', 0777, true);
+        file_put_contents(
+            $tempRoot . '/plugins/business_data/fsframework.ini',
+            "version = 1.1.2\nrequire = \n"
+        );
+
+        $downloader = new class extends \plugin_downloader {
+            public function downloads()
+            {
+                return [
+                    [
+                        'id' => 91,
+                        'nombre' => 'business_data',
+                        'require' => 'catalogo_core',
+                        'link' => 'https://github.com/example/business_data',
+                        'zip_link' => 'https://github.com/example/business_data/archive/main.zip',
+                    ],
+                ];
+            }
+        };
+
+        $provider = new \CatalogPluginInstallProvider($downloader);
+        $ref = new \ReflectionProperty(\CatalogPluginInstallProvider::class, 'localReader');
+        $ref->setAccessible(true);
+        $ref->setValue($provider, new \FSFramework\Core\Plugin\LocalPluginRequirementsReader($tempRoot . '/plugins'));
+
+        $this->assertSame([], $provider->getDirectRequirements('business_data'));
+
+        $this->removeTree($tempRoot);
+    }
+
+    /**
+     * Counterpart of the regression above: plugins NOT installed on disk still
+     * resolve their requirements from the catalog, so the download plan and the
+     * update order can be computed for missing plugins.
+     */
+    public function testNotInstalledPluginStillResolvesRequirementsFromCatalog(): void
+    {
+        $tempRoot = sys_get_temp_dir() . '/fs_catalog_missing_' . uniqid('', true);
+        mkdir($tempRoot . '/plugins', 0777, true);
+
+        $downloader = new class extends \plugin_downloader {
+            public function downloads()
+            {
+                return [
+                    [
+                        'id' => 91,
+                        'nombre' => 'business_data',
+                        'require' => 'catalogo_core',
+                        'link' => 'https://github.com/example/business_data',
+                        'zip_link' => 'https://github.com/example/business_data/archive/main.zip',
+                    ],
+                ];
+            }
+        };
+
+        $provider = new \CatalogPluginInstallProvider($downloader);
+        $ref = new \ReflectionProperty(\CatalogPluginInstallProvider::class, 'localReader');
+        $ref->setAccessible(true);
+        $ref->setValue($provider, new \FSFramework\Core\Plugin\LocalPluginRequirementsReader($tempRoot . '/plugins'));
+
+        $this->assertSame(['catalogo_core'], $provider->getDirectRequirements('business_data'));
+
+        $this->removeTree($tempRoot);
+    }
+
     public function testInstallRejectsPluginsOutsideCatalog(): void
     {
         $tempRoot = sys_get_temp_dir() . '/fs_catalog_miss_' . uniqid('', true);
