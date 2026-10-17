@@ -29,7 +29,9 @@ function system_updater_resolve_session_names(): array
     $names = [system_updater_resolve_session_name()];
 
     // Luego las sesiones del framework como fallback
-    $fsSessionName = 'FSSESS_' . substr(sha1(str_replace('\\', '/', defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__))))), 0, 12);
+    $fsSessionName = defined('FS_SESSION_NAME') && trim((string) FS_SESSION_NAME) !== ''
+        ? trim((string) FS_SESSION_NAME)
+        : 'FSSESS_' . substr(sha1(str_replace('\\', '/', defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__))))), 0, 12);
     if (!in_array($fsSessionName, $names, true)) {
         $names[] = $fsSessionName;
     }
