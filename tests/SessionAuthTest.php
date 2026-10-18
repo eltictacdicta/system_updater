@@ -29,6 +29,30 @@ final class SessionAuthTest extends TestCase
         $this->assertContains('PHPSESSID', $names);
     }
 
+    /**
+     * El candidato del framework debe ser el nombre que el core realmente usa.
+     *
+     * Regression guard: when this plugin re-derived the name with the pre-0.28.0
+     * formula (seed = install root), the two only matched while FS_SESSION_NAME
+     * was set. Without that override the standalone process scripts stopped
+     * finding the framework session and denied every authenticated request.
+     */
+    public function testFrameworkSessionNameComesFromTheCore(): void
+    {
+        $this->assertSame(
+            \FSFramework\Security\SessionManager::resolveSessionName(),
+            system_updater_resolve_framework_session_name()
+        );
+    }
+
+    public function testResolvedNamesContainTheCoreSessionName(): void
+    {
+        $this->assertContains(
+            \FSFramework\Security\SessionManager::resolveSessionName(),
+            system_updater_resolve_session_names()
+        );
+    }
+
     public function testSessionHasUserDetectsSymfonyAttributes(): void
     {
         $this->assertTrue(system_updater_session_has_user([

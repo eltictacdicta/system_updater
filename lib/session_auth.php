@@ -21,6 +21,33 @@ function system_updater_resolve_session_name(): string
 }
 
 /**
+ * Framework session cookie name, as the core itself resolves it.
+ *
+ * Single source of truth: {@see \FSFramework\Security\SessionManager::resolveSessionName()}.
+ * Never re-derive it here with the pre-0.28.0 formula (seed = install root):
+ * the core moved that seed to the per-install secret, so a local copy only
+ * matches while FS_SESSION_NAME is set. Without that override the standalone
+ * process scripts would stop finding the framework session altogether.
+ *
+ * The local branch below is only reached before the plugin bootstrap loads the
+ * Composer autoloader, where the framework class is not available yet.
+ */
+function system_updater_resolve_framework_session_name(): string
+{
+    if (class_exists('FSFramework\\Security\\SessionManager')) {
+        return \FSFramework\Security\SessionManager::resolveSessionName();
+    }
+
+    if (defined('FS_SESSION_NAME') && trim((string) FS_SESSION_NAME) !== '') {
+        return trim((string) FS_SESSION_NAME);
+    }
+
+    $seed = str_replace('\\', '/', defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__))));
+
+    return 'FSSESS_' . substr(sha1($seed), 0, 12);
+}
+
+/**
  * @return array<int, string>
  */
 function system_updater_resolve_session_names(): array
@@ -29,9 +56,7 @@ function system_updater_resolve_session_names(): array
     $names = [system_updater_resolve_session_name()];
 
     // Luego las sesiones del framework como fallback
-    $fsSessionName = defined('FS_SESSION_NAME') && trim((string) FS_SESSION_NAME) !== ''
-        ? trim((string) FS_SESSION_NAME)
-        : 'FSSESS_' . substr(sha1(str_replace('\\', '/', defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__))))), 0, 12);
+    $fsSessionName = system_updater_resolve_framework_session_name();
     if (!in_array($fsSessionName, $names, true)) {
         $names[] = $fsSessionName;
     }
