@@ -8,10 +8,6 @@
  * Mantiene la sesión de usuario para seguridad o solicita login si no hay sesión.
  */
 
-// Iniciar sesión
-session_name('fsSess');
-session_start();
-
 // Configuración básica
 define('FS_FOLDER', dirname(dirname(__DIR__)));
 
@@ -21,6 +17,36 @@ if (file_exists(FS_FOLDER . '/config.php')) {
 } else {
     die("Error: No se encuentra el archivo config.php.");
 }
+
+// Autoload de Composer. Sin él, class_exists() sobre las clases del core y de
+// los plugins devuelve false: la compatibilidad de hashes legacy quedaba muerta
+// y un administrador con contraseña SHA1 no podía entrar justo en el script que
+// existe para cuando no se puede entrar.
+$autoloadFile = FS_FOLDER . '/vendor/autoload.php';
+if (file_exists($autoloadFile)) {
+    require_once $autoloadFile;
+}
+
+// Sesión. El nombre lo resuelve el framework (FS_SESSION_NAME, o el secreto por
+// instalación): fijarlo a 'fsSess' —el nombre de FacturaScripts 2017— dejaba a
+// este script con una sesión propia que ninguna instalación moderna comparte.
+// Debe resolverse DESPUÉS de config.php, que es donde vive FS_SESSION_NAME.
+$sessionAuthFile = __DIR__ . '/lib/session_auth.php';
+if (file_exists($sessionAuthFile)) {
+    require_once $sessionAuthFile;
+}
+
+if (function_exists('system_updater_resolve_framework_session_name')
+    && function_exists('system_updater_configure_php_session')
+) {
+    system_updater_configure_php_session(system_updater_resolve_framework_session_name());
+} else {
+    // Degradación explícita: sin los helpers del plugin se conserva el nombre
+    // histórico para que el script siga siendo autónomo.
+    session_name('fsSess');
+}
+
+session_start();
 
 // Cargar Backup Manager
 if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
