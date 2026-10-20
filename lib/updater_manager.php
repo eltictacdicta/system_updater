@@ -506,6 +506,43 @@ class updater_manager
     }
 
     /**
+     * Ata el manifiesto a la sesión de framework que inició la actualización.
+     *
+     * updater.php corre fuera del bootstrap y no puede abrir la sesión, así que
+     * recibe el nombre de la cookie y un HMAC del id de sesión. Sin el id real,
+     * un token filtrado desde tmp/ no alcanza para finalizar el despliegue.
+     *
+     * Devuelve [] cuando no hay sesión o no hay secreto: en ese caso el
+     * manifiesto queda sin binding y el core lo acepta por compatibilidad.
+     *
+     * @return array<string, string>
+     */
+    private function buildSessionBinding(): array
+    {
+        $sessionName = (string) session_name();
+        $sessionId = (string) session_id();
+
+        if ($sessionId === '' && $sessionName !== '' && isset($_COOKIE[$sessionName])) {
+            $sessionId = trim((string) $_COOKIE[$sessionName]);
+        }
+
+        if ($sessionName === '' || $sessionId === ''
+            || !class_exists(\FSFramework\Security\SecretManager::class)) {
+            return [];
+        }
+
+        $secret = (string) \FSFramework\Security\SecretManager::getSecret();
+        if ($secret === '') {
+            return [];
+        }
+
+        return [
+            'session_name' => $sessionName,
+            'session_fingerprint' => hash_hmac('sha256', $sessionId, $secret),
+        ];
+    }
+
+    /**
      * Prepara la actualización del propio plugin y devuelve la URL de finalización.
      * 
      * @return bool|array
@@ -560,7 +597,7 @@ class updater_manager
                 'staged_path' => $payloadPath,
                 'staging_root' => $stagingRoot,
                 'zip_url' => $downloadUrl,
-            ];
+            ] + $this->buildSessionBinding();
 
             if (@file_put_contents($this->getManifestPath(), json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) === false) {
                 $this->removeTree($stagingRoot);
