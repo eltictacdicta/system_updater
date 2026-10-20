@@ -23,6 +23,12 @@ use FSFramework\Core\Plugin\PluginUpdateOrderer;
 require_once 'base/fs_controller.php';
 require_once __DIR__ . '/../lib/maintenance_mode_compat.php';
 
+/**
+ * Página solo-administrador: descarga y despliega código desde un repositorio,
+ * y reemplaza archivos de plugins. El acceso no puede depender de una fila de
+ * rol.
+ */
+#[\FSFramework\Attribute\AdminOnly]
 class admin_updater extends fs_controller
 {
     /**
