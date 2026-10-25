@@ -552,4 +552,103 @@ PHP);
         $this->assertSame('read', recovery_secret_cli_command(['recovery.php', '--secret']));
         $this->assertSame('rotate', recovery_secret_cli_command(['recovery.php', '--rotate-secret']));
     }
+
+    // ---------------------------------------------------------------------
+    // RACC-02 — an unwritable location is a loud error, never a regeneration
+    // ---------------------------------------------------------------------
+
+    /**
+     * RACC-02 "an unwritable secret location is a loud error".
+     *
+     * The trap this forbids is precise: generating a value per request looks
+     * like the console works, while every request gets a different secret and
+     * the installation is effectively locked out. So there is no value at all,
+     * the failure names where it tried, and a second request produces the same
+     * failure rather than a new attempt with a new value.
+     */
+    public function testAnUnwritableLocationIsALoudErrorAndNeverRegeneratesPerRequest(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->makeSecretLocationsUnwritable();
+        recovery_secret_last_error('');
+
+        $first = recovery_secret_ensure($fixture->root);
+        $error = recovery_secret_last_error();
+
+        $this->assertNull($first, 'no writable location means no value, never a throwaway one');
+        $this->assertStringContainsString('No writable location', $error);
+        $this->assertStringContainsString(
+            $fixture->siblingDirectory(),
+            $error,
+            'the error names the location it tried'
+        );
+        $this->assertStringContainsString('SU_RECOVERY_SECRET', $error, 'and names the escape that still works');
+        $this->assertFileDoesNotExist($fixture->siblingSecretPath());
+        $this->assertFileDoesNotExist($fixture->nestedSecretPath());
+        $this->assertSame('', $this->processErrorLog(), 'a failed resolution logs no value');
+
+        $second = recovery_secret_ensure($fixture->root);
+
+        $this->assertNull($second);
+        $this->assertSame($error, recovery_secret_last_error(), 'the second request repeats the error, not the attempt');
+        $this->assertFileDoesNotExist($fixture->siblingSecretPath());
+    }
+
+    /**
+     * The other half of the same requirement: the directory accepts a write but
+     * the file cannot be put in place (a directory already sits on the path).
+     * Nothing is handed back, and the diagnostic names the path — an operator
+     * should not have to guess which write failed.
+     */
+    public function testAFailedWriteIsReportedAndLeavesNoValueBehind(): void
+    {
+        $fixture = $this->newFixture();
+        mkdir($fixture->siblingSecretPath(), 0777, true);
+        recovery_secret_last_error('');
+
+        $this->assertNull(recovery_secret_ensure($fixture->root));
+
+        $error = recovery_secret_last_error();
+
+        $this->assertStringContainsString($fixture->siblingSecretPath(), $error, 'the error names the path');
+        $this->assertStringContainsString('write', $error);
+        $this->assertNull(recovery_secret_read($fixture->root), 'a failed write persists no secret');
+        $this->assertSame('', $this->processErrorLog(), 'a failed write logs no value');
+    }
+
+    /**
+     * The operator-visible surface of the state above is the CLI: exit
+     * non-zero, no secret on stdout (a value that was not persisted must never
+     * escape), the diagnostic on stderr, and `config.php` still unloaded.
+     */
+    public function testCliReportsTheUnwritableLocationOnStderrAndPrintsNoSecret(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+        $fixture->writeSentinelConfig();
+        $fixture->makeSecretLocationsUnwritable();
+
+        $read = $fixture->runConsole('--secret');
+
+        $this->assertSame(1, $read['code'], 'a failed resolution must be a non-zero exit');
+        $this->assertSame('', trim($read['stdout']), 'the console never prints a secret it could not persist');
+        $this->assertStringContainsString(
+            $fixture->siblingDirectory(),
+            $read['stderr'],
+            'the diagnostic names the location it tried, not a generic excuse'
+        );
+        $this->assertStringContainsString('SU_RECOVERY_SECRET', $read['stderr'], 'and the escape that still works');
+        $this->assertDoesNotMatchRegularExpression('/[0-9a-f]{64}/', $read['stderr']);
+        $this->assertFalse($fixture->configWasLoaded(), 'even the failing escape does not need config.php');
+
+        $rotate = $fixture->runConsole('--rotate-secret');
+
+        $this->assertSame(1, $rotate['code']);
+        $this->assertSame('', trim($rotate['stdout']));
+        $this->assertSame(
+            $read['stderr'],
+            $rotate['stderr'],
+            'two consecutive requests produce the same error, so nothing is being regenerated'
+        );
+    }
 }

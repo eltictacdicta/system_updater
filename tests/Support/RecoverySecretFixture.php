@@ -33,9 +33,13 @@ namespace Tests\SystemUpdater\Support;
  *     <base>/root/config.php           optional; see writeSentinelConfig()
  *     <base>/root/config_loaded.sentinel
  *                                      exists iff config.php really executed
- *     <base>/secret_error_log.txt      the `error_log` sink of every subprocess
- *     <base>/procedure_stdout.txt      captured stdout of the last subprocess
- *     <base>/procedure_stderr.txt      captured stderr of the last subprocess
+ *     <scratch>/secret_error_log.txt   the `error_log` sink of every subprocess
+ *     <scratch>/procedure_stdout.txt   captured stdout of the last subprocess
+ *     <scratch>/procedure_stderr.txt   captured stderr of the last subprocess
+ *
+ * `<scratch>` is a second temp directory, deliberately *not* under `<base>`:
+ * the loud-error test makes the installation and its parent `0555`, and the
+ * harness must still be able to observe the failure it caused.
  *
  * Subprocesses are the only way to observe a real CLI SAPI, a real exit code
  * and a real `error_log()` file; the container runs them as uid 1000, so
@@ -58,15 +62,46 @@ final class RecoverySecretFixture
     /** The file every subprocess writes `error_log()` output into. */
     public string $logFile;
 
+    /**
+     * Somewhere the harness can always write.
+     *
+     * It is deliberately outside `$base`: a test that makes the installation
+     * and its parent unwritable (the RACC-02 loud-error state) must still be
+     * able to capture stdout, stderr and the `error_log` sink, otherwise the
+     * observation would fail for the very reason under test.
+     */
+    public string $scratch;
+
     public function __construct()
     {
-        $this->base = rtrim(sys_get_temp_dir(), '/') . '/su_recsec_' . bin2hex(random_bytes(6));
+        $suffix = bin2hex(random_bytes(6));
+        $this->base = rtrim(sys_get_temp_dir(), '/') . '/su_recsec_' . $suffix;
         $this->root = $this->base . '/root';
-        $this->logFile = $this->base . '/secret_error_log.txt';
+        $this->scratch = rtrim(sys_get_temp_dir(), '/') . '/su_recsec_sinks_' . $suffix;
+        $this->logFile = $this->scratch . '/secret_error_log.txt';
 
-        if (!mkdir($this->root, 0777, true) && !is_dir($this->root)) {
-            throw new \RuntimeException('cannot create the fixture install root at ' . $this->root);
+        foreach ([$this->root, $this->scratch] as $directory) {
+            if (!mkdir($directory, 0777, true) && !is_dir($directory)) {
+                throw new \RuntimeException('cannot create the fixture directory at ' . $directory);
+            }
         }
+    }
+
+    /**
+     * RACC-02's "no writable location" state: neither the sibling of the
+     * installation nor the install root itself accepts a write, so the
+     * last-resort `tmp/` cannot be created either.
+     */
+    public function makeSecretLocationsUnwritable(): void
+    {
+        @chmod($this->base, 0555);
+        @chmod($this->root, 0555);
+    }
+
+    public function restoreSecretLocationModes(): void
+    {
+        @chmod($this->base, 0777);
+        @chmod($this->root, 0777);
     }
 
     /**
@@ -208,7 +243,10 @@ final class RecoverySecretFixture
 
     public function destroy(): void
     {
+        @chmod($this->base, 0777);
+        @chmod($this->root, 0777);
         self::removeTree($this->base);
+        self::removeTree($this->scratch);
     }
 
     /**
@@ -243,8 +281,8 @@ final class RecoverySecretFixture
      */
     private function runProcess(string $command): array
     {
-        $stdout = $this->base . '/procedure_stdout.txt';
-        $stderr = $this->base . '/procedure_stderr.txt';
+        $stdout = $this->scratch . '/procedure_stdout.txt';
+        $stderr = $this->scratch . '/procedure_stderr.txt';
         @unlink($stdout);
         @unlink($stderr);
 
