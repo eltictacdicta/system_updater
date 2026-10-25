@@ -113,7 +113,7 @@ final class RecoverySecretTest extends TestCase
         $written = recovery_secret_ensure($fixture->root);
         $this->assertNotNull($written);
 
-        $result = $fixture->runSnippet('echo recovery_secret_ensure(__DIR__ . "/root");');
+        $result = $fixture->runSnippet('echo recovery_secret_ensure(__DIR__);');
 
         $this->assertSame(0, $result['code'], 'resolving a persisted secret must succeed: ' . $result['stderr']);
         $this->assertSame($written, trim($result['stdout']), 'the value survives a process boundary');

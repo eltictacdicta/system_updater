@@ -69,5 +69,252 @@ declare(strict_types=1);
  * persisted secret to protect.
  */
 
-// The functions of this library are declared below; see the docblock above for
-// the storage decision and the resolution order they implement.
+/**
+ * Operator-facing file name of the persisted secret.
+ *
+ * It is part of the contract, not an implementation detail: an operator who
+ * rescues an installation by hand has to know what to look for.
+ */
+function recovery_secret_filename(): string
+{
+    return 'system_updater_recovery_secret.php';
+}
+
+/**
+ * Resolve the installation root. Everything else in this file is a pure
+ * function of it, which is what lets the suite run against a temp tree.
+ */
+function recovery_secret_install_root(?string $installRoot = null): string
+{
+    if ($installRoot !== null && $installRoot !== '') {
+        return rtrim($installRoot, '/\\');
+    }
+
+    if (defined('FS_FOLDER')) {
+        return rtrim((string) FS_FOLDER, '/\\');
+    }
+
+    return rtrim(dirname(dirname(__DIR__)), '/\\');
+}
+
+/**
+ * Candidate locations, in the documented order: outside the webroot first,
+ * inside it only as a last resort.
+ *
+ * @return string[]
+ */
+function recovery_secret_candidates(?string $installRoot = null): array
+{
+    $root = recovery_secret_install_root($installRoot);
+
+    return [
+        dirname($root) . '/' . recovery_secret_filename(),
+        $root . '/tmp/' . recovery_secret_filename(),
+    ];
+}
+
+/**
+ * RACC-02's shape: 32 crypto-random bytes rendered as 64 hex characters.
+ */
+function recovery_secret_is_valid(string $value): bool
+{
+    return strlen($value) === 64 && ctype_xdigit($value);
+}
+
+/**
+ * RACC-02: the value itself. `random_bytes()` is the only source — never a
+ * digest of the install path, the database name or a timestamp.
+ */
+function recovery_secret_generate(): string
+{
+    return bin2hex(random_bytes(32));
+}
+
+/**
+ * The persisted bytes.
+ *
+ * The file has to be safe to request directly, because the last-resort
+ * candidate lives inside the webroot: it is a PHP file whose first statement
+ * answers 404 and exits, so an executed request emits nothing at all. The value
+ * itself sits on a comment line that only ever gets *parsed as text* by this
+ * library — the file is never `include`d, so its bytes can never execute as
+ * code either.
+ */
+function recovery_secret_payload(string $value): string
+{
+    return "<?php\n"
+        . "// system_updater per-installation recovery secret (RACC-02).\n"
+        . "// Owner-only file. A direct HTTP request must disclose nothing, so the\n"
+        . "// guard below answers 404 and exits before the value line is reached.\n"
+        . "// The console reads this file as text; it is never included.\n"
+        . "http_response_code(404);\n"
+        . "exit;\n"
+        . '# secret: ' . $value . "\n";
+}
+
+/**
+ * Extract the value from the persisted bytes, or `null` when the file does not
+ * hold one (truncated, replaced by a human, or not ours at all).
+ */
+function recovery_secret_parse(string $bytes): ?string
+{
+    if (preg_match('/^# secret: ([0-9a-f]{64})$/m', $bytes, $matches) !== 1) {
+        return null;
+    }
+
+    return recovery_secret_is_valid($matches[1]) ? $matches[1] : null;
+}
+
+/**
+ * The candidate that already holds a valid secret, or `null`.
+ */
+function recovery_secret_existing_path(?string $installRoot = null): ?string
+{
+    foreach (recovery_secret_candidates($installRoot) as $candidate) {
+        if (!is_file($candidate) || !is_readable($candidate)) {
+            continue;
+        }
+
+        if (recovery_secret_parse((string) @file_get_contents($candidate)) !== null) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * The first candidate whose directory can be written, or `''`.
+ *
+ * A missing directory is created (a last-resort candidate needs `tmp/`); a
+ * directory that exists but refuses the write is skipped, never forced.
+ */
+function recovery_secret_writable_path(?string $installRoot = null): string
+{
+    foreach (recovery_secret_candidates($installRoot) as $candidate) {
+        $directory = dirname($candidate);
+
+        if (!is_dir($directory) && !@mkdir($directory, 0700, true) && !is_dir($directory)) {
+            continue;
+        }
+
+        if (is_writable($directory)) {
+            return $candidate;
+        }
+    }
+
+    return '';
+}
+
+/**
+ * Where the secret is (or would be) persisted. `''` means "nowhere", which is
+ * the loud-error state RACC-02 forbids resolving by generating a throwaway
+ * value per request.
+ */
+function recovery_secret_path(?string $installRoot = null): string
+{
+    return recovery_secret_existing_path($installRoot) ?? recovery_secret_writable_path($installRoot);
+}
+
+/**
+ * The persisted value, or `null`. Reads no `config.php` and loads no class.
+ */
+function recovery_secret_read(?string $installRoot = null): ?string
+{
+    $path = recovery_secret_existing_path($installRoot);
+    if ($path === null) {
+        return null;
+    }
+
+    return recovery_secret_parse((string) @file_get_contents($path));
+}
+
+/**
+ * Persist a value with owner-only permissions.
+ *
+ * The write goes to a sibling temp file and is renamed into place, so a crash
+ * cannot leave a half-written secret that resolves to garbage; the temp file is
+ * removed on every failure path. No fallback value is ever invented here: a
+ * failed write returns `false`.
+ */
+function recovery_secret_store(string $value, ?string $target = null): bool
+{
+    if (!recovery_secret_is_valid($value)) {
+        return false;
+    }
+
+    $path = $target ?? recovery_secret_path();
+    if ($path === '') {
+        return false;
+    }
+
+    $directory = dirname($path);
+    if (!is_dir($directory) && !@mkdir($directory, 0700, true) && !is_dir($directory)) {
+        return false;
+    }
+
+    $temp = $path . '.' . bin2hex(random_bytes(6)) . '.tmp';
+    if (@file_put_contents($temp, recovery_secret_payload($value)) === false) {
+        return false;
+    }
+
+    @chmod($temp, 0600);
+
+    if (!@rename($temp, $path)) {
+        @unlink($temp);
+
+        return false;
+    }
+
+    @chmod($path, 0600);
+
+    return true;
+}
+
+/**
+ * What *is* the secret (RACC-03): the operator pin when the constant is
+ * already defined, otherwise the persisted value.
+ *
+ * This function never loads `config.php`. That is deliberate and load-bearing:
+ * branch 2 must answer with a damaged or absent `config.php`, so the pin can
+ * only win when the caller already loaded the file — and the only caller
+ * allowed to do that is the console's lost-secret fallback.
+ */
+function recovery_secret_resolve(?string $installRoot = null): ?string
+{
+    $pin = defined('SU_RECOVERY_SECRET') ? constant('SU_RECOVERY_SECRET') : null;
+    if (is_string($pin) && trim($pin) !== '') {
+        return trim($pin);
+    }
+
+    return recovery_secret_read($installRoot);
+}
+
+/**
+ * First use: return the secret, generating and persisting it once when the
+ * installation has none.
+ *
+ * A secret is only handed back after it has been persisted. When no writable
+ * location exists this returns `null` and nothing else — an in-memory value
+ * would look like success while differing on every request, which is the
+ * failure RACC-02 calls out explicitly.
+ */
+function recovery_secret_ensure(?string $installRoot = null): ?string
+{
+    $existing = recovery_secret_resolve($installRoot);
+    if ($existing !== null) {
+        return $existing;
+    }
+
+    $target = recovery_secret_writable_path($installRoot);
+    if ($target === '') {
+        return null;
+    }
+
+    $value = recovery_secret_generate();
+    if (!recovery_secret_store($value, $target)) {
+        return null;
+    }
+
+    return $value;
+}
