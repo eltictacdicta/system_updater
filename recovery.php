@@ -128,15 +128,16 @@ if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
 // de datos; sin ella el formulario vuelve a mostrarse, que es la respuesta
 // honesta —no hay forma de verificar a nadie— y no una página de error.
 $db = null;
-$dbError = null;
 
 try {
     $db = new mysqli(FS_DB_HOST, FS_DB_USER, FS_DB_PASS, FS_DB_NAME, FS_DB_PORT);
     if ($db->connect_error) {
         throw new Exception("Error de conexión: " . $db->connect_error);
     }
-} catch (Throwable $e) {
-    $dbError = $e->getMessage();
+} catch (Throwable) {
+    // El motivo no se guarda ni se imprime: lo que el operador necesita saber
+    // es que no hay base de datos, y el detalle del motor incluye host y
+    // usuario. La consola ya está detrás del secreto; no hace falta más.
     $db = null;
 }
 
