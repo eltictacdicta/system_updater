@@ -9,7 +9,7 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
-require_once FS_FOLDER . '/plugins/system_updater/lib/session_auth.php';
+require_once dirname(__DIR__) . '/lib/session_auth.php';
 
 /**
  * Contract of the standalone guard decision.
@@ -590,9 +590,16 @@ final class GuardDecisionTest extends TestCase
         $this->assertStringNotContainsString('guard-source-empty', $printed);
     }
 
+    /**
+     * Absolute path to the guard source.
+     *
+     * Relative to this file, never to the framework install root: that constant
+     * is a bootstrap concern, and depending on it here made the *suite* fail to
+     * load instead of failing a test.
+     */
     private function guardSource(): string
     {
-        return (string) file_get_contents(FS_FOLDER . '/plugins/system_updater/lib/session_auth.php');
+        return (string) file_get_contents(dirname(__DIR__) . '/lib/session_auth.php');
     }
 
     /**
