@@ -94,6 +94,62 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
     }
 
     /**
+     * The save path the marker is read from is the save path the session is
+     * opened in — on **every** branch, including an installation that declares
+     * `FS_SESSION_SAVE_PATH`.
+     *
+     * The two used to disagree: `recovery_console_read_marker()` inspected
+     * `FS_SESSION_SAVE_PATH` with `is_file()` and then called `session_start()`
+     * before `recovery_session_configure()` had applied that path, so the
+     * session module looked for the same id in the ini `session.save_path` and
+     * the `files` handler created an **empty** file there. The marker read
+     * returned `false`, the login POST got the gate's 404 (RACC-05 broken on
+     * every installation that declares the constant) and the refusal left a
+     * stray empty session file behind.
+     *
+     * The fixture server is started with `-d session.save_path=<scratch>`, and
+     * the installation declares a different, existing directory, so "which path
+     * answered?" is a filesystem fact rather than an inference.
+     */
+    public function testTheMarkerIsReadFromTheSavePathTheSessionActuallyUses(): void
+    {
+        $secret = $this->newSecret();
+        $harness = $this->newHarness(self::FILES);
+
+        $declared = $harness->base . '/app_sessions';
+        $this->assertTrue(mkdir($declared, 0777, true), 'premise: the declared save path exists');
+
+        $this->bootMarkerFixture($harness, $secret, [
+            "define('FS_SESSION_SAVE_PATH', '" . $declared . "');",
+        ]);
+
+        $open = $harness->request(self::CONSOLE . '?secret=' . $secret, ['jar' => true]);
+        $this->assertSame(200, $open['status'], 'the secret opens the console: ' . $open['body']);
+        $this->assertNotSame(
+            [],
+            glob($declared . '/sess_*') ?: [],
+            'premise: the accepted request wrote its session where the installation says'
+        );
+
+        $post = $harness->request(self::CONSOLE, [
+            'jar' => true,
+            'post' => ['nick' => 'admin', 'password' => 'whatever'],
+        ]);
+
+        $this->assertSame(
+            200,
+            $post['status'],
+            'the marker must be read from the same save path the session was opened in: ' . $post['body']
+        );
+        $this->assertStringContainsString('name="nick"', $post['body'], 'the console answered, it did not deny');
+        $this->assertSame(
+            [],
+            $harness->sessionFiles(),
+            'and the ini save path must hold no session: a session started there is a stray empty file'
+        );
+    }
+
+    /**
      * RACC-05 "a marker cannot be minted without the secret": the refusal must
      * leave no state behind, and a forged cookie must not create one.
      */
@@ -204,18 +260,28 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
     private function markerFixture(string $secret): ConsoleHttpHarness
     {
         $harness = $this->newHarness(self::FILES);
-        $harness->boot(implode("\n", [
+        $this->bootMarkerFixture($harness, $secret);
+
+        return $harness;
+    }
+
+    /**
+     * @param string[] $extraConfig appended verbatim to the fixture config.php
+     */
+    private function bootMarkerFixture(
+        ConsoleHttpHarness $harness,
+        string $secret,
+        array $extraConfig = []
+    ): void {
+        $harness->boot(implode("\n", array_merge([
             "define('FS_DB_HOST', '127.0.0.1');",
             "define('FS_DB_PORT', 1);",
             "define('FS_DB_USER', 'nobody');",
             "define('FS_DB_PASS', 'nothing');",
             "define('FS_DB_NAME', 'none');",
             "define('FS_SESSION_NAME', '" . self::SESSION_NAME . "');",
-            '',
-        ]));
+        ], $extraConfig, [''])));
         $harness->persistSecret($secret);
-
-        return $harness;
     }
 
     private function newSecret(): string
