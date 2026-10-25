@@ -250,6 +250,32 @@ function recovery_session_name(?string $installRoot = null, ?string $configFile 
 }
 
 /**
+ * Normalize an ini `session.save_path` value to the directory the `files`
+ * handler actually writes into.
+ *
+ * The ini value accepts the `N;/path` and `N;MODE;/path` forms (depth, optional
+ * mode), and it can be empty — in which case PHP's `files` handler falls back to
+ * the system temp directory. Everything that reasons about *which file* a
+ * session id maps to has to go through this: a raw `N;/path` compared against a
+ * plain path is a comparison that can never match.
+ */
+function recovery_session_normalize_save_path(string $configured): string
+{
+    $configured = trim($configured);
+
+    if (str_contains($configured, ';')) {
+        $parts = explode(';', $configured);
+        $configured = trim((string) end($parts));
+    }
+
+    if ($configured === '') {
+        return rtrim(sys_get_temp_dir(), '/');
+    }
+
+    return rtrim($configured, '/');
+}
+
+/**
  * The directory PHP stores session files in.
  *
  * `FS_SESSION_SAVE_PATH` wins because `config.php` is where the installation
@@ -262,18 +288,34 @@ function recovery_session_save_path(): string
         return rtrim(trim((string) FS_SESSION_SAVE_PATH), '/');
     }
 
-    $configured = trim((string) session_save_path());
+    return recovery_session_normalize_save_path((string) session_save_path());
+}
 
-    if (str_contains($configured, ';')) {
-        $parts = explode(';', $configured);
-        $configured = trim((string) end($parts));
+/**
+ * Apply the save path, and **verify** the session module took it.
+ *
+ * This exists because inspecting one path and starting the session in another
+ * is a silent, security-relevant divergence: `is_file()` would find the marker
+ * where the installation says sessions live, while `session_start()` would look
+ * for the same id in the ini path and the `files` handler would create an empty
+ * file there — the marker read answers "no", and the refusal leaves a stray
+ * file behind.
+ *
+ * So the value is read back from the session module instead of trusting the
+ * setter (PHP can refuse it: `open_basedir`, a locked ini, an active session)
+ * and compared against the value the caller is about to inspect. Only a `true`
+ * makes the two the same path; a caller that inspects a session file must
+ * refuse when this is `false` rather than guess.
+ */
+function recovery_session_apply_save_path(): bool
+{
+    $desired = recovery_session_save_path();
+
+    if ($desired !== '' && is_dir($desired)) {
+        @session_save_path($desired);
     }
 
-    if ($configured === '') {
-        return rtrim(sys_get_temp_dir(), '/');
-    }
-
-    return rtrim($configured, '/');
+    return recovery_session_normalize_save_path((string) session_save_path()) === $desired;
 }
 
 /**
@@ -342,10 +384,11 @@ function recovery_session_restore_headers(array $previous): void
  */
 function recovery_session_configure(string $sessionName): void
 {
-    $savePath = recovery_session_save_path();
-    if ($savePath !== '' && is_dir($savePath)) {
-        @session_save_path($savePath);
-    }
+    // Applied through the same helper the marker read uses, so the path the
+    // console writes to and the path it later inspects cannot diverge. The
+    // result is not fatal here: the console has to open a session either way,
+    // and a declared path PHP refuses leaves the ini path in force.
+    recovery_session_apply_save_path();
 
     $lifetime = defined('FS_SESSION_LIFETIME') ? (int) FS_SESSION_LIFETIME : 7200;
 
@@ -408,6 +451,13 @@ function recovery_console_mark_authorized(): void
  * is unknown, which would turn a forged cookie into session state on the very
  * path that promises to leave none. It also keeps a crafted cookie from naming
  * a path (`sess_../../etc/passwd`).
+ *
+ * The save path is applied *before* it is inspected and the application is
+ * verified, so `is_file()` below and the file `session_start()` opens are the
+ * same file on every branch — including an installation that declares
+ * `FS_SESSION_SAVE_PATH`, where the ini value points elsewhere. When the
+ * declared path cannot be made the active one there is nothing trustworthy to
+ * read, so the answer is "no" rather than a guess at the ini directory.
  */
 function recovery_console_read_marker(string $sessionName, string $sessionId): bool
 {
@@ -416,6 +466,10 @@ function recovery_console_read_marker(string $sessionName, string $sessionId): b
     }
 
     if (preg_match('/^[A-Za-z0-9,-]{22,256}$/', $sessionId) !== 1) {
+        return false;
+    }
+
+    if (!recovery_session_apply_save_path()) {
         return false;
     }
 
