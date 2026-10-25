@@ -108,8 +108,15 @@ session_start();
 // Marca de autorización (RACC-05): se escribe SÓLO después de la comparación
 // constante del secreto, nunca tras llegar aquí por la propia marca. A partir de
 // aquí el secreto ya no hace falta: la sesión lo lleva.
+//
+// La marca guarda además la huella del valor que la autorizó, y se compara con
+// el valor contra el que la puerta respondería ahora (el persistido, o el pin
+// del operador cuando no hay persistido). Rotar el secreto retira así las
+// marcas que emitió el valor antiguo: quien obtuvo el secreto filtrado y ya
+// había abierto una sesión pierde el acceso (RACC-06).
 if ($su_secret_gate['granted']) {
-    recovery_console_mark_authorized();
+    $su_grant = recovery_secret_gate_value(FS_FOLDER);
+    recovery_console_mark_authorized($su_grant === null ? null : $su_grant['value']);
 }
 
 // Cargar Backup Manager

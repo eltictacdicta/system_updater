@@ -50,12 +50,42 @@ declare(strict_types=1);
  * - discarded with the session, and rotated by `session_regenerate_id(true)`
  *   together with the login rotation (`REC-06`, wired in a later slice).
  *
+ * It also names the credential that issued it. `authorized => true` on its own
+ * would outlive that credential: `--rotate-secret` is RACC-06's way to retire a
+ * leaked secret, but it only changes what the gate accepts, so a session that
+ * already carried the bare marker kept opening the console for the rest of the
+ * session lifetime — whoever obtained the old secret kept their way in. The
+ * marker therefore stores a fingerprint of the granting value and is verified
+ * against the credential the gate would accept *now*, so a rotation retires
+ * every marker it did not issue.
+ *
+ * The operator pin is the same rule, not an exception. The fingerprint is always
+ * over the value the gate answered against — the persisted value when one
+ * exists, the pin only in the state where nothing is persisted — so a
+ * pin-granted marker survives a rotation only while the pin is still the current
+ * credential, and dies the moment a value is persisted (which is what the first
+ * `--rotate-secret` does) or the pin stops being defined. Rotating the persisted
+ * value when a pin is in force changes nothing about what grants access, so
+ * refusing that marker would be theatre; the pin itself has to be retired.
+ *
  * Reading it must not be a write. The marker is read with headers suspended —
  * no `Set-Cookie`, no cache directives — and only for a session id that already
  * has a file on disk, so a request that carries a session cookie it invented
  * cannot make the console create a session. That is also what keeps the
- * refusal path free of session state.
+ * refusal path free of session state, and what keeps a marker refused for a
+ * stale fingerprint from being rewritten into a valid one.
  */
+
+/**
+ * The per-installation secret this file reasons about.
+ *
+ * `require_once` because the marker is meaningless without it — the fingerprint
+ * is compared against the value the gate answers against — and because the
+ * console's own graph loads the secret library first anyway, so this is a
+ * no-op there. Both files are plugin-local and core-free (RACC-01); nothing
+ * under `base/`, `src/`, `controller/`, `model/` or `vendor/` is touched.
+ */
+require_once __DIR__ . '/recovery_secret.php';
 
 /**
  * The marker's namespace inside the console's session.
@@ -409,19 +439,48 @@ function recovery_session_configure(string $sessionName): void
 }
 
 /**
- * Whether a session array carries the console's authorization marker.
+ * The marker's binding to the credential that granted it.
  *
- * `authorized === true` and the array shape are both required: a session that
- * happens to hold the string `'recovery_console' => 'yes'` (or any scalar)
- * must not pass.
+ * An HMAC over a fixed context string, keyed by the granting value. The marker
+ * never stores the secret, nor a plain digest of it: a bare SHA-256 of a
+ * 64-hex secret is a password-equivalent for anyone who can read the session
+ * file, while an HMAC under a context string is only useful for this one
+ * comparison. `hash_equals()` keeps that comparison constant-time.
+ */
+function recovery_console_fingerprint(string $grantedValue): string
+{
+    return hash_hmac('sha256', RECOVERY_CONSOLE_NAMESPACE, $grantedValue);
+}
+
+/**
+ * Whether a session array carries a marker this request's credential still
+ * issues.
+ *
+ * The shape is required (`authorized === true` and the array), **and** the
+ * fingerprint has to match the value the gate would accept now. A marker
+ * without a fingerprint, or with one bound to a value that has since been
+ * rotated away, is not authorization: it is the normal refusal path.
+ *
+ * `$grantedValue` is `null` when this request can name no credential at all —
+ * nothing is persisted and no pin is visible — in which case nothing can be
+ * verified and the answer is `false`.
  *
  * @param array<string, mixed> $session
  */
-function recovery_console_has_marker(array $session): bool
+function recovery_console_has_marker(array $session, ?string $grantedValue): bool
 {
     $marker = $session[RECOVERY_CONSOLE_NAMESPACE] ?? null;
 
-    return is_array($marker) && ($marker['authorized'] ?? false) === true;
+    if (!is_array($marker) || ($marker['authorized'] ?? false) !== true) {
+        return false;
+    }
+
+    $fingerprint = $marker['fingerprint'] ?? null;
+    if (!is_string($fingerprint) || $grantedValue === null || $grantedValue === '') {
+        return false;
+    }
+
+    return hash_equals(recovery_console_fingerprint($grantedValue), $fingerprint);
 }
 
 /**
@@ -430,16 +489,25 @@ function recovery_console_has_marker(array $session): bool
  * The `granted_at` timestamp exists so an operator reading the session can tell
  * when the console was opened; nothing in this slice expires on it, because the
  * session's own lifetime is the documented lifetime of the marker.
+ *
+ * `$grantedValue` is the value the gate answered against. Without one there is
+ * nothing to bind the marker to and nothing is written: an unbound marker would
+ * be exactly the state a rotation cannot retire.
  */
-function recovery_console_mark_authorized(): void
+function recovery_console_mark_authorized(?string $grantedValue): void
 {
     if (session_status() !== PHP_SESSION_ACTIVE) {
+        return;
+    }
+
+    if ($grantedValue === null || $grantedValue === '') {
         return;
     }
 
     $_SESSION[RECOVERY_CONSOLE_NAMESPACE] = [
         'authorized' => true,
         'granted_at' => time(),
+        'fingerprint' => recovery_console_fingerprint($grantedValue),
     ];
 }
 
@@ -459,7 +527,7 @@ function recovery_console_mark_authorized(): void
  * declared path cannot be made the active one there is nothing trustworthy to
  * read, so the answer is "no" rather than a guess at the ini directory.
  */
-function recovery_console_read_marker(string $sessionName, string $sessionId): bool
+function recovery_console_read_marker(string $sessionName, string $sessionId, ?string $grantedValue): bool
 {
     if (session_status() === PHP_SESSION_ACTIVE) {
         return false;
@@ -487,7 +555,10 @@ function recovery_console_read_marker(string $sessionName, string $sessionId): b
             return false;
         }
 
-        return recovery_console_has_marker(is_array($_SESSION ?? null) ? $_SESSION : []);
+        return recovery_console_has_marker(
+            is_array($_SESSION ?? null) ? $_SESSION : [],
+            $grantedValue
+        );
     } finally {
         $_SESSION = [];
         recovery_session_restore_headers($suspended);
@@ -527,5 +598,17 @@ function recovery_console_authorized_by_marker(?string $installRoot = null, ?str
         return false;
     }
 
-    return recovery_console_read_marker($sessionName, $sessionId);
+    // Resolved *after* the name, and that order matters: resolving the name is
+    // what loads `config.php` on this path, so an operator pin defined there is
+    // visible here. What comes back is the value the gate would answer against
+    // now — the same function the gate itself consumes — which is what makes a
+    // rotated secret retire the marker it granted, and a pin-granted marker
+    // survive only while the pin is still the current credential.
+    $grant = recovery_secret_gate_value($installRoot);
+
+    return recovery_console_read_marker(
+        $sessionName,
+        $sessionId,
+        $grant === null ? null : $grant['value']
+    );
 }
