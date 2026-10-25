@@ -51,6 +51,12 @@ if (!$su_secret_gate['granted']) {
     exit;
 }
 
+// El secreto viaja en la URL, así que la página no puede filtrarlo por
+// `Referer` a los CDN de terceros que carga (bootstrap, font-awesome,
+// jquery). Sólo se anuncia en el camino aceptado: la negativa de arriba no
+// lleva ninguna cabecera que la distinga de un archivo inexistente.
+header('Referrer-Policy: no-referrer');
+
 // Cargar configuración
 if (file_exists(FS_FOLDER . '/config.php')) {
     require_once FS_FOLDER . '/config.php';
@@ -95,19 +101,30 @@ if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
     die("Error: No se encuentra el plugin system_updater.");
 }
 
-// Conexión a base de datos para autenticación
+// Conexión a base de datos para autenticación.
+//
+// Un fallo de conexión ya no es una parada (RACC-01: config.php es el único
+// "hard stop"): la pantalla de login y la lista de copias se pintan sin
+// credenciales, y este script existe justo para el estado en el que el resto de
+// la instalación no funciona. Las credenciales se evalúan sólo cuando hay base
+// de datos; sin ella el formulario vuelve a mostrarse, que es la respuesta
+// honesta —no hay forma de verificar a nadie— y no una página de error.
+$db = null;
+$dbError = null;
+
 try {
     $db = new mysqli(FS_DB_HOST, FS_DB_USER, FS_DB_PASS, FS_DB_NAME, FS_DB_PORT);
     if ($db->connect_error) {
         throw new Exception("Error de conexión: " . $db->connect_error);
     }
-} catch (Exception $e) {
-    die("Error crítico: No se puede conectar a la base de datos. " . $e->getMessage());
+} catch (Throwable $e) {
+    $dbError = $e->getMessage();
+    $db = null;
 }
 
 // Verificar autenticación
 $user = null;
-if (isset($_SESSION['user_id'])) {
+if ($db !== null && isset($_SESSION['user_id'])) {
     // Verificar que el usuario sigue existiendo y es admin
     $stmt = $db->prepare("SELECT nick, admin FROM fs_users WHERE nick = ?");
     $stmt->bind_param("s", $_SESSION['user_id']);
@@ -122,8 +139,14 @@ if (isset($_SESSION['user_id'])) {
     }
 }
 
-// Procesar login si se envió el formulario
-if (!$user && isset($_POST['nick']) && isset($_POST['password'])) {
+// Procesar login si se envió el formulario. Sin base de datos no se evalúa
+// ninguna credencial, pero el envío queda registrado como tal: el formulario
+// se repinta con el motivo, no con el 404 de la puerta.
+if ($db === null && !$user && isset($_POST['nick']) && isset($_POST['password'])) {
+    $error = 'No se puede conectar a la base de datos.';
+}
+
+if ($db !== null && !$user && isset($_POST['nick']) && isset($_POST['password'])) {
     $nick = $db->real_escape_string($_POST['nick']);
     $password = $_POST['password'];
 
