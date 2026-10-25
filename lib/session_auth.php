@@ -197,6 +197,22 @@ function system_updater_flatten_session(array $session): array
     return $flat;
 }
 
+/**
+ * Nick written by a completed login, or null.
+ *
+ * Pure by contract: no session call, no I/O and no class lookup, so it can be
+ * asserted over an injected session array (AUTH-02).
+ *
+ * @param array<string, mixed> $session
+ */
+function system_updater_resolve_session_nick(array $session): ?string
+{
+    $flat = system_updater_flatten_session($session);
+    $nick = trim((string) ($flat['user_nick'] ?? ''));
+
+    return $nick === '' ? null : $nick;
+}
+
 function system_updater_session_is_valid(array $session): bool
 {
     $flat = system_updater_flatten_session($session);
@@ -355,41 +371,124 @@ function system_updater_native_session_start(): bool
 }
 
 /**
- * @return array<string, mixed>
+ * Enumerate every candidate session for the request.
+ *
+ * Pure: the I/O lives in `$readSession`. It evaluates ALL names — it never
+ * returns at the first non-empty one, which is the defect AUTH-02 closes —
+ * and a candidate that cannot be opened is skipped, not fatal.
+ *
+ * @param array<int, string> $sessionNames
+ * @param array<string, mixed> $cookies
+ * @param callable(string, string): array<string, mixed> $readSession
+ * @return array<string, array<string, mixed>> sessions keyed by session name
  */
-function system_updater_read_session_snapshot(): array
+function system_updater_collect_session_candidates(array $sessionNames, array $cookies, callable $readSession): array
 {
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        return is_array($_SESSION ?? null) ? $_SESSION : [];
-    }
+    $candidates = [];
 
-    foreach (system_updater_resolve_session_names() as $sessionName) {
-        $sessionId = isset($_COOKIE[$sessionName]) ? trim((string) $_COOKIE[$sessionName]) : '';
+    foreach ($sessionNames as $sessionName) {
+        $name = trim((string) $sessionName);
+        if ($name === '' || array_key_exists($name, $candidates)) {
+            continue;
+        }
+
+        $sessionId = isset($cookies[$name]) ? trim((string) $cookies[$name]) : '';
         if ($sessionId === '') {
             continue;
         }
 
-        system_updater_configure_php_session($sessionName);
-        session_id($sessionId);
-
-        if (PHP_VERSION_ID >= 70100) {
-            @session_start(['read_and_close' => true]);
-        } else {
-            @session_start();
+        try {
+            $session = $readSession($name, $sessionId);
+        } catch (\Throwable $error) {
+            $session = [];
         }
 
-        $session = is_array($_SESSION ?? null) ? $_SESSION : [];
-
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            session_write_close();
+        if (!is_array($session) || $session === []) {
+            continue;
         }
 
-        if ($session !== []) {
-            return $session;
-        }
+        $candidates[$name] = $session;
     }
 
-    return [];
+    return $candidates;
+}
+
+/**
+ * Read one session by cookie name and leave the caller's session untouched.
+ *
+ * @return array<string, mixed>
+ */
+function system_updater_read_session_file(string $sessionName, string $sessionId): array
+{
+    $wasActive = session_status() === PHP_SESSION_ACTIVE;
+    $savedName = $wasActive ? (string) session_name() : '';
+    $savedId = $wasActive ? (string) session_id() : '';
+    $savedSession = $wasActive && is_array($_SESSION ?? null) ? $_SESSION : [];
+
+    if ($wasActive) {
+        session_write_close();
+    }
+
+    $_SESSION = [];
+    system_updater_configure_php_session($sessionName);
+    session_id($sessionId);
+    $started = @session_start(['read_and_close' => true]);
+    $session = $started && is_array($_SESSION ?? null) ? $_SESSION : [];
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+
+    $_SESSION = [];
+
+    if ($wasActive) {
+        // Put the caller's session back: the bootstrap returns session_id()
+        // and later reads/writes that same session.
+        system_updater_configure_php_session($savedName);
+        session_id($savedId);
+        @session_start();
+        $_SESSION = $savedSession;
+    }
+
+    return $session;
+}
+
+/**
+ * All readable candidate sessions for this request, keyed by session name.
+ *
+ * The plugin session and the framework session are distinct candidates and
+ * both are read, including when one of them is already open (AUTH-02).
+ *
+ * @return array<string, array<string, mixed>>
+ */
+function system_updater_read_session_candidates(): array
+{
+    $activeName = '';
+    $activeSession = [];
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        $activeName = (string) session_name();
+        $activeSession = is_array($_SESSION ?? null) ? $_SESSION : [];
+    }
+
+    $candidates = system_updater_collect_session_candidates(
+        system_updater_resolve_session_names(),
+        is_array($_COOKIE ?? null) ? $_COOKIE : [],
+        static function (string $sessionName, string $sessionId) use ($activeName, $activeSession): array {
+            if ($activeName !== '' && $sessionName === $activeName) {
+                return $activeSession;
+            }
+
+            return system_updater_read_session_file($sessionName, $sessionId);
+        }
+    );
+
+    if ($activeName !== '' && $activeSession !== [] && !array_key_exists($activeName, $candidates)) {
+        // An open session may have no cookie entry yet; it is still a candidate.
+        $candidates = [$activeName => $activeSession] + $candidates;
+    }
+
+    return $candidates;
 }
 
 function system_updater_request_has_valid_csrf(): bool
@@ -408,23 +507,114 @@ function system_updater_request_has_valid_csrf(): bool
     return \FSFramework\Security\CsrfManager::isValid($token);
 }
 
+/**
+ * Verdict vocabulary of the guard decision.
+ *
+ * There is exactly one denial reason for every cause — anonymous, expired,
+ * unknown nick, non-administrator, failed verdict — because the caller must
+ * not be able to tell them apart (AUTH-04).
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT')) {
+    define('SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT', 'accept');
+}
+if (!defined('SYSTEM_UPDATER_GUARD_VERDICT_DENY')) {
+    define('SYSTEM_UPDATER_GUARD_VERDICT_DENY', 'deny');
+}
+if (!defined('SYSTEM_UPDATER_GUARD_REASON_AUTHENTICATED')) {
+    define('SYSTEM_UPDATER_GUARD_REASON_AUTHENTICATED', 'authenticated');
+}
+if (!defined('SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED')) {
+    define('SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED', 'unauthenticated');
+}
+
+/**
+ * Identity from any candidate session, never from the first non-empty one.
+ *
+ * An expired candidate contributes no identity. A candidate carrying only
+ * plugin token state is "no evidence" and is skipped, never treated as an
+ * identity that failed (AUTH-02).
+ *
+ * @param array<string, array<string, mixed>> $sessions
+ */
+function system_updater_resolve_session_identity(array $sessions): ?string
+{
+    foreach ($sessions as $session) {
+        if (!is_array($session) || !system_updater_session_is_valid($session)) {
+            continue;
+        }
+
+        $nick = system_updater_resolve_session_nick($session);
+        if ($nick !== null) {
+            return $nick;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * The uniform denial shape. Every cause returns exactly this value.
+ *
+ * @return array{verdict: string, nick: null, reason: string}
+ */
+function system_updater_guard_denial(): array
+{
+    return [
+        'verdict' => SYSTEM_UPDATER_GUARD_VERDICT_DENY,
+        'nick' => null,
+        'reason' => SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED,
+    ];
+}
+
+/**
+ * Pure guard decision over an injected map of candidate sessions.
+ *
+ * Identity comes only from a session written by a completed login. Nothing in
+ * `$request` can confer it — the parameter exists so the contract is
+ * assertable, and it is deliberately never read (AUTH-01). The resolved nick
+ * is then confirmed against the authoritative administrator verdict, and
+ * anything other than a strict `true` denies (AUTH-03).
+ *
+ * @param array<string, array<string, mixed>> $sessions candidate sessions keyed by session name
+ * @param array<string, mixed> $request incoming request — deliberately unread
+ * @param callable(string): mixed $isAdmin authoritative administrator verdict for a nick
+ * @return array{verdict: string, nick: ?string, reason: string}
+ */
+function system_updater_guard_decision(array $sessions, array $request, callable $isAdmin): array
+{
+    $nick = system_updater_resolve_session_identity($sessions);
+
+    if ($nick === null) {
+        return system_updater_guard_denial();
+    }
+
+    $verdict = $isAdmin($nick);
+
+    if ($verdict !== true) {
+        return system_updater_guard_denial();
+    }
+
+    return [
+        'verdict' => SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT,
+        'nick' => $nick,
+        'reason' => SYSTEM_UPDATER_GUARD_REASON_AUTHENTICATED,
+    ];
+}
+
 function system_updater_is_logged_in(): bool
 {
-    $sessionsToCheck = [];
-
-    if (session_status() === PHP_SESSION_ACTIVE && is_array($_SESSION ?? null)) {
-        $sessionsToCheck[] = $_SESSION;
-    }
-
-    $snapshot = system_updater_read_session_snapshot();
-    if ($snapshot !== []) {
-        $sessionsToCheck[] = $snapshot;
-    }
-
-    foreach ($sessionsToCheck as $session) {
-        if (system_updater_session_has_user($session) && system_updater_session_is_valid($session)) {
+    $decision = system_updater_guard_decision(
+        system_updater_read_session_candidates(),
+        is_array($_REQUEST ?? null) ? $_REQUEST : [],
+        static function (string $nick): bool {
+            // Identity-only verdict: the administrator row read is added by the
+            // commit of this same change that deletes the token branch below.
             return true;
         }
+    );
+
+    if ($decision['verdict'] === SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT) {
+        return true;
     }
 
     // La página admin_updater solo emite CSRF a usuarios autenticados; si el token cuadra
