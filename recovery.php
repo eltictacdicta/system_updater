@@ -11,6 +11,27 @@
 // Configuración básica
 define('FS_FOLDER', dirname(dirname(__DIR__)));
 
+// Secreto por instalación (RACC-01/02/03/06). Plugin-local a propósito: no
+// carga ninguna clase del core, ni el autoloader, ni config.php. Debe poder
+// resolver el secreto con el core dañado, que es justo el escenario para el
+// que existe este script.
+require_once __DIR__ . '/lib/recovery_secret.php';
+
+// Escapes de CLI (RACC-06): `--secret` lee el valor actual y `--rotate-secret`
+// lo regenera. El guard de SAPI es lo único que separa estas ramas del mundo
+// web: un request normal —incluido uno que lleve `?--secret`— no tiene ninguna
+// representación aquí y sigue por el camino de siempre. Se ejecutan antes de
+// config.php para no abrir base de datos ni cargar el core.
+if (PHP_SAPI === 'cli') {
+    $su_cli_command = recovery_secret_cli_command(
+        isset($_SERVER['argv']) && is_array($_SERVER['argv']) ? $_SERVER['argv'] : []
+    );
+
+    if ($su_cli_command !== null) {
+        exit(recovery_secret_cli_run($su_cli_command, FS_FOLDER));
+    }
+}
+
 // Cargar configuración
 if (file_exists(FS_FOLDER . '/config.php')) {
     require_once FS_FOLDER . '/config.php';
