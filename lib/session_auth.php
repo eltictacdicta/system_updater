@@ -590,12 +590,154 @@ function system_updater_guard_decision(array $sessions, array $request, callable
 }
 
 /**
+ * The only database backend this guard can read `fs_users` through.
+ *
+ * One client, one backend: `mysqli`. `recovery.php` connects the same way, and
+ * `lib/backup_manager.php`'s PostgreSQL branches only shell out to
+ * `pg_dump`/`psql` — they never hand PHP a PostgreSQL reader. A PostgreSQL
+ * install is therefore a supported target for backups and an unreadable one
+ * for this guard, which is why the backend has to be *classified* before a
+ * connection is attempted instead of being discovered by a failed connect.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_BACKEND_MYSQL')) {
+    define('SYSTEM_UPDATER_GUARD_BACKEND_MYSQL', 'MYSQL');
+}
+
+/**
+ * Diagnostic kind for "this installation's backend is not readable here".
+ *
+ * Distinct from {@see SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED} on purpose:
+ * AUTH-04 keeps the *caller* from telling causes apart, and this token is the
+ * *operator's* copy, written to the error log and to the decision's callers.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED')) {
+    define('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED', 'backend_unsupported');
+}
+
+/**
+ * Canonical name for the configured database backend.
+ *
+ * `FS_DB_TYPE` is free-form in legacy installs: `mariadb` speaks the MySQL
+ * protocol, and `POSTGRES`/`PGSQL` are aliases of `POSTGRESQL`. An empty or
+ * absent value keeps the historical MySQL default, which is what
+ * `backup_manager`'s `normalize_database_type()` already assumes.
+ *
+ * @param string|null $dbType backend name; `null` reads `FS_DB_TYPE`
+ */
+function system_updater_normalize_database_backend(?string $dbType = null): string
+{
+    $configured = $dbType ?? (defined('FS_DB_TYPE') ? (string) FS_DB_TYPE : '');
+    $normalized = strtoupper(trim($configured));
+
+    if ($normalized === '' || $normalized === 'MARIADB') {
+        return SYSTEM_UPDATER_GUARD_BACKEND_MYSQL;
+    }
+
+    if (in_array($normalized, ['POSTGRES', 'POSTGRESQL', 'PGSQL'], true)) {
+        return 'POSTGRESQL';
+    }
+
+    return $normalized;
+}
+
+/**
+ * Whether this installation's backend can be read by the guard.
+ *
+ * Pure: no connection, no session, and the only constant it reads is
+ * `FS_DB_TYPE`, and only when no argument is given. That is what makes the
+ * classification assertable in a suite with no database.
+ *
+ * @return array{backend: string, supported: bool, diagnostic: string}
+ */
+function system_updater_admin_backend_support(?string $dbType = null): array
+{
+    $backend = system_updater_normalize_database_backend($dbType);
+    $supported = $backend === SYSTEM_UPDATER_GUARD_BACKEND_MYSQL;
+
+    return [
+        'backend' => $backend,
+        'supported' => $supported,
+        'diagnostic' => $supported ? '' : SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED,
+    ];
+}
+
+/**
+ * Operator-facing line for an administrator read that cannot be performed.
+ *
+ * Deliberately *not* the uniform denial text: that text is what the caller
+ * sees. This one is what the operator sees, so it names the backend and what is
+ * missing. A bare `null` was the defect — it silently turned "we cannot check"
+ * into "you are not logged in".
+ */
+function system_updater_admin_read_diagnostic_message(string $diagnostic, string $backend): string
+{
+    if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED) {
+        return 'system_updater: no se puede verificar la cuenta de administrador. Este guard solo'
+            . ' lee fs_users con mysqli y la instalación usa el motor ' . $backend . '. Toda acción'
+            . ' protegida (status, progress, descargas) será rechazada hasta que la instalación use'
+            . ' MySQL/MariaDB o el guard incorpore un lector para ' . $backend . '.';
+    }
+
+    return 'system_updater: no se puede verificar la cuenta de administrador (' . $diagnostic
+        . '). Toda acción protegida será rechazada.';
+}
+
+/**
+ * Per-process record of the diagnostics already written, keyed by
+ * diagnostic + backend.
+ *
+ * @return array<string, bool>
+ */
+function system_updater_admin_read_diagnostics(): array
+{
+    $reported = $GLOBALS['system_updater_admin_read_diagnostics'] ?? [];
+
+    return is_array($reported) ? $reported : [];
+}
+
+/**
+ * Record an unavailable administrator read where an operator will see it.
+ *
+ * Once per process per diagnostic: `status` and `progress` poll every couple of
+ * seconds, and flooding the log would bury the first line — the only one an
+ * operator reads.
+ */
+function system_updater_report_admin_read_unavailable(string $diagnostic, string $backend): void
+{
+    $key = $diagnostic . ':' . $backend;
+    $reported = system_updater_admin_read_diagnostics();
+
+    if (($reported[$key] ?? false) === true) {
+        return;
+    }
+
+    $reported[$key] = true;
+    $GLOBALS['system_updater_admin_read_diagnostics'] = $reported;
+
+    error_log(system_updater_admin_read_diagnostic_message($diagnostic, $backend));
+}
+
+/**
+ * Clear the per-process diagnostic record. Test seam only.
+ */
+function system_updater_reset_admin_read_diagnostics(): void
+{
+    $GLOBALS['system_updater_admin_read_diagnostics'] = [];
+}
+
+/**
  * Authoritative administrator verdict for a nick: one fresh row read, no cache.
  *
  * Returns `true` only when `fs_users.admin` is truthy for that nick, `false`
  * when the row is missing or the flag is falsy, and `null` when the database
  * cannot be read at all. Every value other than `true` denies (AUTH-03), so a
  * deleted row, a demotion and an unreachable database are all "no".
+ *
+ * A backend this guard cannot read is a `null` too — but a *reported* one: the
+ * backend is classified before a connection is attempted and the refusal is
+ * written to the error log, because an unreachable-by-design backend and an
+ * anonymous visitor must not look the same to the operator (see
+ * {@see system_updater_admin_backend_support()}).
  *
  * Reading the row directly is deliberate. The standalone scripts bootstrap
  * only `config.php` plus the Composer autoloader, so the legacy `fs_user`
@@ -604,12 +746,28 @@ function system_updater_guard_decision(array $sessions, array $request, callable
  * answers `null` for that reason alone, which would deny every administrator.
  * A prepared statement against `fs_users` is the same path `recovery.php` and
  * `backup_manager` already use in this standalone runtime.
+ *
+ * @param string $nick user whose `fs_users.admin` flag is authoritative
+ * @param string|null $dbType backend override; `null` reads `FS_DB_TYPE`
  */
-function system_updater_resolve_admin_verdict(string $nick): ?bool
+function system_updater_resolve_admin_verdict(string $nick, ?string $dbType = null): ?bool
 {
     $nick = trim($nick);
     if ($nick === '') {
         return false;
+    }
+
+    // Classify the backend before touching a socket. Discovering it through a
+    // failed connect would report every administrator as anonymous, which is
+    // the silent denial this contract exists to remove.
+    $backendSupport = system_updater_admin_backend_support($dbType);
+    if (!$backendSupport['supported']) {
+        system_updater_report_admin_read_unavailable(
+            $backendSupport['diagnostic'],
+            $backendSupport['backend']
+        );
+
+        return null;
     }
 
     if (!class_exists('mysqli')
