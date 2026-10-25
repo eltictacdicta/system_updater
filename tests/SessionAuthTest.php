@@ -149,4 +149,57 @@ final class SessionAuthTest extends TestCase
 
         $this->assertSame('/', system_updater_resolve_cookie_path());
     }
+
+    /**
+     * AUTH-01: the token helper is deleted, not merely unreferenced.
+     *
+     * It had no other production caller, so leaving the function in place
+     * would preserve a ready-made way to reinstate the defect. The scan covers
+     * every `.php` file of the plugin; the change's deltas are Markdown and
+     * are the only place the identifier may still appear.
+     */
+    public function testTokenHelperIdentifierIsGoneFromEveryPhpFileOfThePlugin(): void
+    {
+        $root = realpath(dirname(__DIR__));
+        $self = realpath(__FILE__);
+        $offenders = [];
+
+        $files = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator((string) $root, \FilesystemIterator::SKIP_DOTS)
+        );
+
+        foreach ($files as $file) {
+            if (!$file->isFile() || strtolower($file->getExtension()) !== 'php') {
+                continue;
+            }
+
+            $path = (string) $file->getPathname();
+            if (realpath($path) === $self) {
+                continue;
+            }
+
+            if (strpos((string) file_get_contents($path), 'system_updater_request_has_valid_csrf') !== false) {
+                $offenders[] = $path;
+            }
+        }
+
+        $this->assertSame([], $offenders, 'the deleted token helper must not survive anywhere in the plugin');
+    }
+
+    /**
+     * AUTH-01: the guard never consults the framework CSRF subsystem — not as
+     * a primary signal and not as a secondary one.
+     */
+    public function testGuardFileNamesNoFrameworkCsrfSymbol(): void
+    {
+        $source = (string) file_get_contents(dirname(__DIR__) . '/lib/session_auth.php');
+
+        foreach (['CsrfManager', '_csrf', '_token', 'X-CSRF-Token'] as $symbol) {
+            $this->assertStringNotContainsString(
+                $symbol,
+                $source,
+                'the guard must not name the framework CSRF symbol ' . $symbol
+            );
+        }
+    }
 }
