@@ -197,6 +197,22 @@ function system_updater_flatten_session(array $session): array
     return $flat;
 }
 
+/**
+ * Nick written by a completed login, or null.
+ *
+ * Pure by contract: no session call, no I/O and no class lookup, so it can be
+ * asserted over an injected session array (AUTH-02).
+ *
+ * @param array<string, mixed> $session
+ */
+function system_updater_resolve_session_nick(array $session): ?string
+{
+    $flat = system_updater_flatten_session($session);
+    $nick = trim((string) ($flat['user_nick'] ?? ''));
+
+    return $nick === '' ? null : $nick;
+}
+
 function system_updater_session_is_valid(array $session): bool
 {
     $flat = system_updater_flatten_session($session);
@@ -280,10 +296,26 @@ function system_updater_normalize_cookie_path_value(string $path): string
     return str_ends_with($normalized, '/') ? $normalized : $normalized . '/';
 }
 
-function system_updater_configure_php_session(string $sessionName): void
+/**
+ * Apply the framework session configuration to the PHP session module.
+ *
+ * @param string $sessionName session name to adopt
+ * @param bool $withCookieParams whether the browser-facing cookie parameters
+ *                               must be configured too. An isolated read turns
+ *                               them off: it must not write a cookie, and
+ *                               `session_set_cookie_params()` warns loudly when
+ *                               cookie emission is already suspended.
+ */
+function system_updater_configure_php_session(string $sessionName, bool $withCookieParams = true): void
 {
     if (defined('FS_SESSION_SAVE_PATH') && trim((string) FS_SESSION_SAVE_PATH) !== '') {
         session_save_path(trim((string) FS_SESSION_SAVE_PATH));
+    }
+
+    if (!$withCookieParams) {
+        session_name($sessionName);
+
+        return;
     }
 
     $idleTimeout = class_exists('FSFramework\\Security\\SessionPolicy')
@@ -305,6 +337,48 @@ function system_updater_configure_php_session(string $sessionName): void
     ]);
 
     session_name($sessionName);
+}
+
+/**
+ * Stop `session_start()` from writing session headers, remembering the state.
+ *
+ * Must run while no session is active: PHP refuses to change these ini values
+ * during an active session. The two settings are the whole header surface of
+ * a session start — `session.use_cookies` writes `Set-Cookie`, and
+ * `session.cache_limiter` writes `Expires`/`Pragma`/`Cache-Control`.
+ *
+ * @return array{use_cookies: string, cache_limiter: string}
+ */
+function system_updater_suspend_session_headers(): array
+{
+    $previous = [
+        'use_cookies' => (string) ini_get('session.use_cookies'),
+        'cache_limiter' => (string) ini_get('session.cache_limiter'),
+    ];
+
+    ini_set('session.use_cookies', '0');
+    ini_set('session.cache_limiter', '');
+
+    return $previous;
+}
+
+/**
+ * Restore what {@see system_updater_suspend_session_headers()} suspended.
+ *
+ * Leaves the module alone when a session is somehow still active: PHP would
+ * reject the change and emit a warning into the response, which is worse than
+ * the caller's own start applying the previous values again.
+ *
+ * @param array{use_cookies: string, cache_limiter: string} $previous
+ */
+function system_updater_restore_session_headers(array $previous): void
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return;
+    }
+
+    ini_set('session.use_cookies', (string) ($previous['use_cookies'] ?? '1'));
+    ini_set('session.cache_limiter', (string) ($previous['cache_limiter'] ?? 'nocache'));
 }
 
 /**
@@ -355,82 +429,489 @@ function system_updater_native_session_start(): bool
 }
 
 /**
- * @return array<string, mixed>
+ * Enumerate every candidate session for the request.
+ *
+ * Pure: the I/O lives in `$readSession`. It evaluates ALL names — it never
+ * returns at the first non-empty one, which is the defect AUTH-02 closes —
+ * and a candidate that cannot be opened is skipped, not fatal.
+ *
+ * @param array<int, string> $sessionNames
+ * @param array<string, mixed> $cookies
+ * @param callable(string, string): array<string, mixed> $readSession
+ * @return array<string, array<string, mixed>> sessions keyed by session name
  */
-function system_updater_read_session_snapshot(): array
+function system_updater_collect_session_candidates(array $sessionNames, array $cookies, callable $readSession): array
 {
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        return is_array($_SESSION ?? null) ? $_SESSION : [];
-    }
+    $candidates = [];
 
-    foreach (system_updater_resolve_session_names() as $sessionName) {
-        $sessionId = isset($_COOKIE[$sessionName]) ? trim((string) $_COOKIE[$sessionName]) : '';
+    foreach ($sessionNames as $sessionName) {
+        $name = trim((string) $sessionName);
+        if ($name === '' || array_key_exists($name, $candidates)) {
+            continue;
+        }
+
+        $sessionId = isset($cookies[$name]) ? trim((string) $cookies[$name]) : '';
         if ($sessionId === '') {
             continue;
         }
 
-        system_updater_configure_php_session($sessionName);
-        session_id($sessionId);
-
-        if (PHP_VERSION_ID >= 70100) {
-            @session_start(['read_and_close' => true]);
-        } else {
-            @session_start();
+        try {
+            $session = $readSession($name, $sessionId);
+        } catch (\Throwable $error) {
+            $session = [];
         }
 
-        $session = is_array($_SESSION ?? null) ? $_SESSION : [];
+        if (!is_array($session) || $session === []) {
+            continue;
+        }
 
+        $candidates[$name] = $session;
+    }
+
+    return $candidates;
+}
+
+/**
+ * Read one session by cookie name and leave the caller's session untouched.
+ *
+ * The read is silent: no `Set-Cookie` for the candidate session, no cache
+ * directives from the session cache limiter, and both ini settings restored
+ * afterwards so the rest of the request sees the module exactly as before. A
+ * `status`/`progress` poll runs this once per candidate and must not rewrite
+ * the browser's cookies while it does.
+ *
+ * Ordering matters and is load-bearing: `session_set_cookie_params()` warns
+ * when cookie emission is suspended, so the session is configured first, and
+ * the suspension starts only once the caller's session is closed (PHP refuses
+ * to change these ini values during an active session). The restore runs before
+ * the caller's session is reopened, for the same reason.
+ *
+ * @return array<string, mixed>
+ */
+function system_updater_read_session_file(string $sessionName, string $sessionId): array
+{
+    $wasActive = session_status() === PHP_SESSION_ACTIVE;
+    $savedName = $wasActive ? (string) session_name() : '';
+    $savedId = $wasActive ? (string) session_id() : '';
+    $savedSession = $wasActive && is_array($_SESSION ?? null) ? $_SESSION : [];
+
+    if ($wasActive) {
+        session_write_close();
+    }
+
+    $session = [];
+    $suspendedIni = null;
+
+    try {
+        $_SESSION = [];
+        system_updater_configure_php_session($sessionName, false);
+        $suspendedIni = system_updater_suspend_session_headers();
+        session_id($sessionId);
+        $started = @session_start(['read_and_close' => true]);
+        $session = $started && is_array($_SESSION ?? null) ? $_SESSION : [];
+    } finally {
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_write_close();
         }
 
-        if ($session !== []) {
-            return $session;
+        $_SESSION = [];
+
+        if (is_array($suspendedIni)) {
+            system_updater_restore_session_headers($suspendedIni);
         }
     }
 
-    return [];
+    if ($wasActive) {
+        // Put the caller's session back: the bootstrap returns session_id()
+        // and later reads/writes that same session. Its cookie was already
+        // written when the bootstrap opened it, so the same name and value are
+        // re-sent here at worst — never a cookie for somebody else's session.
+        system_updater_configure_php_session($savedName);
+        session_id($savedId);
+        @session_start();
+        $_SESSION = $savedSession;
+    }
+
+    return $session;
 }
 
-function system_updater_request_has_valid_csrf(): bool
+/**
+ * All readable candidate sessions for this request, keyed by session name.
+ *
+ * The plugin session and the framework session are distinct candidates and
+ * both are read, including when one of them is already open (AUTH-02).
+ *
+ * @return array<string, array<string, mixed>>
+ */
+function system_updater_read_session_candidates(): array
 {
-    $token = trim((string) (
-        $_GET['_csrf_token']
-        ?? $_POST['_csrf_token']
-        ?? $_POST['_token']
-        ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')
-    ));
+    $activeName = '';
+    $activeSession = [];
 
-    if ($token === '' || !class_exists('FSFramework\\Security\\CsrfManager')) {
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        $activeName = (string) session_name();
+        $activeSession = is_array($_SESSION ?? null) ? $_SESSION : [];
+    }
+
+    $candidates = system_updater_collect_session_candidates(
+        system_updater_resolve_session_names(),
+        is_array($_COOKIE ?? null) ? $_COOKIE : [],
+        static function (string $sessionName, string $sessionId) use ($activeName, $activeSession): array {
+            if ($activeName !== '' && $sessionName === $activeName) {
+                return $activeSession;
+            }
+
+            return system_updater_read_session_file($sessionName, $sessionId);
+        }
+    );
+
+    if ($activeName !== '' && $activeSession !== [] && !array_key_exists($activeName, $candidates)) {
+        // An open session may have no cookie entry yet; it is still a candidate.
+        $candidates = [$activeName => $activeSession] + $candidates;
+    }
+
+    return $candidates;
+}
+
+/**
+ * Verdict vocabulary of the guard decision.
+ *
+ * There is exactly one denial reason for every cause — anonymous, expired,
+ * unknown nick, non-administrator, failed verdict — because the caller must
+ * not be able to tell them apart (AUTH-04).
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT')) {
+    define('SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT', 'accept');
+}
+if (!defined('SYSTEM_UPDATER_GUARD_VERDICT_DENY')) {
+    define('SYSTEM_UPDATER_GUARD_VERDICT_DENY', 'deny');
+}
+if (!defined('SYSTEM_UPDATER_GUARD_REASON_AUTHENTICATED')) {
+    define('SYSTEM_UPDATER_GUARD_REASON_AUTHENTICATED', 'authenticated');
+}
+if (!defined('SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED')) {
+    define('SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED', 'unauthenticated');
+}
+
+/**
+ * Identity from any candidate session, never from the first non-empty one.
+ *
+ * An expired candidate contributes no identity. A candidate carrying only
+ * plugin token state is "no evidence" and is skipped, never treated as an
+ * identity that failed (AUTH-02).
+ *
+ * @param array<string, array<string, mixed>> $sessions
+ */
+function system_updater_resolve_session_identity(array $sessions): ?string
+{
+    foreach ($sessions as $session) {
+        if (!is_array($session) || !system_updater_session_is_valid($session)) {
+            continue;
+        }
+
+        $nick = system_updater_resolve_session_nick($session);
+        if ($nick !== null) {
+            return $nick;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * The uniform denial shape. Every cause returns exactly this value.
+ *
+ * @return array{verdict: string, nick: null, reason: string}
+ */
+function system_updater_guard_denial(): array
+{
+    return [
+        'verdict' => SYSTEM_UPDATER_GUARD_VERDICT_DENY,
+        'nick' => null,
+        'reason' => SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED,
+    ];
+}
+
+/**
+ * Pure guard decision over an injected map of candidate sessions.
+ *
+ * Identity comes only from a session written by a completed login. Nothing in
+ * `$request` can confer it — the parameter exists so the contract is
+ * assertable, and it is deliberately never read (AUTH-01). The resolved nick
+ * is then confirmed against the authoritative administrator verdict, and
+ * anything other than a strict `true` denies (AUTH-03).
+ *
+ * @param array<string, array<string, mixed>> $sessions candidate sessions keyed by session name
+ * @param array<string, mixed> $request incoming request — deliberately unread
+ * @param callable(string): mixed $isAdmin authoritative administrator verdict for a nick
+ * @return array{verdict: string, nick: ?string, reason: string}
+ */
+function system_updater_guard_decision(array $sessions, array $request, callable $isAdmin): array
+{
+    $nick = system_updater_resolve_session_identity($sessions);
+
+    if ($nick === null) {
+        return system_updater_guard_denial();
+    }
+
+    try {
+        $verdict = $isAdmin($nick);
+    } catch (\Throwable $error) {
+        return system_updater_guard_denial();
+    }
+
+    if ($verdict !== true) {
+        return system_updater_guard_denial();
+    }
+
+    return [
+        'verdict' => SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT,
+        'nick' => $nick,
+        'reason' => SYSTEM_UPDATER_GUARD_REASON_AUTHENTICATED,
+    ];
+}
+
+/**
+ * The only database backend this guard can read `fs_users` through.
+ *
+ * One client, one backend: `mysqli`. `recovery.php` connects the same way, and
+ * `lib/backup_manager.php`'s PostgreSQL branches only shell out to
+ * `pg_dump`/`psql` — they never hand PHP a PostgreSQL reader. A PostgreSQL
+ * install is therefore a supported target for backups and an unreadable one
+ * for this guard, which is why the backend has to be *classified* before a
+ * connection is attempted instead of being discovered by a failed connect.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_BACKEND_MYSQL')) {
+    define('SYSTEM_UPDATER_GUARD_BACKEND_MYSQL', 'MYSQL');
+}
+
+/**
+ * Diagnostic kind for "this installation's backend is not readable here".
+ *
+ * Distinct from {@see SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED} on purpose:
+ * AUTH-04 keeps the *caller* from telling causes apart, and this token is the
+ * *operator's* copy, written to the error log and to the decision's callers.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED')) {
+    define('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED', 'backend_unsupported');
+}
+
+/**
+ * Canonical name for the configured database backend.
+ *
+ * `FS_DB_TYPE` is free-form in legacy installs: `mariadb` speaks the MySQL
+ * protocol, and `POSTGRES`/`PGSQL` are aliases of `POSTGRESQL`. An empty or
+ * absent value keeps the historical MySQL default, which is what
+ * `backup_manager`'s `normalize_database_type()` already assumes.
+ *
+ * @param string|null $dbType backend name; `null` reads `FS_DB_TYPE`
+ */
+function system_updater_normalize_database_backend(?string $dbType = null): string
+{
+    $configured = $dbType ?? (defined('FS_DB_TYPE') ? (string) FS_DB_TYPE : '');
+    $normalized = strtoupper(trim($configured));
+
+    if ($normalized === '' || $normalized === 'MARIADB') {
+        return SYSTEM_UPDATER_GUARD_BACKEND_MYSQL;
+    }
+
+    if (in_array($normalized, ['POSTGRES', 'POSTGRESQL', 'PGSQL'], true)) {
+        return 'POSTGRESQL';
+    }
+
+    return $normalized;
+}
+
+/**
+ * Whether this installation's backend can be read by the guard.
+ *
+ * Pure: no connection, no session, and the only constant it reads is
+ * `FS_DB_TYPE`, and only when no argument is given. That is what makes the
+ * classification assertable in a suite with no database.
+ *
+ * @return array{backend: string, supported: bool, diagnostic: string}
+ */
+function system_updater_admin_backend_support(?string $dbType = null): array
+{
+    $backend = system_updater_normalize_database_backend($dbType);
+    $supported = $backend === SYSTEM_UPDATER_GUARD_BACKEND_MYSQL;
+
+    return [
+        'backend' => $backend,
+        'supported' => $supported,
+        'diagnostic' => $supported ? '' : SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED,
+    ];
+}
+
+/**
+ * Operator-facing line for an administrator read that cannot be performed.
+ *
+ * Deliberately *not* the uniform denial text: that text is what the caller
+ * sees. This one is what the operator sees, so it names the backend and what is
+ * missing. A bare `null` was the defect — it silently turned "we cannot check"
+ * into "you are not logged in".
+ */
+function system_updater_admin_read_diagnostic_message(string $diagnostic, string $backend): string
+{
+    if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED) {
+        return 'system_updater: no se puede verificar la cuenta de administrador. Este guard solo'
+            . ' lee fs_users con mysqli y la instalación usa el motor ' . $backend . '. Toda acción'
+            . ' protegida (status, progress, descargas) será rechazada hasta que la instalación use'
+            . ' MySQL/MariaDB o el guard incorpore un lector para ' . $backend . '.';
+    }
+
+    return 'system_updater: no se puede verificar la cuenta de administrador (' . $diagnostic
+        . '). Toda acción protegida será rechazada.';
+}
+
+/**
+ * Per-process record of the diagnostics already written, keyed by
+ * diagnostic + backend.
+ *
+ * @return array<string, bool>
+ */
+function system_updater_admin_read_diagnostics(): array
+{
+    $reported = $GLOBALS['system_updater_admin_read_diagnostics'] ?? [];
+
+    return is_array($reported) ? $reported : [];
+}
+
+/**
+ * Record an unavailable administrator read where an operator will see it.
+ *
+ * Once per process per diagnostic: `status` and `progress` poll every couple of
+ * seconds, and flooding the log would bury the first line — the only one an
+ * operator reads.
+ */
+function system_updater_report_admin_read_unavailable(string $diagnostic, string $backend): void
+{
+    $key = $diagnostic . ':' . $backend;
+    $reported = system_updater_admin_read_diagnostics();
+
+    if (($reported[$key] ?? false) === true) {
+        return;
+    }
+
+    $reported[$key] = true;
+    $GLOBALS['system_updater_admin_read_diagnostics'] = $reported;
+
+    error_log(system_updater_admin_read_diagnostic_message($diagnostic, $backend));
+}
+
+/**
+ * Clear the per-process diagnostic record. Test seam only.
+ */
+function system_updater_reset_admin_read_diagnostics(): void
+{
+    $GLOBALS['system_updater_admin_read_diagnostics'] = [];
+}
+
+/**
+ * Authoritative administrator verdict for a nick: one fresh row read, no cache.
+ *
+ * Returns `true` only when `fs_users.admin` is truthy for that nick, `false`
+ * when the row is missing or the flag is falsy, and `null` when the database
+ * cannot be read at all. Every value other than `true` denies (AUTH-03), so a
+ * deleted row, a demotion and an unreachable database are all "no".
+ *
+ * A backend this guard cannot read is a `null` too — but a *reported* one: the
+ * backend is classified before a connection is attempted and the refusal is
+ * written to the error log, because an unreachable-by-design backend and an
+ * anonymous visitor must not look the same to the operator (see
+ * {@see system_updater_admin_backend_support()}).
+ *
+ * Reading the row directly is deliberate. The standalone scripts bootstrap
+ * only `config.php` plus the Composer autoloader, so the legacy `fs_user`
+ * model is not loadable here — measured in this container: with only Composer
+ * registered, `class_exists('fs_user')` is false — and the framework adapter
+ * answers `null` for that reason alone, which would deny every administrator.
+ * A prepared statement against `fs_users` is the same path `recovery.php` and
+ * `backup_manager` already use in this standalone runtime.
+ *
+ * @param string $nick user whose `fs_users.admin` flag is authoritative
+ * @param string|null $dbType backend override; `null` reads `FS_DB_TYPE`
+ */
+function system_updater_resolve_admin_verdict(string $nick, ?string $dbType = null): ?bool
+{
+    $nick = trim($nick);
+    if ($nick === '') {
         return false;
     }
 
-    return \FSFramework\Security\CsrfManager::isValid($token);
+    // Classify the backend before touching a socket. Discovering it through a
+    // failed connect would report every administrator as anonymous, which is
+    // the silent denial this contract exists to remove.
+    $backendSupport = system_updater_admin_backend_support($dbType);
+    if (!$backendSupport['supported']) {
+        system_updater_report_admin_read_unavailable(
+            $backendSupport['diagnostic'],
+            $backendSupport['backend']
+        );
+
+        return null;
+    }
+
+    if (!class_exists('mysqli')
+        || !defined('FS_DB_HOST')
+        || !defined('FS_DB_USER')
+        || !defined('FS_DB_NAME')
+    ) {
+        return null;
+    }
+
+    $link = null;
+    $statement = null;
+
+    try {
+        $link = @new \mysqli(
+            (string) FS_DB_HOST,
+            (string) FS_DB_USER,
+            defined('FS_DB_PASS') ? (string) FS_DB_PASS : '',
+            (string) FS_DB_NAME,
+            defined('FS_DB_PORT') ? (int) FS_DB_PORT : 3306
+        );
+
+        $statement = $link->prepare('SELECT admin FROM fs_users WHERE nick = ? LIMIT 1');
+        if ($statement === false) {
+            return null;
+        }
+
+        $statement->bind_param('s', $nick);
+        if (!$statement->execute()) {
+            return null;
+        }
+
+        $result = $statement->get_result();
+        $row = $result === false ? null : $result->fetch_assoc();
+
+        if (!is_array($row)) {
+            return false;
+        }
+
+        return !empty($row['admin']);
+    } catch (\Throwable $error) {
+        return null;
+    } finally {
+        if ($statement instanceof \mysqli_stmt) {
+            @$statement->close();
+        }
+
+        if ($link instanceof \mysqli) {
+            @$link->close();
+        }
+    }
 }
 
 function system_updater_is_logged_in(): bool
 {
-    $sessionsToCheck = [];
+    $decision = system_updater_guard_decision(
+        system_updater_read_session_candidates(),
+        is_array($_REQUEST ?? null) ? $_REQUEST : [],
+        'system_updater_resolve_admin_verdict'
+    );
 
-    if (session_status() === PHP_SESSION_ACTIVE && is_array($_SESSION ?? null)) {
-        $sessionsToCheck[] = $_SESSION;
-    }
-
-    $snapshot = system_updater_read_session_snapshot();
-    if ($snapshot !== []) {
-        $sessionsToCheck[] = $snapshot;
-    }
-
-    foreach ($sessionsToCheck as $session) {
-        if (system_updater_session_has_user($session) && system_updater_session_is_valid($session)) {
-            return true;
-        }
-    }
-
-    // La página admin_updater solo emite CSRF a usuarios autenticados; si el token cuadra
-    // con la misma FSSESS del navegador, la petición SSE es de esa sesión aunque Symfony
-    // no haya rehidratado user_nick en este script standalone.
-    if (system_updater_request_has_valid_csrf()) {
+    if ($decision['verdict'] === SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT) {
         return true;
     }
 
