@@ -143,9 +143,58 @@ function recovery_secret_operator_pin(string $configFile): ?string
 }
 
 /**
+ * The last failure recorded by {@see recovery_secret_ensure()} or
+ * {@see recovery_secret_rotate()}, or `''`.
+ *
+ * Doubles as the setter (`recovery_secret_last_error('...')`) and the reset
+ * (`recovery_secret_last_error('')`). It exists so the operator-visible
+ * surface — the CLI today, the gate's refusal page later — can say *why* there
+ * is no secret instead of guessing. The message never contains a value: only
+ * paths, the failure and the escape that still works.
+ */
+function recovery_secret_last_error(?string $message = null): string
+{
+    static $last = '';
+
+    if ($message !== null) {
+        $last = $message;
+    }
+
+    return $last;
+}
+
+/**
+ * The diagnostic for RACC-02's loud-error state. Documented as one string so
+ * the CLI and the gate cannot drift apart, and so it always names the two
+ * things an operator needs: where it tried, and the escape that bypasses the
+ * filesystem entirely.
+ */
+function recovery_secret_no_location_message(?string $installRoot = null): string
+{
+    return 'No writable location for the recovery console secret. Tried: '
+        . implode(', ', recovery_secret_candidates($installRoot))
+        . '. Make one of those directories writable by the PHP user, or set'
+        . ' SU_RECOVERY_SECRET in config.php.';
+}
+
+/**
+ * The diagnostic for a write that could not be completed. Kept next to
+ * {@see recovery_secret_no_location_message()} for the same reason: one
+ * documented string, so the operator sees the path and the escape rather than
+ * a generic excuse.
+ */
+function recovery_secret_write_failure_message(string $target): string
+{
+    return 'Could not write the recovery console secret at ' . $target
+        . '. The PHP user must be able to create and replace that file,'
+        . ' or set SU_RECOVERY_SECRET in config.php.';
+}
+
+/**
  * Resolve the installation root. Everything else in this file is a pure
  * function of it, which is what lets the suite run against a temp tree.
- */function recovery_secret_install_root(?string $installRoot = null): string
+ */
+function recovery_secret_install_root(?string $installRoot = null): string
 {
     if ($installRoot !== null && $installRoot !== '') {
         return rtrim($installRoot, '/\\');
@@ -372,8 +421,9 @@ function recovery_secret_cli_run(string $command, ?string $installRoot = null): 
         : recovery_secret_ensure($installRoot);
 
     if ($value === null) {
+        $detail = recovery_secret_last_error();
         fwrite($stderr, 'system_updater: cannot read or persist the recovery console secret.'
-            . ' No writable location was found next to the installation.'
+            . ($detail !== '' ? ' ' . $detail : '')
             . PHP_EOL);
 
         return 1;
@@ -411,11 +461,15 @@ function recovery_secret_rotate(?string $installRoot = null): ?string
 {
     $target = recovery_secret_existing_path($installRoot) ?? recovery_secret_writable_path($installRoot);
     if ($target === '') {
+        recovery_secret_last_error(recovery_secret_no_location_message($installRoot));
+
         return null;
     }
 
     $value = recovery_secret_generate();
     if (!recovery_secret_store($value, $target)) {
+        recovery_secret_last_error(recovery_secret_write_failure_message($target));
+
         return null;
     }
 
@@ -479,11 +533,15 @@ function recovery_secret_ensure(?string $installRoot = null): ?string
 
     $target = recovery_secret_writable_path($installRoot);
     if ($target === '') {
+        recovery_secret_last_error(recovery_secret_no_location_message($installRoot));
+
         return null;
     }
 
     $value = recovery_secret_generate();
     if (!recovery_secret_store($value, $target)) {
+        recovery_secret_last_error(recovery_secret_write_failure_message($target));
+
         return null;
     }
 
