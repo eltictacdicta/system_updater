@@ -491,22 +491,6 @@ function system_updater_read_session_candidates(): array
     return $candidates;
 }
 
-function system_updater_request_has_valid_csrf(): bool
-{
-    $token = trim((string) (
-        $_GET['_csrf_token']
-        ?? $_POST['_csrf_token']
-        ?? $_POST['_token']
-        ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')
-    ));
-
-    if ($token === '' || !class_exists('FSFramework\\Security\\CsrfManager')) {
-        return false;
-    }
-
-    return \FSFramework\Security\CsrfManager::isValid($token);
-}
-
 /**
  * Verdict vocabulary of the guard decision.
  *
@@ -588,7 +572,11 @@ function system_updater_guard_decision(array $sessions, array $request, callable
         return system_updater_guard_denial();
     }
 
-    $verdict = $isAdmin($nick);
+    try {
+        $verdict = $isAdmin($nick);
+    } catch (\Throwable $error) {
+        return system_updater_guard_denial();
+    }
 
     if ($verdict !== true) {
         return system_updater_guard_denial();
@@ -601,26 +589,89 @@ function system_updater_guard_decision(array $sessions, array $request, callable
     ];
 }
 
+/**
+ * Authoritative administrator verdict for a nick: one fresh row read, no cache.
+ *
+ * Returns `true` only when `fs_users.admin` is truthy for that nick, `false`
+ * when the row is missing or the flag is falsy, and `null` when the database
+ * cannot be read at all. Every value other than `true` denies (AUTH-03), so a
+ * deleted row, a demotion and an unreachable database are all "no".
+ *
+ * Reading the row directly is deliberate. The standalone scripts bootstrap
+ * only `config.php` plus the Composer autoloader, so the legacy `fs_user`
+ * model is not loadable here — measured in this container: with only Composer
+ * registered, `class_exists('fs_user')` is false — and the framework adapter
+ * answers `null` for that reason alone, which would deny every administrator.
+ * A prepared statement against `fs_users` is the same path `recovery.php` and
+ * `backup_manager` already use in this standalone runtime.
+ */
+function system_updater_resolve_admin_verdict(string $nick): ?bool
+{
+    $nick = trim($nick);
+    if ($nick === '') {
+        return false;
+    }
+
+    if (!class_exists('mysqli')
+        || !defined('FS_DB_HOST')
+        || !defined('FS_DB_USER')
+        || !defined('FS_DB_NAME')
+    ) {
+        return null;
+    }
+
+    $link = null;
+    $statement = null;
+
+    try {
+        $link = @new \mysqli(
+            (string) FS_DB_HOST,
+            (string) FS_DB_USER,
+            defined('FS_DB_PASS') ? (string) FS_DB_PASS : '',
+            (string) FS_DB_NAME,
+            defined('FS_DB_PORT') ? (int) FS_DB_PORT : 3306
+        );
+
+        $statement = $link->prepare('SELECT admin FROM fs_users WHERE nick = ? LIMIT 1');
+        if ($statement === false) {
+            return null;
+        }
+
+        $statement->bind_param('s', $nick);
+        if (!$statement->execute()) {
+            return null;
+        }
+
+        $result = $statement->get_result();
+        $row = $result === false ? null : $result->fetch_assoc();
+
+        if (!is_array($row)) {
+            return false;
+        }
+
+        return !empty($row['admin']);
+    } catch (\Throwable $error) {
+        return null;
+    } finally {
+        if ($statement instanceof \mysqli_stmt) {
+            @$statement->close();
+        }
+
+        if ($link instanceof \mysqli) {
+            @$link->close();
+        }
+    }
+}
+
 function system_updater_is_logged_in(): bool
 {
     $decision = system_updater_guard_decision(
         system_updater_read_session_candidates(),
         is_array($_REQUEST ?? null) ? $_REQUEST : [],
-        static function (string $nick): bool {
-            // Identity-only verdict: the administrator row read is added by the
-            // commit of this same change that deletes the token branch below.
-            return true;
-        }
+        'system_updater_resolve_admin_verdict'
     );
 
     if ($decision['verdict'] === SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT) {
-        return true;
-    }
-
-    // La página admin_updater solo emite CSRF a usuarios autenticados; si el token cuadra
-    // con la misma FSSESS del navegador, la petición SSE es de esa sesión aunque Symfony
-    // no haya rehidratado user_nick en este script standalone.
-    if (system_updater_request_has_valid_csrf()) {
         return true;
     }
 
