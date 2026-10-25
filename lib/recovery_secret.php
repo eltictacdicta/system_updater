@@ -417,9 +417,22 @@ function recovery_secret_read(?string $installRoot = null): ?string
  * Persist a value with owner-only permissions.
  *
  * The write goes to a sibling temp file and is renamed into place, so a crash
- * cannot leave a half-written secret that resolves to garbage; the temp file is
- * removed on every failure path. No fallback value is ever invented here: a
- * failed write returns `false`.
+ * cannot leave a half-written secret that resolves to garbage and a reader
+ * never observes a partial file at the real path.
+ *
+ * `0600` on the result is not enough on its own. `file_put_contents()` creates
+ * the file with the process umask, and the `chmod()` that follows lands only
+ * after the bytes are already on disk: without narrowing the umask first there
+ * is a window in which another local user can read the secret, and a process
+ * that dies inside that window leaves it readable for good. The umask is
+ * therefore set to `0077` around the write and restored in a `finally`, so
+ * neither a failure nor a throw leaves the process with a permissive mask.
+ *
+ * `file_put_contents()` also reports a short write as `false` while keeping the
+ * bytes it accepted, so the byte count is verified against the payload, and the
+ * temp file is removed on **every** failure path — short write, failed write,
+ * failed rename, or a throw. Only a successful rename publishes the value.
+ * No fallback value is ever invented here: a failed write returns `false`.
  */
 function recovery_secret_store(string $value, ?string $target = null): bool
 {
@@ -437,17 +450,31 @@ function recovery_secret_store(string $value, ?string $target = null): bool
         return false;
     }
 
+    $payload = recovery_secret_payload($value);
     $temp = $path . '.' . bin2hex(random_bytes(6)) . '.tmp';
-    if (@file_put_contents($temp, recovery_secret_payload($value)) === false) {
+    $previousUmask = umask(0077);
+
+    try {
+        $written = @file_put_contents($temp, $payload);
+        if ($written === false || $written !== strlen($payload)) {
+            return false;
+        }
+
+        @chmod($temp, 0600);
+
+        if (!@rename($temp, $path)) {
+            return false;
+        }
+    } catch (\Throwable $error) {
         return false;
-    }
-
-    @chmod($temp, 0600);
-
-    if (!@rename($temp, $path)) {
+    } finally {
+        // Unconditional on purpose: after a successful rename the temp file no
+        // longer exists and this is a no-op, and on every failure path above it
+        // is the cleanup. One place, so a failure branch added later cannot
+        // forget it and leave a partial secret on disk.
         @unlink($temp);
 
-        return false;
+        umask($previousUmask);
     }
 
     @chmod($path, 0600);
