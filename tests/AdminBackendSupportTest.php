@@ -223,6 +223,163 @@ final class AdminBackendSupportTest extends TestCase
             $classifyAt,
             'the backend must be classified before any connection attempt'
         );
+
+        $availabilityAt = strpos($body, 'system_updater_admin_read_availability(');
+        $this->assertNotFalse(
+            $availabilityAt,
+            'the reader environment must be checked, not discovered by a failed connect'
+        );
+        $this->assertLessThan(
+            $connectAt,
+            $availabilityAt,
+            'a missing extension or missing constants must be diagnosed before a connection is attempted'
+        );
+    }
+
+    // ============================================================
+    // The two silent denies: no mysqli, no connection constants
+    // ============================================================
+
+    /**
+     * A MySQL install whose PHP has no `mysqli` extension.
+     *
+     * Same failure class as an unsupported backend, and it used to be just as
+     * mute: `null` from the resolver collapsed into the anonymous denial and
+     * nothing anywhere said why every administrator was being refused.
+     */
+    public function testAMissingMysqliExtensionIsReportedAndRefused(): void
+    {
+        $constants = ['FS_DB_HOST', 'FS_DB_USER', 'FS_DB_NAME'];
+
+        $availability = system_updater_admin_read_availability(false, $constants);
+
+        $this->assertFalse($availability['available'], 'no client means no verdict');
+        $this->assertSame(SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING, $availability['diagnostic']);
+        $this->assertSame(['mysqli'], $availability['missing'], 'the operator needs to know what to install');
+
+        $verdict = system_updater_resolve_admin_verdict('admin', 'MYSQL', false, $constants);
+
+        $this->assertNull($verdict, 'fail closed: never an accept');
+        $this->assertNotTrue($verdict, 'fail closed: never a truthy answer');
+
+        $lines = $this->diagnosticLines();
+        $this->assertCount(1, $lines, 'one line, once per process');
+        $this->assertStringContainsString('mysqli', $lines[0]);
+        $this->assertStringNotContainsString(
+            SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED,
+            $lines[0],
+            'the operator line must not be the caller-facing reason'
+        );
+    }
+
+    /**
+     * A `config.php` that never defines the connection constants — a damaged
+     * or half-restored installation is the realistic case.
+     */
+    public function testAMissingConnectionConstantIsReportedAndRefused(): void
+    {
+        $availability = system_updater_admin_read_availability(true, ['FS_DB_HOST']);
+
+        $this->assertFalse($availability['available']);
+        $this->assertSame(SYSTEM_UPDATER_GUARD_DIAGNOSTIC_DB_CONFIG_MISSING, $availability['diagnostic']);
+        $this->assertSame(
+            ['FS_DB_USER', 'FS_DB_NAME'],
+            $availability['missing'],
+            'the diagnostic must name exactly the constants that are missing, in a stable order'
+        );
+
+        $verdict = system_updater_resolve_admin_verdict('admin', 'MYSQL', true, ['FS_DB_HOST']);
+
+        $this->assertNull($verdict);
+
+        $lines = $this->diagnosticLines();
+        $this->assertCount(1, $lines, 'one line, once per process');
+        $this->assertStringContainsString('FS_DB_USER', $lines[0]);
+        $this->assertStringContainsString('FS_DB_NAME', $lines[0]);
+        $this->assertStringNotContainsString('FS_DB_HOST', $lines[0], 'name what is missing, not what is present');
+    }
+
+    /**
+     * `status` and `progress` poll every couple of seconds, so each distinct
+     * cause gets exactly one line — two causes, two lines, not four.
+     */
+    public function testEachUnreadableEnvironmentCauseIsReportedOncePerProcess(): void
+    {
+        $constants = ['FS_DB_HOST', 'FS_DB_USER', 'FS_DB_NAME'];
+
+        for ($poll = 0; $poll < 3; $poll++) {
+            system_updater_resolve_admin_verdict('admin', 'MYSQL', false, $constants);
+            system_updater_resolve_admin_verdict('admin', 'MYSQL', true, ['FS_DB_HOST']);
+        }
+
+        $lines = $this->diagnosticLines();
+
+        $this->assertCount(2, $lines, 'one line per distinct cause: ' . implode("\n", $lines));
+        $this->assertCount(1, array_filter($lines, static fn (string $line): bool => str_contains($line, 'mysqli')));
+        $this->assertCount(1, array_filter($lines, static fn (string $line): bool => str_contains($line, 'FS_DB_USER')));
+    }
+
+    public function testAHealthyEnvironmentIsNeitherRefusedNorReported(): void
+    {
+        $availability = system_updater_admin_read_availability(
+            true,
+            ['FS_DB_HOST', 'FS_DB_USER', 'FS_DB_NAME']
+        );
+
+        $this->assertTrue($availability['available'], 'premise: a complete environment is readable');
+        $this->assertSame('', $availability['diagnostic']);
+        $this->assertSame([], $availability['missing']);
+        $this->assertSame([], $this->diagnosticLines(), 'a healthy install stays quiet');
+    }
+
+    public function testTheEnvironmentDiagnosticsNameWhatIsMissing(): void
+    {
+        $extension = system_updater_admin_read_diagnostic_message(
+            SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING,
+            'MYSQL'
+        );
+
+        $this->assertStringContainsString('system_updater', $extension);
+        $this->assertStringContainsString('mysqli', $extension);
+        $this->assertStringNotContainsString(SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED, $extension);
+
+        $configuration = system_updater_admin_read_diagnostic_message(
+            SYSTEM_UPDATER_GUARD_DIAGNOSTIC_DB_CONFIG_MISSING,
+            'MYSQL',
+            ['FS_DB_USER', 'FS_DB_NAME']
+        );
+
+        $this->assertStringContainsString('system_updater', $configuration);
+        $this->assertStringContainsString('FS_DB_USER', $configuration);
+        $this->assertStringContainsString('FS_DB_NAME', $configuration);
+        $this->assertStringNotContainsString(SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED, $configuration);
+    }
+
+    /**
+     * AUTH-04 holds here too: an unreadable environment must be indistinguish-
+     * able from anonymity for the caller. Only the operator sees the cause.
+     */
+    public function testTheCallersDenialStaysUniformWhenTheEnvironmentIsUnusable(): void
+    {
+        $anonymous = system_updater_guard_decision([], [], static fn (string $nick): ?bool => null);
+
+        $unusable = system_updater_guard_decision(
+            ['FSSESS_test' => [
+                'user_nick' => 'admin',
+                'login_time' => time(),
+                'last_activity' => time(),
+            ]],
+            [],
+            static function (string $nick): ?bool {
+                return system_updater_resolve_admin_verdict('admin', 'MYSQL', false, ['FS_DB_HOST', 'FS_DB_USER', 'FS_DB_NAME']);
+            }
+        );
+
+        $this->assertSame(
+            json_encode($anonymous),
+            json_encode($unusable),
+            'the refusal must be byte-identical to the anonymous one'
+        );
     }
 
     /**
