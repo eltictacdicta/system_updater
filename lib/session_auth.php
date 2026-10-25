@@ -594,6 +594,22 @@ if (!defined('SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED')) {
 }
 
 /**
+ * The refusal text, and the only copy of it.
+ *
+ * AUTH-04: every denial — anonymous, expired, unknown nick, non-administrator,
+ * unresolvable verdict — produces the same refusal body, and the transport
+ * difference (a JSON 401 here, an SSE `error` event there) must never become a
+ * denial-reason difference. Two literals cannot promise that; one constant and
+ * two payload builders can.
+ *
+ * Deliberately not named after a cause: the moment it reads like a diagnosis,
+ * somebody will add a second one.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_DENIAL')) {
+    define('SYSTEM_UPDATER_GUARD_DENIAL', 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.');
+}
+
+/**
  * Identity from any candidate session, never from the first non-empty one.
  *
  * An expired candidate contributes no identity. A candidate carrying only
@@ -959,9 +975,38 @@ function system_updater_require_authenticated_session(): string
     return session_id();
 }
 
+/**
+ * The JSON refusal body shared by every denial (AUTH-04).
+ *
+ * @return array{success: false, message: string}
+ */
+function system_updater_denial_payload(): array
+{
+    return [
+        'success' => false,
+        'message' => SYSTEM_UPDATER_GUARD_DENIAL,
+    ];
+}
+
+/**
+ * The SSE refusal payload shared by every denial (AUTH-04).
+ *
+ * Same `message` as {@see system_updater_denial_payload()}; only the framing
+ * differs, because the transport is the one thing that legitimately differs.
+ *
+ * @return array{message: string, percent: int}
+ */
+function system_updater_denial_sse_payload(): array
+{
+    return [
+        'message' => SYSTEM_UPDATER_GUARD_DENIAL,
+        'percent' => 0,
+    ];
+}
+
 function system_updater_deny_unauthenticated_request(): void
 {
-    $message = 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.';
+    $message = SYSTEM_UPDATER_GUARD_DENIAL;
 
     if (php_sapi_name() === 'cli') {
         fwrite(STDERR, $message . PHP_EOL);
@@ -981,19 +1026,16 @@ function system_updater_deny_unauthenticated_request(): void
         }
 
         echo "event: error\n";
-        echo 'data: ' . json_encode([
-            'message' => $message,
-            'percent' => 0,
-        ], JSON_UNESCAPED_UNICODE) . "\n\n";
+        echo 'data: ' . json_encode(
+            system_updater_denial_sse_payload(),
+            JSON_UNESCAPED_UNICODE
+        ) . "\n\n";
         @flush();
         exit;
     }
 
     http_response_code(401);
     header('Content-Type: application/json; charset=UTF-8');
-    echo json_encode([
-        'success' => false,
-        'message' => $message,
-    ], JSON_UNESCAPED_UNICODE);
+    echo json_encode(system_updater_denial_payload(), JSON_UNESCAPED_UNICODE);
     exit;
 }
