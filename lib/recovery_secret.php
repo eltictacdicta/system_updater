@@ -81,10 +81,71 @@ function recovery_secret_filename(): string
 }
 
 /**
+ * The prefix of the single generation line written to the PHP error log.
+ * Documented so an operator with log access but no shell can grep for it
+ * (RACC-06).
+ */
+function recovery_secret_log_prefix(): string
+{
+    return '[system_updater] recovery console secret generated';
+}
+
+/**
+ * Read the operator pin (`SU_RECOVERY_SECRET`) out of a `config.php`.
+ *
+ * This is the *lost-secret* fallback and nothing else: it is the only place in
+ * the whole console's graph that loads `config.php` before the gate has
+ * accepted a candidate, and the caller must reach it only when no persisted
+ * value exists. Two properties keep that safe:
+ *
+ * - the include is error-suppressed, output-buffered and wrapped in a
+ *   `Throwable` catch, so a `config.php` that does not parse yields "no pin"
+ *   instead of a fatal page or a leaked parse error;
+ * - it returns `null` rather than a value when the constant is absent or
+ *   empty, so "the operator pinned the empty string" cannot become a
+ *   one-character secret.
+ *
+ * The pin is deliberately not length-checked: RACC-06 lets an operator set a
+ * value of their choosing. The library's own recommendation (64 hex, i.e.
+ * `php -r 'echo bin2hex(random_bytes(32));'`) lives in the docblock instead of
+ * a rejection, so a rescue is never blocked by a policy the operator cannot
+ * see.
+ */
+function recovery_secret_operator_pin(string $configFile): ?string
+{
+    if (is_file($configFile) && is_readable($configFile)) {
+        $level = ob_get_level();
+        ob_start();
+
+        try {
+            (static function (string $file): void {
+                include $file;
+            })($configFile);
+        } catch (\Throwable $error) {
+            // A damaged config.php must yield "no pin", never a fatal page.
+        } finally {
+            while (ob_get_level() > $level) {
+                ob_end_clean();
+            }
+        }
+    }
+
+    if (!defined('SU_RECOVERY_SECRET')) {
+        return null;
+    }
+
+    $pin = constant('SU_RECOVERY_SECRET');
+    if (!is_string($pin) || trim($pin) === '') {
+        return null;
+    }
+
+    return trim($pin);
+}
+
+/**
  * Resolve the installation root. Everything else in this file is a pure
  * function of it, which is what lets the suite run against a temp tree.
- */
-function recovery_secret_install_root(?string $installRoot = null): string
+ */function recovery_secret_install_root(?string $installRoot = null): string
 {
     if ($installRoot !== null && $installRoot !== '') {
         return rtrim($installRoot, '/\\');
@@ -272,13 +333,123 @@ function recovery_secret_store(string $value, ?string $target = null): bool
 }
 
 /**
+ * RACC-06 escapes 1 and 4: the CLI surface.
+ *
+ * The parser is pure and intentionally strict. It accepts exactly the two
+ * documented tokens in the first argument position, so a web request that
+ * carries `--secret=...` as a query parameter is not merely refused later — it
+ * has no representation here at all. The SAPI guard in the console is the
+ * other half of that.
+ *
+ * @param string[] $argv
+ */
+function recovery_secret_cli_command(array $argv): ?string
+{
+    $flag = $argv[1] ?? '';
+
+    return match ($flag) {
+        '--secret' => 'read',
+        '--rotate-secret' => 'rotate',
+        default => null,
+    };
+}
+
+/**
+ * Run a CLI escape and print its result.
+ *
+ * Output contract, documented for scripts: the first line is the secret and
+ * nothing else, so `php recovery.php --secret` is shell-composable; any
+ * advisory text follows on lines that begin with `# `. A failure prints no
+ * secret at all and exits non-zero.
+ */
+function recovery_secret_cli_run(string $command, ?string $installRoot = null): int
+{
+    $stdout = recovery_secret_cli_stream('STDOUT');
+    $stderr = recovery_secret_cli_stream('STDERR');
+
+    $value = $command === 'rotate'
+        ? recovery_secret_rotate($installRoot)
+        : recovery_secret_ensure($installRoot);
+
+    if ($value === null) {
+        fwrite($stderr, 'system_updater: cannot read or persist the recovery console secret.'
+            . ' No writable location was found next to the installation.'
+            . PHP_EOL);
+
+        return 1;
+    }
+
+    fwrite($stdout, $value . PHP_EOL);
+
+    if ($command === 'rotate') {
+        fwrite($stdout, '# note: SU_RECOVERY_SECRET in config.php, when defined, overrides this value.'
+            . PHP_EOL);
+    }
+
+    return 0;
+}
+
+/**
+ * A standard stream, without assuming the CLI constants exist.
+ *
+ * @return resource
+ */
+function recovery_secret_cli_stream(string $constant)
+{
+    if (defined($constant)) {
+        return constant($constant);
+    }
+
+    return fopen('php://' . strtolower($constant), 'wb');
+}
+
+/**
+ * RACC-06 escape 2: regenerate, persist and print a new value, retiring the
+ * previous one in the same write.
+ */
+function recovery_secret_rotate(?string $installRoot = null): ?string
+{
+    $target = recovery_secret_existing_path($installRoot) ?? recovery_secret_writable_path($installRoot);
+    if ($target === '') {
+        return null;
+    }
+
+    $value = recovery_secret_generate();
+    if (!recovery_secret_store($value, $target)) {
+        return null;
+    }
+
+    recovery_secret_log_generation($value);
+
+    return $value;
+}
+
+/**
+ * The one and only place the value is written to a sink.
+ *
+ * RACC-06 requires the first generation to be recoverable from the PHP error
+ * log by an operator with no shell, so the line carries the *whole* value —
+ * a masked line would not be an escape. Every other path is silent: reads,
+ * resolutions, refusals, and a failed write log nothing, and no candidate
+ * value is ever logged. One line per generation event (initial generation and
+ * each rotation), which keeps the last line of the log equal to the current
+ * secret.
+ */
+function recovery_secret_log_generation(string $value): void
+{
+    error_log(recovery_secret_log_prefix() . ': ' . $value
+        . ' (read it again with: php plugins/system_updater/recovery.php --secret)');
+}
+
+/**
  * What *is* the secret (RACC-03): the operator pin when the constant is
  * already defined, otherwise the persisted value.
  *
  * This function never loads `config.php`. That is deliberate and load-bearing:
  * branch 2 must answer with a damaged or absent `config.php`, so the pin can
  * only win when the caller already loaded the file — and the only caller
- * allowed to do that is the console's lost-secret fallback.
+ * allowed to do that is the console's lost-secret fallback
+ * ({@see recovery_secret_operator_pin()}).
  */
 function recovery_secret_resolve(?string $installRoot = null): ?string
 {
@@ -315,6 +486,8 @@ function recovery_secret_ensure(?string $installRoot = null): ?string
     if (!recovery_secret_store($value, $target)) {
         return null;
     }
+
+    recovery_secret_log_generation($value);
 
     return $value;
 }
