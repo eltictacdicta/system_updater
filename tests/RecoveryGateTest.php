@@ -139,6 +139,21 @@ final class RecoveryGateTest extends ConsoleHttpTestCase
         $this->assertSame([], $harness->headersMatching($missing, 'set-cookie'));
         $this->assertSame([], $harness->headersMatching($absent, 'set-cookie'));
 
+        // Beyond the status: the refusal must not add a single header that a
+        // genuinely missing path does not also carry. `X-Powered-By` is the one
+        // that matters — PHP advertises itself on every script response, the
+        // server's own 404 does not, so a caller who knows nothing else can
+        // still tell that a script lives at this path.
+        $missingNames = $this->controllableHeaderNames($missing);
+        foreach (['absent' => $absent, 'empty' => $empty, 'wrong' => $wrong] as $label => $response) {
+            $this->assertSame(
+                [],
+                array_values(array_diff($this->controllableHeaderNames($response), $missingNames)),
+                'the ' . $label . ' refusal must not carry a header a missing path lacks'
+            );
+        }
+        $this->assertSame([], $harness->headersMatching($absent, 'x-powered-by'));
+
         $this->assertSame([], $harness->sessionFiles(), 'a secret-less request must not create a session file');
         $this->assertFalse($harness->configWasLoaded(), 'a secret-less request must never load config.php');
         $this->assertTrue($harness->secretExists(), 'premise: the secret was persisted, so nothing was generated');
