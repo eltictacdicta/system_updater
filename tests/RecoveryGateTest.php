@@ -198,6 +198,38 @@ final class RecoveryGateTest extends ConsoleHttpTestCase
         $this->assertStringNotContainsString($generated, $second['body']);
     }
 
+    /**
+     * RACC-04 "Correct secret": the console renders as it does today, announces
+     * `Referrer-Policy: no-referrer` so the secret in the URL cannot leak
+     * through a `Referer` to the third-party CDN assets the page loads, and
+     * never echoes, redirects to or forms-actions the value.
+     */
+    public function testTheCorrectSecretRendersTheConsoleWithoutEchoingTheSecret(): void
+    {
+        $secret = $this->newSecret();
+        $harness = $this->gateFixture($secret);
+
+        $response = $harness->request(self::CONSOLE . '?secret=' . $secret);
+
+        $this->assertSame(200, $response['status'], 'the console renders: ' . $response['body']);
+        $this->assertSame(
+            ['Referrer-Policy: no-referrer'],
+            $harness->headersMatching($response, 'referrer-policy'),
+            'the success path announces the referrer policy'
+        );
+        $this->assertStringContainsString('name="nick"', $response['body'], 'the login form is rendered');
+        $this->assertStringContainsString('name="password"', $response['body']);
+        $this->assertTrue(
+            $harness->configWasLoaded(),
+            'premise: the accepted request is the one that does load config.php'
+        );
+
+        $this->assertStringNotContainsString($secret, $response['body'], 'the secret never appears in the body');
+        $this->assertStringNotContainsString($secret, $response['headers'], 'the secret never appears in a header');
+        $this->assertStringNotContainsString('secret=', $response['body'], 'and never in a form action or a link');
+        $this->assertSame([], $harness->headersMatching($response, 'location'), 'and never in a redirect target');
+    }
+
     private function gateFixture(string $secret): ConsoleHttpHarness
     {
         $harness = $this->newHarness(self::CONSOLE_FILES);
