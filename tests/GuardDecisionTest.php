@@ -391,4 +391,133 @@ final class GuardDecisionTest extends TestCase
         $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $decision['verdict']);
         $this->assertNull($decision['nick']);
     }
+
+    // ---------------------------------------------------------------------
+    // AUTH-03 — the administrator verdict fails closed
+    // ---------------------------------------------------------------------
+
+    public function testThrowingVerdictFailsClosed(): void
+    {
+        $isAdmin = static function (string $nick): bool {
+            throw new \RuntimeException('database unreachable');
+        };
+
+        $decision = $this->decide([self::FRAMEWORK_SESSION => $this->loginSession()], [], $isAdmin);
+
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $decision['verdict']);
+        $this->assertNull($decision['nick']);
+    }
+
+    /**
+     * @return array<string, array{0: mixed}>
+     */
+    public static function nonBooleanVerdictProvider(): array
+    {
+        return [
+            'null' => [null],
+            'int one' => [1],
+            'int zero' => [0],
+            'string one' => ['1'],
+            'string yes' => ['yes'],
+            'empty array' => [[]],
+            'object' => [new \stdClass()],
+        ];
+    }
+
+    /**
+     * Only a strict `true` accepts. Anything a resolver may accidentally
+     * return instead — null, a truthy scalar, an object — denies.
+     */
+    #[DataProvider('nonBooleanVerdictProvider')]
+    public function testNonBooleanVerdictFailsClosed(mixed $verdict): void
+    {
+        $isAdmin = static fn (string $nick): mixed => $verdict;
+
+        $decision = $this->decide([self::FRAMEWORK_SESSION => $this->loginSession()], [], $isAdmin);
+
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $decision['verdict']);
+        $this->assertNull($decision['nick']);
+    }
+
+    public function testDeletedRowIsDenied(): void
+    {
+        $decision = $this->decide(
+            [self::FRAMEWORK_SESSION => $this->loginSession([], 'deleted-user')],
+            [],
+            $this->verdictIs(false)
+        );
+
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $decision['verdict']);
+        $this->assertNull($decision['nick']);
+    }
+
+    /**
+     * AUTH-03: the verdict is not cached, so a demotion between two requests
+     * is effective on the second one.
+     */
+    public function testDemotionTakesEffectOnTheNextRequest(): void
+    {
+        $verdicts = [true, false];
+        $isAdmin = static function (string $nick) use (&$verdicts): bool {
+            return (bool) array_shift($verdicts);
+        };
+
+        $sessions = [self::FRAMEWORK_SESSION => $this->loginSession()];
+
+        $first = $this->decide($sessions, [], $isAdmin);
+        $second = $this->decide($sessions, [], $isAdmin);
+
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT, $first['verdict']);
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $second['verdict'], 'no verdict may survive a request');
+    }
+
+    /**
+     * The production resolver is a thin shell around the row read: it must
+     * name the table, carry no cache, and never fall back to `true`.
+     */
+    public function testProductionResolverReadsTheRowWithoutCache(): void
+    {
+        $body = $this->functionBody($this->guardSource(), 'system_updater_resolve_admin_verdict');
+
+        $this->assertNotSame('', $body, 'the production administrator resolver must exist');
+        $this->assertStringContainsString('fs_users', $body, 'the verdict must come from the fs_users row');
+        $this->assertStringNotContainsString('static $', $body, 'the verdict must not be cached across requests (AUTH-03)');
+        $this->assertStringNotContainsString('CacheManager', $body);
+        $this->assertStringNotContainsString('fs_cache', $body);
+    }
+
+    public function testGuardRoutesThroughTheAuthoritativeVerdict(): void
+    {
+        $body = $this->functionBody($this->guardSource(), 'system_updater_is_logged_in');
+
+        $this->assertStringContainsString(
+            'system_updater_resolve_admin_verdict',
+            $body,
+            'the guard must ask the authoritative administrator verdict'
+        );
+    }
+
+    private function guardSource(): string
+    {
+        return (string) file_get_contents(FS_FOLDER . '/plugins/system_updater/lib/session_auth.php');
+    }
+
+    /**
+     * Body of a top-level function of session_auth.php. The file closes every
+     * function with `}` in the first column, so that brace is the boundary.
+     */
+    private function functionBody(string $source, string $function): string
+    {
+        $start = strpos($source, 'function ' . $function . '(');
+        if ($start === false) {
+            return '';
+        }
+
+        $end = strpos($source, "\n}", $start);
+        if ($end === false) {
+            return '';
+        }
+
+        return substr($source, $start, $end - $start);
+    }
 }
