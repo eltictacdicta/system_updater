@@ -138,12 +138,14 @@ final class ConsoleHttpHarness
      *
      * `$configBody` is appended verbatim to the sentinel preamble, which is how
      * an `FS_SESSION_NAME`, database constants or a parse error are injected.
+     * `$port` pins the listening port instead of drawing one, so a case can
+     * prove the harness refuses a port a foreign server already answers on.
      */
-    public function boot(string $configBody = ''): void
+    public function boot(string $configBody = '', ?int $port = null): void
     {
         $this->installFiles();
         $this->writeConfig($configBody);
-        $this->startServer();
+        $this->startServer($port);
 
         register_shutdown_function(function (): void {
             $this->destroy();
@@ -535,20 +537,33 @@ final class ConsoleHttpHarness
     }
 
     /**
-     * Start `php -S` on an explicit port.
+     * Start `php -S` and only accept it when it is the one answering.
      *
      * `php -S 127.0.0.1:0` does not bind an ephemeral port, so the port is
      * drawn from the documented range and a collision is retried once. Every
      * failure mode here is fatal to the fixture rather than a silent skip: a
      * server that does not answer would make the assertions pass against an
      * empty response.
+     *
+     * "Something answers on the port" is not the acceptance condition, because
+     * the port is not ours until `php -S` binds it: when another process
+     * already listens there, `php -S` exits and `fsockopen()` happily connects
+     * to the stranger. Requests would then go to a server that never read the
+     * fixture, and the *absence* assertions — no `Set-Cookie`, no session file,
+     * no console marker in the body — would pass without the console ever
+     * being observed. The server is therefore accepted only when the fixture's
+     * own probe file comes back, and the process is checked for life while
+     * waiting, so a collision fails loudly instead of timing out.
+     *
+     * `$port` pins the port (one attempt) instead of drawing one.
      */
-    private function startServer(): void
+    private function startServer(?int $port = null): void
     {
+        $attempts = $port === null ? 2 : 1;
         $lastError = '';
 
-        for ($attempt = 0; $attempt < 2; $attempt++) {
-            $port = random_int(20000, 40000);
+        for ($attempt = 0; $attempt < $attempts; $attempt++) {
+            $chosen = $port ?? random_int(20000, 40000);
             $descriptors = [
                 0 => ['file', '/dev/null', 'r'],
                 1 => ['file', $this->serverLog, 'a'],
@@ -560,7 +575,7 @@ final class ConsoleHttpHarness
                     PHP_BINARY,
                     '-d', 'error_log=' . $this->errorLog,
                     '-d', 'session.save_path=' . $this->sessions,
-                    '-S', '127.0.0.1:' . $port,
+                    '-S', '127.0.0.1:' . $chosen,
                     '-t', $this->root,
                 ],
                 $descriptors,
@@ -573,30 +588,55 @@ final class ConsoleHttpHarness
                 continue;
             }
 
-            if ($this->waitForServer($port)) {
+            $probe = $this->writeProbeFile();
+
+            try {
+                $accepted = $this->waitForServer($chosen, $server, $probe);
+            } finally {
+                @unlink($this->root . '/' . $probe['name']);
+            }
+
+            if ($accepted) {
                 $this->server = $server;
-                $this->port = $port;
+                $this->port = $chosen;
 
                 return;
             }
 
+            $alive = $this->processIsRunning($server);
+
             @proc_terminate($server);
             @proc_close($server);
-            $lastError = 'the built-in server did not accept a connection on port ' . $port;
+
+            $lastError = 'no server answered 127.0.0.1:' . $chosen . ' as this fixture'
+                . ($alive ? ' (the spawned process was still running)' : ' (the spawned process had already exited,'
+                    . ' so something else holds the port)')
+                . $this->serverLogTail();
         }
 
-        throw new \RuntimeException('the console harness could not start: ' . $lastError);
+        throw new \RuntimeException(
+            'the console harness could not start'
+            . ($port === null ? '' : ' on 127.0.0.1:' . $port)
+            . ': ' . $lastError
+        );
     }
 
-    private function waitForServer(int $port): bool
+    /**
+     * Wait until *this* fixture answers, or the spawned process dies.
+     *
+     * @param resource $process
+     * @param array{name: string, token: string} $probe
+     */
+    private function waitForServer(int $port, $process, array $probe): bool
     {
         $deadline = microtime(true) + 5.0;
 
         while (microtime(true) < $deadline) {
-            $socket = @fsockopen('127.0.0.1', $port, $errorNumber, $errorString, 0.2);
-            if (is_resource($socket)) {
-                fclose($socket);
+            if (!$this->processIsRunning($process)) {
+                return false;
+            }
 
+            if ($this->servesTheProbe($port, $probe)) {
                 return true;
             }
 
@@ -604,5 +644,97 @@ final class ConsoleHttpHarness
         }
 
         return false;
+    }
+
+    /**
+     * Whether the spawned process is still alive.
+     *
+     * The liveness of the child is what distinguishes "the server is slow" from
+     * "the server could not bind and exited"; `proc_get_status()` is the only
+     * way to tell those apart before the deadline, and a dead child must never
+     * be accepted just because a stranger answers the port.
+     *
+     * @param resource $process
+     */
+    private function processIsRunning($process): bool
+    {
+        $status = @proc_get_status($process);
+
+        return is_array($status) && ($status['running'] ?? false) === true;
+    }
+
+    /**
+     * One raw `GET` for the probe file, and whether the fixture's token came
+     * back.
+     *
+     * A socket rather than curl on purpose: this runs before the fixture is
+     * accepted, and curl may be missing on a host where the whole harness is
+     * skipped — the probe must not be the thing that decides whether the seam
+     * exists.
+     *
+     * @param array{name: string, token: string} $probe
+     */
+    private function servesTheProbe(int $port, array $probe): bool
+    {
+        $socket = @fsockopen('127.0.0.1', $port, $errorNumber, $errorString, 0.2);
+        if (!is_resource($socket)) {
+            return false;
+        }
+
+        stream_set_timeout($socket, 1);
+
+        @fwrite(
+            $socket,
+            'GET /' . $probe['name'] . " HTTP/1.0\r\n"
+            . 'Host: 127.0.0.1:' . $port . "\r\n"
+            . "Connection: close\r\n\r\n"
+        );
+
+        $response = (string) @stream_get_contents($socket);
+        fclose($socket);
+
+        return str_contains($response, $probe['token']);
+    }
+
+    /**
+     * A token no other document root can serve.
+     *
+     * The token goes in the **body**, never in the file name: the built-in
+     * server's own 404 page echoes the requested path, so a name that carried
+     * the token would let a stranger "serve" it by not having the file at all.
+     *
+     * @return array{name: string, token: string}
+     */
+    private function writeProbeFile(): array
+    {
+        $token = bin2hex(random_bytes(16));
+        $name = '__su_harness_probe.txt';
+
+        file_put_contents($this->root . '/' . $name, $token);
+
+        return ['name' => $name, 'token' => $token];
+    }
+
+    /**
+     * The tail of `php -S`'s own output, for the failure message.
+     *
+     * On a collision its first line is `Failed to listen on 127.0.0.1:PORT
+     * (reason: Address already in use)`, which is the diagnosis an operator
+     * needs; without it the failure reads as an unexplained timeout.
+     */
+    private function serverLogTail(int $limit = 400): string
+    {
+        clearstatcache(true, $this->serverLog);
+        if (!is_file($this->serverLog)) {
+            return '';
+        }
+
+        $contents = trim((string) file_get_contents($this->serverLog));
+        if ($contents === '') {
+            return '';
+        }
+
+        return '; server output: '
+            . ($limit > 0 && strlen($contents) > $limit ? '...' . substr($contents, -$limit) : $contents);
     }
 }
