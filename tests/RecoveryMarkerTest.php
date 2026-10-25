@@ -150,6 +150,144 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
     }
 
     /**
+     * RACC-06: rotation is the way a leaked secret is retired, so it must also
+     * retire the sessions that secret already opened.
+     *
+     * The marker used to be `authorized => true` with nothing linking it to the
+     * value that granted it, so `--rotate-secret` changed what the gate accepts
+     * while every browser that had already opened the console kept entering for
+     * the whole session lifetime — precisely the leak rotation exists to stop.
+     */
+    public function testRotatingTheSecretRetiresTheMarkerItGranted(): void
+    {
+        $secret = $this->newSecret();
+        $harness = $this->markerFixture($secret);
+
+        $open = $harness->request(self::CONSOLE . '?secret=' . $secret, ['jar' => true]);
+        $this->assertSame(200, $open['status'], 'premise: the secret opened the console: ' . $open['body']);
+        $this->assertArrayHasKey(
+            self::SESSION_NAME,
+            $harness->jarCookies(),
+            'premise: the accepted request left a session cookie for the jar'
+        );
+
+        $rotated = $this->newSecret();
+        $harness->persistSecret($rotated);
+
+        $reload = $harness->request(self::CONSOLE, ['jar' => true]);
+
+        $this->assertSame(
+            404,
+            $reload['status'],
+            'a marker granted by the retired secret must stop opening the console: ' . $reload['body']
+        );
+        $this->assertStringNotContainsString('name="nick"', $reload['body'], 'and it must receive the gate refusal');
+        $this->assertStringNotContainsString($rotated, $reload['body'], 'the new secret is not disclosed to it');
+
+        $reopened = $harness->request(self::CONSOLE . '?secret=' . $rotated, ['jar' => true]);
+        $this->assertSame(200, $reopened['status'], 'the current secret is the way back in: ' . $reopened['body']);
+    }
+
+    /**
+     * The other half of the pin decision: while the pin is the credential the
+     * gate answers against, the marker it granted keeps working. Refusing it
+     * would send the operator back to the secret on every reload, which is what
+     * the marker exists to prevent.
+     */
+    public function testAMarkerGrantedByTheOperatorPinKeepsWorkingWhileThePinIsCurrent(): void
+    {
+        $pin = $this->newSecret();
+        $harness = $this->newHarness(self::FILES);
+        $this->bootMarkerFixture($harness, null, [
+            "define('SU_RECOVERY_SECRET', '" . $pin . "');",
+        ]);
+
+        $open = $harness->request(self::CONSOLE . '?secret=' . $pin, ['jar' => true]);
+        $this->assertSame(200, $open['status'], 'premise: the pin opened the console: ' . $open['body']);
+
+        $reload = $harness->request(self::CONSOLE, ['jar' => true]);
+
+        $this->assertSame(
+            200,
+            $reload['status'],
+            'nothing has been persisted and the pin still grants, so the marker is still current: '
+            . $reload['body']
+        );
+        $this->assertStringContainsString('name="nick"', $reload['body']);
+        $this->assertStringNotContainsString($pin, $reload['body'], 'and the pin is never echoed');
+    }
+
+    /**
+     * The operator pin is a credential of its own, and it is not what rotation
+     * changes — but a rotation that *persists* a value does displace it at the
+     * gate, so the marker it granted must not outlive that moment.
+     */
+    public function testAMarkerGrantedByTheOperatorPinDiesWhenARotationPersistsAValue(): void
+    {
+        $pin = $this->newSecret();
+        $harness = $this->newHarness(self::FILES);
+        $this->bootMarkerFixture($harness, null, [
+            "define('SU_RECOVERY_SECRET', '" . $pin . "');",
+        ]);
+
+        $open = $harness->request(self::CONSOLE . '?secret=' . $pin, ['jar' => true]);
+        $this->assertSame(200, $open['status'], 'the operator pin opens the console: ' . $open['body']);
+        $this->assertFalse($harness->secretExists(), 'premise: the pin grants while nothing has been persisted');
+
+        $harness->persistSecret($this->newSecret());
+
+        $reload = $harness->request(self::CONSOLE, ['jar' => true]);
+
+        $this->assertSame(
+            404,
+            $reload['status'],
+            'once a value is persisted it is what the gate answers against, so the pin-granted marker is stale: '
+            . $reload['body']
+        );
+        $this->assertStringNotContainsString('name="nick"', $reload['body']);
+    }
+
+    /**
+     * The marker names the credential that issued it, and nothing else is
+     * accepted: a marker without that binding, or bound to some other value, is
+     * the gate refusal — and it is not upgraded into a valid one by the read.
+     */
+    public function testAMarkerThatCannotNameItsGrantingSecretIsRefused(): void
+    {
+        $harness = $this->markerFixture($this->newSecret());
+
+        $unbound = bin2hex(random_bytes(16));
+        $harness->seedSession(self::SESSION_NAME, $unbound, [
+            self::MARKER_NAMESPACE => ['authorized' => true, 'granted_at' => time()],
+        ]);
+
+        $foreign = bin2hex(random_bytes(16));
+        $harness->seedSession(self::SESSION_NAME, $foreign, [
+            self::MARKER_NAMESPACE => [
+                'authorized' => true,
+                'granted_at' => time(),
+                'fingerprint' => self::fingerprint($this->newSecret()),
+            ],
+        ]);
+
+        foreach (['unbound' => $unbound, 'foreign' => $foreign] as $label => $sessionId) {
+            $before = (string) file_get_contents($harness->sessions . '/sess_' . $sessionId);
+
+            $response = $harness->request(self::CONSOLE, [
+                'cookies' => [self::SESSION_NAME => $sessionId],
+            ]);
+
+            $this->assertSame(404, $response['status'], 'the ' . $label . ' marker is not authorization: ' . $response['body']);
+            $this->assertStringNotContainsString('name="nick"', $response['body']);
+            $this->assertSame(
+                $before,
+                (string) file_get_contents($harness->sessions . '/sess_' . $sessionId),
+                'a marker the read refuses must not be rewritten: it is not silently upgraded'
+            );
+        }
+    }
+
+    /**
      * RACC-05 "a marker cannot be minted without the secret": the refusal must
      * leave no state behind, and a forged cookie must not create one.
      */
@@ -187,7 +325,11 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
 
         $sessionId = bin2hex(random_bytes(16));
         $harness->seedSession(self::SESSION_NAME, $sessionId, [
-            self::MARKER_NAMESPACE => ['authorized' => true, 'granted_at' => time()],
+            self::MARKER_NAMESPACE => [
+                'authorized' => true,
+                'granted_at' => time(),
+                'fingerprint' => self::fingerprint($secret),
+            ],
         ]);
 
         $console = $harness->request(self::CONSOLE, [
@@ -266,11 +408,14 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
     }
 
     /**
-     * @param string[] $extraConfig appended verbatim to the fixture config.php
+     * @param string|null $secret persisted before the first request; `null`
+     *                            leaves the installation with no persisted value,
+     *                            which is how the operator-pin state is reached
+     * @param string[]    $extraConfig appended verbatim to the fixture config.php
      */
     private function bootMarkerFixture(
         ConsoleHttpHarness $harness,
-        string $secret,
+        ?string $secret,
         array $extraConfig = []
     ): void {
         $harness->boot(implode("\n", array_merge([
@@ -281,7 +426,19 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
             "define('FS_DB_NAME', 'none');",
             "define('FS_SESSION_NAME', '" . self::SESSION_NAME . "');",
         ], $extraConfig, [''])));
-        $harness->persistSecret($secret);
+
+        if ($secret !== null) {
+            $harness->persistSecret($secret);
+        }
+    }
+
+    /**
+     * The marker's binding, spelled the way the library spells it: an HMAC over
+     * the marker namespace, keyed by the value that granted authorization.
+     */
+    private static function fingerprint(string $secret): string
+    {
+        return hash_hmac('sha256', self::MARKER_NAMESPACE, $secret);
     }
 
     private function newSecret(): string
