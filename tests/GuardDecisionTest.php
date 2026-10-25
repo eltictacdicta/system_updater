@@ -319,6 +319,46 @@ final class GuardDecisionTest extends TestCase
         $this->assertSame(0, $lookups);
     }
 
+    /**
+     * CSRF-01 (guard half): a valid plugin token proves *provenance*, never an
+     * identity.
+     *
+     * The token is minted only behind an authorized gate, so holding one says
+     * "this browser reached a page that rendered it" — not "somebody logged
+     * in". A request whose only credential is that token must therefore be
+     * refused by the session guard, and must look exactly like an anonymous
+     * request: same verdict, same reason, and no administrator lookup.
+     */
+    public function testAPluginTokenAloneConfersNoIdentity(): void
+    {
+        $lookups = 0;
+        $isAdmin = static function (string $nick) use (&$lookups): bool {
+            $lookups++;
+
+            return true;
+        };
+
+        $decision = $this->decide(
+            [self::PLUGIN_SESSION => $this->pluginSession()],
+            ['su_csrf_token' => str_repeat('a', 64), 'action' => 'status'],
+            $isAdmin
+        );
+
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $decision['verdict']);
+        $this->assertNull($decision['nick']);
+        $this->assertSame(0, $lookups, 'a token cannot justify an administrator lookup');
+        $this->assertSame(
+            SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED,
+            $decision['reason'],
+            'a token-only refusal must be indistinguishable from the anonymous one'
+        );
+        $this->assertSame(
+            json_encode($this->decide([], [], $isAdmin)),
+            json_encode($decision),
+            'CSRF-01: presenting a token must not change the refusal in any way'
+        );
+    }
+
     // ---------------------------------------------------------------------
     // AUTH-04 / AUTH-06 — uniform denial, unchanged expiry
     // ---------------------------------------------------------------------
