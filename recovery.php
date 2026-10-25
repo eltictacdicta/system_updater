@@ -17,6 +17,11 @@ define('FS_FOLDER', dirname(dirname(__DIR__)));
 // que existe este script.
 require_once __DIR__ . '/lib/recovery_secret.php';
 
+// Sesión propia del console (RACC-05/08). También plugin-local y sin core: el
+// nombre de sesión se resuelve por FS_SESSION_NAME (o se deriva del mismo seed
+// que el core), y la marca de autorización vive en el namespace de este script.
+require_once __DIR__ . '/lib/recovery_session.php';
+
 // Escapes de CLI (RACC-06): `--secret` lee el valor actual y `--rotate-secret`
 // lo regenera. El guard de SAPI es lo único que separa estas ramas del mundo
 // web: un request normal —incluido uno que lleve `?--secret`— no tiene ninguna
@@ -42,10 +47,18 @@ if (PHP_SAPI === 'cli') {
 // temprana para "no vino el parámetro". La respuesta no arranca sesión, no
 // toca la base de datos, no lee el directorio de copias y no emite cabecera
 // alguna que delate que hay un script detrás.
+//
+// La segunda mitad es RACC-05: si el request no trae el secreto, todavía puede
+// estar autorizado por la marca que este mismo console escribió en su sesión
+// tras una comparación correcta anterior. Esa lectura es silenciosa (sin
+// `Set-Cookie`, sin directivas de caché) y sólo abre una sesión cuyo fichero ya
+// existe, así que la negativa sigue sin dejar estado.
 $su_secret_candidate = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
 $su_secret_gate = recovery_secret_gate($su_secret_candidate, FS_FOLDER, FS_FOLDER . '/config.php');
 
-if (!$su_secret_gate['granted']) {
+if (!$su_secret_gate['granted']
+    && !recovery_console_authorized_by_marker(FS_FOLDER, FS_FOLDER . '/config.php')
+) {
     http_response_code(404);
     echo 'Not Found';
     exit;
@@ -73,26 +86,26 @@ if (file_exists($autoloadFile)) {
     require_once $autoloadFile;
 }
 
-// Sesión. El nombre lo resuelve el framework (FS_SESSION_NAME, o el secreto por
-// instalación): fijarlo a 'fsSess' —el nombre de FacturaScripts 2017— dejaba a
-// este script con una sesión propia que ninguna instalación moderna comparte.
-// Debe resolverse DESPUÉS de config.php, que es donde vive FS_SESSION_NAME.
+// Sesión. El nombre lo resuelve `lib/recovery_session.php` sin ninguna clase
+// del core (RACC-08): FS_SESSION_NAME cuando existe, y si no la derivación
+// local sobre el mismo seed que consume el core. Se resuelve DESPUÉS de
+// config.php, que es donde vive FS_SESSION_NAME — salvo en la negativa, donde
+// la lectura de la marca lo hace de forma defensiva.
 $sessionAuthFile = __DIR__ . '/lib/session_auth.php';
 if (file_exists($sessionAuthFile)) {
     require_once $sessionAuthFile;
 }
 
-if (function_exists('system_updater_resolve_framework_session_name')
-    && function_exists('system_updater_configure_php_session')
-) {
-    system_updater_configure_php_session(system_updater_resolve_framework_session_name());
-} else {
-    // Degradación explícita: sin los helpers del plugin se conserva el nombre
-    // histórico para que el script siga siendo autónomo.
-    session_name('fsSess');
-}
+recovery_session_configure(recovery_session_name(FS_FOLDER));
 
 session_start();
+
+// Marca de autorización (RACC-05): se escribe SÓLO después de la comparación
+// constante del secreto, nunca tras llegar aquí por la propia marca. A partir de
+// aquí el secreto ya no hace falta: la sesión lo lleva.
+if ($su_secret_gate['granted']) {
+    recovery_console_mark_authorized();
+}
 
 // Cargar Backup Manager
 if (file_exists(__DIR__ . '/lib/backup_manager.php')) {

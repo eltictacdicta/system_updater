@@ -51,6 +51,7 @@ final class RecoveryGateTest extends ConsoleHttpTestCase
     private const CONSOLE_FILES = [
         'recovery.php',
         'lib/recovery_secret.php',
+        'lib/recovery_session.php',
         'lib/session_auth.php',
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',

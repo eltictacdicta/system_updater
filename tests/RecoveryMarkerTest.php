@@ -49,6 +49,7 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
     private const FILES = [
         'recovery.php',
         'lib/recovery_secret.php',
+        'lib/recovery_session.php',
         'lib/session_auth.php',
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',
@@ -190,7 +191,7 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
             'only the console and its own session library may know the marker namespace'
         );
 
-        $library = (string) file_get_contents($plugin . '/lib/recovery_session.php');
+        $library = self::codeWithoutComments((string) file_get_contents($plugin . '/lib/recovery_session.php'));
         foreach (['_sf2_attributes', '_csrf', 'user_nick', 'user_id'] as $identityKey) {
             $this->assertStringNotContainsString(
                 $identityKey,
@@ -198,6 +199,26 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
                 'the marker is not an identity key: it must not touch ' . $identityKey
             );
         }
+    }
+
+    /**
+     * The prose may name the identity keys it refuses to be; the code may not
+     * touch them. Splitting the two is what makes the assertion falsifiable
+     * instead of a spellcheck on the docblock.
+     */
+    private static function codeWithoutComments(string $source): string
+    {
+        $code = '';
+
+        foreach (token_get_all($source) as $token) {
+            if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+
+            $code .= is_array($token) ? $token[1] : $token;
+        }
+
+        return $code;
     }
 
     private function markerFixture(string $secret): ConsoleHttpHarness

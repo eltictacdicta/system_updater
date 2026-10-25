@@ -128,7 +128,7 @@ final class RecoverySecretFixture
     {
         $source = dirname(__DIR__, 2);
 
-        foreach (['recovery.php', 'lib/recovery_secret.php'] as $relative) {
+        foreach (['recovery.php', 'lib/recovery_secret.php', 'lib/recovery_session.php'] as $relative) {
             $target = $this->root . '/plugins/system_updater/' . $relative;
             $directory = dirname($target);
             if (!is_dir($directory) && !mkdir($directory, 0777, true) && !is_dir($directory)) {
