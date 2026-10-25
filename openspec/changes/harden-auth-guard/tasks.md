@@ -643,7 +643,7 @@ console returns to rendering unconditionally with the shipped session resolution
 
 ### Phase 1: The harness (do this first — every later console test depends on it)
 
-- [ ] 1.0 `tests/Support/ConsoleHttpHarness.php` — `boot(array $files = [], string $configBody = '')`
+- [x] 1.0 `tests/Support/ConsoleHttpHarness.php` — `boot(array $files = [], string $configBody = '')`
   copies `recovery.php`, `lib/recovery_secret.php` and their dependencies into
   `<tmp>/plugins/system_updater/`, writes `<tmp>/config.php` whose **first statement** writes
   `<tmp>/config_loaded.sentinel` (so "config.php was loaded" and "a DB connection was attempted"
@@ -653,46 +653,46 @@ console returns to rendering unconditionally with the shipped session resolution
   `curl -s -D - -o - -w '\n%{http_code}'`. Teardown kills the PID and removes the root **even on
   failure** (`try/finally` in the test, plus a `register_shutdown_function` backstop). Keep every
   fixture inside `sys_get_temp_dir()`; never bind a fixed port.
-- [ ] Note in the harness docblock, for the next reader: `php-cgi` is not installed, `php -S` is the
+- [x] Note in the harness docblock, for the next reader: `php-cgi` is not installed, `php -S` is the
   only way to observe status/headers/cookies here, and the server's own 404 body echoes the path —
   so it cannot be used as the "non-existent path" baseline byte-for-byte (see risk D3).
 
 ### Phase 2: The gate (TDD)
 
-- [ ] 2.1 **[TEST] [RED]** Three requests to the console script with **no** parameter, an **empty**
+- [x] 2.1 **[TEST] [RED]** Three requests to the console script with **no** parameter, an **empty**
   parameter and a **64-hex wrong** parameter: each returns 404, the three bodies are byte-identical
   to each other, none contains `Modo Recuperación`, the plugin name, a backup name or a login field,
   no `Set-Cookie` header is present, `<tmp>/config_loaded.sentinel` does not exist, and no session
   file appears in the configured save path. RED today (the console renders the login form and
   connects to the DB).
-- [ ] 2.2 Gate in `recovery.php`: resolve the secret **without** loading `config.php`
+- [x] 2.2 Gate in `recovery.php`: resolve the secret **without** loading `config.php`
   (`lib/recovery_secret.php` only), compare with `hash_equals()` on the full 64-hex string, and on
   failure emit the single 404 path — **one code path for absent, empty and wrong** (no early return
   for "no parameter"), no session start, no DB, no backup directory read, `Referrer-Policy:
   no-referrer` only on the success path. `config.php` is loaded only after the comparison succeeds
   (the one documented exception: the operator-pin branch of "Delta conflict resolved at apply time"
   below, reachable only when no persisted value exists).
-- [ ] 2.3 **[TEST] [RED]** Correct secret in the query string: status 200, the response has
+- [x] 2.3 **[TEST] [RED]** Correct secret in the query string: status 200, the response has
   `Referrer-Policy: no-referrer`, the console's login form is present, and the secret value appears
   in **none** of body, `Location`, or a form `action`.
-- [ ] 2.4 Ensure the success path emits that header and never echoes the secret. Keep the rest of
+- [x] 2.4 Ensure the success path emits that header and never echoes the secret. Keep the rest of
   the rendered page as today (no UI redesign beyond what the gate requires).
 
 ### Phase 3: The marker (TDD)
 
-- [ ] 3.1 **[TEST] [RED]** Cookie-jar continuity: request 1 carries the secret and obtains the
+- [x] 3.1 **[TEST] [RED]** Cookie-jar continuity: request 1 carries the secret and obtains the
   cookie; request 2 posts the login form **without** any query parameter and is accepted for
   credential evaluation (today it re-renders or fails because nothing is remembered). Then the
   negative halves: a session holding **only** the marker is refused by
   `download_backup.php` and by a `process_*` action; a request without a valid secret receives the
   PR 4 404 and leaves no marker in the store.
-- [ ] 3.2 Write the marker **only** after a successful constant-time comparison, under a
+- [x] 3.2 Write the marker **only** after a successful constant-time comparison, under a
   console-only namespace inside the session the console opened (`$_SESSION['recovery_console']` —
   D2's default), never in `_sf2_attributes`, never `_csrf`, never an identity key. It is regenerated
   by `session_regenerate_id(true)` together with REC-06's rotation (asserted in PR 7). No other
   plugin script may read it: add the source assertion that `recovery_console` appears only in
   `recovery.php` and its plugin-local includes.
-- [ ] 3.3 **[TEST]** RACC-08: with `vendor/`, `base/` and `src/` absent and `FS_SESSION_NAME`
+- [x] 3.3 **[TEST]** RACC-08: with `vendor/`, `base/` and `src/` absent and `FS_SESSION_NAME`
   defined in the sentinel `config.php`, the console adopts that session name (assert the `Set-Cookie`
   name over `php -S`). With a name no browser cookie matches, the console renders the login form with
   no error banner and writes no security log line. Implementation: `lib/recovery_session.php` with
@@ -706,12 +706,121 @@ console returns to rendering unconditionally with the shipped session resolution
 
 ### PR 4 verification
 
-- [ ] `--filter RecoveryGateTest`, `--filter RecoveryMarkerTest`, `--filter RecoverySessionBootstrapTest`
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts; the
-  suite must still be DB-free (no connection attempt, no `db` hostname resolved)
-- [ ] `ddev exec php -l` on `recovery.php`, `lib/recovery_session.php`
-- [ ] PR body records the D3 finding (the server-generated 404 body echoes the path) with the
-  measured byte counts and states exactly what was asserted instead
+- [x] `--filter RecoveryGateTest` — OK (5 tests, 81 assertions)
+- [x] `--filter RecoveryMarkerTest` — OK (4 tests, 21 assertions)
+- [x] `--filter RecoverySessionBootstrapTest` — OK (2 tests, 13 assertions)
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **419 / 1283 / 2 skipped**, 0 failures (baseline **404 / 1138 / 2 skipped**); still DB-free: every fixture's `FS_DB_*` points at `127.0.0.1:1` and the suite establishes that `config.php` never ran on a refused request
+- [x] `ddev exec php -l` on `recovery.php`, `lib/recovery_session.php`,
+  `tests/Support/ConsoleHttpHarness.php`, `tests/Support/ConsoleHttpTestCase.php`,
+  `tests/RecoveryGateTest.php`, `tests/RecoveryMarkerTest.php`,
+  `tests/RecoverySessionBootstrapTest.php`
+- [x] D3 recorded: measured `/nope.php` 541 bytes vs `/other.php` 542 bytes, the built-in server's
+  404 echoes the requested path (`/plugins/system_updater/nope.php` → 564 bytes), and the asserted
+  subset is status 404 + identical bodies across absent/empty/wrong + the header set PHP controls +
+  no `Set-Cookie` + no session file + no sentinel `config.php` + no console marker in the body
+- [x] Applied while measuring: the refusal sent `X-Powered-By: PHP/8.3.33`, which the server's own 404
+  does not, so it announced its own existence independently of the secret. `header_remove()` on the
+  refusal path makes its header names a subset of a missing path's; pinned by
+  `testARequestWithoutTheSecretIsIndistinguishableFromAMissingPath`
+
+**Applied deviations (W4).** Two, both forced by the requirement to observe the success path
+without a database, and both recorded here rather than papered over.
+
+1. **The database connection is no longer a hard stop.** `recovery.php` used to `die()` when the
+   connection was refused, so a request with the correct secret on a DB-less installation answered
+   `200` with `Error crítico: …` and never reached the login form — which made U4.3's "the login
+   form is present" unobservable in a DB-free suite, and contradicted RACC-01's "a missing
+   `config.php` is the only hard stop". The connection is now attempted, the failure remembered, and
+   credentials evaluated only when a connection exists; otherwise the form is re-rendered with a
+   plain reason (fail closed). The administrator re-check for an existing session is skipped in that
+   state for the same reason.
+2. **The marker read may load `config.php` — silently, and only when the request already carries a
+   cookie.** The console's session name lives in `config.php` (`FS_SESSION_NAME`, or the
+   `FS_SECRET_KEY` the name is derived from), and the marker must be readable without the secret.
+   The read is buffered, error-suppressed, `Throwable`-caught, skips a file that already ran in the
+   request, and changes no body or header. A request with **no** cookie never reaches it, which is
+   what keeps RACC-04's three failure cases free of any `config.php` execution (the sentinel proves
+   it). This is the same class of documented exception as the gate's lost-secret branch.
+
+### PR 4 review follow-up — CodeRabbit findings (three, all resolved)
+
+Applied on the same branch as three additional commit pairs (RED then fix), after the eleven W4
+commits. Nothing under `openspec/` is committed: this section is working-tree only.
+
+- [x] **MAJOR — the marker read inspected one save path and started the session in another.**
+  `recovery_console_read_marker()` did `is_file(recovery_session_save_path() . '/sess_' . $id)` and
+  then called `session_start()` *before* `recovery_session_configure()` applied that path, so on any
+  installation that defines `FS_SESSION_SAVE_PATH` the `files` handler looked for the id in the ini
+  `session.save_path`, created an **empty** file there, and never found the marker: the login POST
+  without `?secret=` got the gate's 404 (RACC-05 broken on those installations) and the refusal left
+  a stray session file behind. Fixed by making the inspected path and the started session the same
+  path on **every** branch: one helper, `recovery_session_apply_save_path()`, applies
+  `recovery_session_save_path()` (constant → ini, normalized through
+  `recovery_session_normalize_save_path()`, which is the `N;/path` and empty-ini normalizer both
+  sides now share) and then **reads the path back from the session module** and compares it with the
+  value about to be inspected. `is_file()` runs only after that verified equality (so `configure()`
+  and the marker read can never disagree), and a declared path PHP refuses (no directory,
+  `open_basedir`, a locked ini) yields "not authorized" instead of a guess at the ini directory —
+  which is also what keeps the refusal free of session state. Test:
+  `RecoveryMarkerTest::testTheMarkerIsReadFromTheSavePathTheSessionActuallyUses` — the fixture server
+  runs with `-d session.save_path=<scratch>`, the config declares a *different* existing directory,
+  the accepted request's file must appear there, the cookie-only POST must be 200, and the ini
+  directory must hold no session file.
+- [x] **MINOR — the HTTP harness could accept a foreign server on the chosen port.**
+  `waitForServer()` accepted the first `fsockopen()` that connected. On a port another process
+  already held, `php -S` could not bind and exited while the connect succeeded against the stranger:
+  every request then reached a server that never read the fixture, and the *absence* assertions (no
+  `Set-Cookie`, no session file, no console marker in the body) passed without the console ever being
+  observed. Acceptance is now two facts checked while waiting: the spawned process is still alive
+  (`proc_get_status()`), and the fixture's own probe file comes back with a random token that only
+  its document root holds (the token is in the **body**, never the file name — the built-in server's
+  404 echoes the requested path, so a name carrying the token would let a stranger "serve" it by not
+  having the file at all). The probe uses a socket rather than curl so it cannot be the reason the
+  seam is skipped. A start that satisfies neither fails loudly with the port and the server's own
+  output, which names the collision (`Failed to listen on … Address already in use`). `boot()` gained
+  an optional pinned port so the collision is staged rather than hoped for. Tests:
+  `tests/ConsoleHarnessPortTest.php` — a real `php -S` holds a kernel-assigned port, the harness is
+  pinned to it and must throw naming that port, plus a positive control that the same pinned seam
+  still serves the fixture on a free port.
+- [x] **MINOR — rotating the secret did not invalidate an already-issued marker.**
+  `recovery_console_mark_authorized()` stored `authorized => true` with no link to the value that
+  granted it, so `--rotate-secret` changed what `recovery_secret_gate()` compares against while every
+  session that had already opened the console kept entering for the rest of its lifetime — the leak
+  rotation exists to close stayed open. The marker now stores
+  `hash_hmac('sha256', 'recovery_console', $grantedValue)` and is verified with `hash_equals()`
+  against the credential the gate would answer against **now**. That question has exactly one
+  definition, `recovery_secret_gate_value()` (persisted value first, operator pin only while nothing
+  is persisted), which the gate itself now consumes, so the two orders cannot drift. A marker whose
+  fingerprint does not match is the normal 404 path and is **not** rewritten (asserted byte-for-byte
+  on the seeded session file) — no silent upgrade. The marker never stores the secret nor a plain
+  digest of it: a bare SHA-256 of a 64-hex secret is a password-equivalent for anyone who can read
+  the session file, while an HMAC keyed by a context string is only useful for this comparison.
+  **Operator-pin decision:** the fingerprint is always over the value the gate answers against, so a
+  pin-granted marker (reachable only when nothing is persisted, because a persisted value outranks
+  the pin at the gate) keeps working while the pin is still that value — refusing it would send the
+  operator back to the secret on every reload, which is what the marker is for — and dies the moment
+  a rotation **persists** a value, since that is the moment the pin stops being what the gate accepts.
+  Rotating the persisted value while a pin is in force changes nothing about what grants access, so
+  retiring that marker would be theatre; the pin itself has to be retired. The gate also stops
+  re-including `config.php` when the pin is already visible, which the marker path needs (a second
+  include of a config that declares more than constants is a redeclaration). Tests:
+  `RecoveryMarkerTest::testRotatingTheSecretRetiresTheMarkerItGranted`,
+  `testAMarkerGrantedByTheOperatorPinDiesWhenARotationPersistsAValue`,
+  `testAMarkerGrantedByTheOperatorPinKeepsWorkingWhileThePinIsCurrent` (the positive control, so the
+  decision cannot be satisfied by refusing pin markers outright), and
+  `testAMarkerThatCannotNameItsGrantingSecretIsRefused` (unbound and foreign-bound markers).
+
+**Re-measured after the three fixes** (`ddev exec php vendor/bin/phpunit -c
+plugins/system_updater/phpunit.xml`): **426 / 1314 / 2 skipped**, 0 failures, 0 errors (W4 was
+419 / 1283 / 2 skipped).
+
+**Known limitation, recorded rather than papered over.** The pin-granted marker is verified only
+when the pin is visible to the request that reads it. That holds in practice — the marker path
+resolves the session name from `config.php`, which is where `SU_RECOVERY_SECRET` lives — but a
+deployment that got the session name from an already-loaded `SessionManager` would hide the pin from
+the fingerprint check and refuse the marker. That direction is fail-closed (the operator re-supplies
+the pin) and is why the fingerprint is compared against the gate's own value instead of against a
+second copy of the resolution order.
 
 ---
 
