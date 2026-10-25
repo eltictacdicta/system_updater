@@ -650,3 +650,66 @@ function recovery_secret_ensure(?string $installRoot = null): ?string
 
     return $value;
 }
+
+/**
+ * RACC-04's gate: does this request carry the installation's secret?
+ *
+ * This is the question the console asks **before** `config.php` is loaded, and
+ * it is not the same question as {@see recovery_secret_resolve()}. That one
+ * answers "what is the value" and puts the operator pin first; this one answers
+ * "does the candidate match" and puts the persisted value first, because the
+ * persisted value is core-free and always reachable. Keeping those two orders
+ * apart is what lets a wrong secret be refused in every state that has a
+ * persisted secret to protect, including when `config.php` is damaged
+ * (RACC-01's "a wrong secret never reaches config.php").
+ *
+ * The three failure inputs are one code path on purpose: there is no branch for
+ * "the parameter is absent" and none for "it is empty". An absent parameter
+ * arrives as `''`, `''` runs through the same `hash_equals()` as a 64-hex wrong
+ * value, and `hash_equals()` is constant-time over equal-length strings — with a
+ * fixed 64-hex secret the length check it performs first carries no information
+ * about the value.
+ *
+ * `source` names the branch that decided, for the suite's benefit: it is never
+ * emitted, logged or otherwise exposed, because the branch a request took is
+ * exactly the kind of difference RACC-04 forbids an observer from seeing.
+ *
+ * The lost-secret state is the one documented exception to "no `config.php` on
+ * the failing path" (`tasks.md`, "Delta conflict resolved at apply time"): with
+ * no persisted value there is nothing left to protect, the include is
+ * error-suppressed and `Throwable`-caught, and no body or header changes. That
+ * state also generates the secret on first use (RACC-02), which is the only way
+ * a fresh installation ever becomes reachable.
+ *
+ * @return array{granted: bool, source: 'persisted'|'operator_pin'|'unavailable'}
+ */
+function recovery_secret_gate(string $candidate, ?string $installRoot = null, ?string $configFile = null): array
+{
+    $persisted = recovery_secret_read($installRoot);
+
+    if ($persisted === null) {
+        $root = recovery_secret_install_root($installRoot);
+        $pinFile = $configFile ?? ($root === '' ? null : $root . '/config.php');
+        $pin = $pinFile === null ? null : recovery_secret_operator_pin($pinFile);
+
+        if ($pin !== null) {
+            return [
+                'granted' => hash_equals($pin, $candidate),
+                'source' => 'operator_pin',
+            ];
+        }
+
+        // First use: nothing has been persisted yet, so nothing can be known
+        // about the candidate. Generate, persist and disclose once in the log
+        // (RACC-06), then answer the refusal like any other request.
+        $persisted = recovery_secret_ensure($installRoot);
+        if ($persisted === null) {
+            return ['granted' => false, 'source' => 'unavailable'];
+        }
+    }
+
+    return [
+        'granted' => hash_equals($persisted, $candidate),
+        'source' => 'persisted',
+    ];
+}

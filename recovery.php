@@ -32,6 +32,25 @@ if (PHP_SAPI === 'cli') {
     }
 }
 
+// Puerta del secreto (RACC-04). Se ejecuta ANTES de cargar config.php, a
+// propósito: el secreto se resuelve sin el core, así que una instalación con
+// config.php dañado sigue contestando la misma negativa limpia en vez de
+// escupir un error de PHP. Sin secreto correcto este endpoint no existe.
+//
+// Un único camino para los tres fallos — parámetro ausente, vacío y erróneo —
+// porque `recovery_secret_gate()` compara con `hash_equals()` y no tiene rama
+// temprana para "no vino el parámetro". La respuesta no arranca sesión, no
+// toca la base de datos, no lee el directorio de copias y no emite cabecera
+// alguna que delate que hay un script detrás.
+$su_secret_candidate = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
+$su_secret_gate = recovery_secret_gate($su_secret_candidate, FS_FOLDER, FS_FOLDER . '/config.php');
+
+if (!$su_secret_gate['granted']) {
+    http_response_code(404);
+    echo 'Not Found';
+    exit;
+}
+
 // Cargar configuración
 if (file_exists(FS_FOLDER . '/config.php')) {
     require_once FS_FOLDER . '/config.php';
