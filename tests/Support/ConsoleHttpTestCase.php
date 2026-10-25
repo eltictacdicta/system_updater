@@ -42,6 +42,29 @@ abstract class ConsoleHttpTestCase extends TestCase
         parent::tearDown();
     }
 
+    /**
+     * Source with comments and docblocks removed.
+     *
+     * Prose may name the things the code refuses to do — an identity key the
+     * marker must not touch, a class the bootstrap must not autoload — while the
+     * assertion has to be about the code. Stripping comments is what keeps those
+     * two claims separate instead of turning the test into a spellcheck.
+     */
+    protected static function codeWithoutComments(string $source): string
+    {
+        $code = '';
+
+        foreach (token_get_all($source) as $token) {
+            if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+
+            $code .= is_array($token) ? $token[1] : $token;
+        }
+
+        return $code;
+    }
+
     protected function newHarness(array $files = ConsoleHttpHarness::CONSOLE_FILES): ConsoleHttpHarness
     {
         if (!ConsoleHttpHarness::curlAvailable()) {

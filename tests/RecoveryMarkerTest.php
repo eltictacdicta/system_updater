@@ -201,26 +201,6 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
         }
     }
 
-    /**
-     * The prose may name the identity keys it refuses to be; the code may not
-     * touch them. Splitting the two is what makes the assertion falsifiable
-     * instead of a spellcheck on the docblock.
-     */
-    private static function codeWithoutComments(string $source): string
-    {
-        $code = '';
-
-        foreach (token_get_all($source) as $token) {
-            if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
-                continue;
-            }
-
-            $code .= is_array($token) ? $token[1] : $token;
-        }
-
-        return $code;
-    }
-
     private function markerFixture(string $secret): ConsoleHttpHarness
     {
         $harness = $this->newHarness(self::FILES);
