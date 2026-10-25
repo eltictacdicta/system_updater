@@ -886,4 +886,165 @@ PHP);
         );
         $this->assertFalse(PartialWriteStream::exists($target), 'and nothing may be published at the target');
     }
+
+    // ---------------------------------------------------------------------
+    // RACC-04 — the gate's comparison (the console's reachability check)
+    // ---------------------------------------------------------------------
+
+    /**
+     * The comparison order, which is deliberately the **opposite** of the
+     * resolution order.
+     *
+     * `recovery_secret_resolve()` asks "what is the secret's value" and answers
+     * the operator pin first (RACC-03). The gate asks "does this candidate
+     * match", and there the persisted value goes first because it is core-free
+     * and always reachable — which is the only reason a wrong secret can be
+     * refused without loading `config.php` (RACC-01's "a wrong secret never
+     * reaches config.php").
+     *
+     * Pinned both ways: the persisted value *grants* while a different pin is
+     * defined in `config.php`, and the sentinel proves the file was never
+     * executed to decide that.
+     */
+    public function testTheGateComparesAgainstThePersistedValueBeforeAnyConfigLoad(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+
+        $secret = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($secret, $fixture->siblingSecretPath()));
+
+        // A pin that would win the *value* order (RACC-03) and must lose the
+        // *comparison* order (RACC-04's resolution of the delta conflict).
+        $pin = 'operator-pin-' . bin2hex(random_bytes(8));
+        $fixture->writeSentinelConfig(
+            'define(' . var_export('SU_RECOVERY_SECRET', true) . ', ' . var_export($pin, true) . ");\n"
+        );
+
+        $result = $fixture->runSnippet(
+            'echo json_encode(['
+            . "'persisted' => recovery_secret_gate(" . var_export($secret, true) . ", __DIR__, __DIR__ . '/config.php'),"
+            . "'pinned' => recovery_secret_gate(" . var_export($pin, true) . ", __DIR__, __DIR__ . '/config.php'),"
+            . "'wrong' => recovery_secret_gate('f" . str_repeat('0', 63) . "', __DIR__, __DIR__ . '/config.php'),"
+            . "'empty' => recovery_secret_gate('', __DIR__, __DIR__ . '/config.php'),"
+            . ']);'
+        );
+
+        $this->assertSame(0, $result['code'], 'the gate must not fail: ' . $result['stderr']);
+        $decoded = json_decode(trim($result['stdout']), true);
+        $this->assertIsArray($decoded, 'the snippet answered: ' . $result['stdout'] . $result['stderr']);
+
+        $this->assertTrue($decoded['persisted']['granted'], 'the persisted value grants');
+        $this->assertSame('persisted', $decoded['persisted']['source']);
+        $this->assertFalse($decoded['pinned']['granted'], 'a pin value does not grant while a persisted value exists');
+        $this->assertFalse($decoded['wrong']['granted']);
+        $this->assertFalse($decoded['empty']['granted']);
+        $this->assertSame('persisted', $decoded['wrong']['source'], 'the wrong case never falls through to the pin');
+        $this->assertSame('persisted', $decoded['empty']['source'], 'the empty case takes the same branch');
+
+        $this->assertFalse(
+            $fixture->configWasLoaded(),
+            'the persisted branch must refuse a wrong secret without loading config.php'
+        );
+    }
+
+    /**
+     * The lost-secret state (RACC-06 escape 3): with no persisted value, the
+     * pin is compared — and the pin is not persisted behind the operator's back,
+     * because it is not the installation's secret to keep.
+     */
+    public function testTheOperatorPinGrantsOnlyWhenNoPersistedValueExists(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+
+        $pin = 'operator-pin-' . bin2hex(random_bytes(8));
+        $fixture->writeSentinelConfig(
+            'define(' . var_export('SU_RECOVERY_SECRET', true) . ', ' . var_export($pin, true) . ");\n"
+        );
+
+        $result = $fixture->runSnippet(
+            'echo json_encode(['
+            . "'correct' => recovery_secret_gate(" . var_export($pin, true) . ", __DIR__, __DIR__ . '/config.php'),"
+            . "'wrong' => recovery_secret_gate('f" . str_repeat('0', 63) . "', __DIR__, __DIR__ . '/config.php'),"
+            . ']);'
+        );
+
+        $this->assertSame(0, $result['code'], $result['stderr']);
+        $decoded = json_decode(trim($result['stdout']), true);
+        $this->assertIsArray($decoded, 'the snippet answered: ' . $result['stdout'] . $result['stderr']);
+
+        $this->assertTrue($decoded['correct']['granted'], 'the operator pin is the lost-secret escape');
+        $this->assertSame('operator_pin', $decoded['correct']['source']);
+        $this->assertFalse($decoded['wrong']['granted']);
+
+        $this->assertTrue($fixture->configWasLoaded(), 'premise: the pin branch is the documented config load');
+        $this->assertFileDoesNotExist(
+            $fixture->siblingSecretPath(),
+            'the pin is not the installation secret, so it is never persisted'
+        );
+    }
+
+    /**
+     * The three failure inputs take **one** code path (RACC-04: an early return
+     * for "no parameter" is forbidden), so absent, empty and wrong must agree on
+     * everything observable.
+     */
+    public function testAbsentEmptyAndWrongCandidatesTakeTheSameComparison(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+
+        $secret = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($secret, $fixture->siblingSecretPath()));
+
+        $wrong = 'a' . str_repeat('0', 63);
+        $this->assertNotSame($secret, $wrong);
+
+        $empty = recovery_secret_gate('', $fixture->root);
+        $absent = recovery_secret_gate('', $fixture->root);
+        $bad = recovery_secret_gate($wrong, $fixture->root);
+        $good = recovery_secret_gate($secret, $fixture->root);
+
+        $this->assertFalse($empty['granted'], 'an empty candidate never grants');
+        $this->assertSame($empty, $absent, 'absent and empty are the same call, not two paths');
+        $this->assertSame($empty, $bad, 'empty and wrong differ only in the candidate, not in the branch');
+        $this->assertTrue($good['granted'], 'and the installation secret still grants');
+    }
+
+    /**
+     * The comparison itself: `hash_equals()`-equivalent, on the whole value.
+     *
+     * Asserted on the function that does the comparing instead of by timing:
+     * `===` short-circuits at the first differing byte, which is the property
+     * RACC-04 requires the gate not to have.
+     */
+    public function testTheComparisonIsConstantTimeAndCoversTheWholeValue(): void
+    {
+        $source = (string) file_get_contents(dirname(__DIR__) . '/lib/recovery_secret.php');
+        $body = $this->functionBody($source, 'recovery_secret_gate');
+
+        $this->assertStringContainsString('hash_equals(', $body, 'the gate must compare with hash_equals()');
+        $this->assertStringNotContainsString('strcmp(', $body);
+        $this->assertStringNotContainsString('substr_compare(', $body);
+        $this->assertDoesNotMatchRegularExpression(
+            '/\$[a-z]*candidate\w*\s*===?/i',
+            $body,
+            'a short-circuiting comparison against the candidate is the defect, not the fix'
+        );
+
+        $this->assertLessThan(
+            (int) strpos($body, 'recovery_secret_operator_pin('),
+            (int) strpos($body, 'recovery_secret_read('),
+            'the persisted value is read before the pin is ever considered'
+        );
+    }
+
+    private function functionBody(string $source, string $function): string
+    {
+        $pattern = '/function\s+' . preg_quote($function, '/') . '\s*\([^)]*\)[^{]*\{(.*?)\n\}/s';
+        $this->assertSame(1, preg_match($pattern, $source, $matches), 'premise: ' . $function . '() exists');
+
+        return $matches[1];
+    }
 }

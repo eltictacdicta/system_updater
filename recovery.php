@@ -17,6 +17,11 @@ define('FS_FOLDER', dirname(dirname(__DIR__)));
 // que existe este script.
 require_once __DIR__ . '/lib/recovery_secret.php';
 
+// Sesión propia del console (RACC-05/08). También plugin-local y sin core: el
+// nombre de sesión se resuelve por FS_SESSION_NAME (o se deriva del mismo seed
+// que el core), y la marca de autorización vive en el namespace de este script.
+require_once __DIR__ . '/lib/recovery_session.php';
+
 // Escapes de CLI (RACC-06): `--secret` lee el valor actual y `--rotate-secret`
 // lo regenera. El guard de SAPI es lo único que separa estas ramas del mundo
 // web: un request normal —incluido uno que lleve `?--secret`— no tiene ninguna
@@ -31,6 +36,44 @@ if (PHP_SAPI === 'cli') {
         exit(recovery_secret_cli_run($su_cli_command, FS_FOLDER));
     }
 }
+
+// Puerta del secreto (RACC-04). Se ejecuta ANTES de cargar config.php, a
+// propósito: el secreto se resuelve sin el core, así que una instalación con
+// config.php dañado sigue contestando la misma negativa limpia en vez de
+// escupir un error de PHP. Sin secreto correcto este endpoint no existe.
+//
+// Un único camino para los tres fallos — parámetro ausente, vacío y erróneo —
+// porque `recovery_secret_gate()` compara con `hash_equals()` y no tiene rama
+// temprana para "no vino el parámetro". La respuesta no arranca sesión, no
+// toca la base de datos, no lee el directorio de copias y no emite cabecera
+// alguna que delate que hay un script detrás.
+//
+// La segunda mitad es RACC-05: si el request no trae el secreto, todavía puede
+// estar autorizado por la marca que este mismo console escribió en su sesión
+// tras una comparación correcta anterior. Esa lectura es silenciosa (sin
+// `Set-Cookie`, sin directivas de caché) y sólo abre una sesión cuyo fichero ya
+// existe, así que la negativa sigue sin dejar estado.
+$su_secret_candidate = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
+$su_secret_gate = recovery_secret_gate($su_secret_candidate, FS_FOLDER, FS_FOLDER . '/config.php');
+
+if (!$su_secret_gate['granted']
+    && !recovery_console_authorized_by_marker(FS_FOLDER, FS_FOLDER . '/config.php')
+) {
+    // El rechazo no puede añadir ni una cabecera que un fichero inexistente no
+    // lleve ya: PHP anuncia `X-Powered-By` en toda respuesta de script y el 404
+    // del servidor no lo trae, así que esa cabecera delataba por sí sola que
+    // hay un script en esta ruta.
+    header_remove('X-Powered-By');
+    http_response_code(404);
+    echo 'Not Found';
+    exit;
+}
+
+// El secreto viaja en la URL, así que la página no puede filtrarlo por
+// `Referer` a los CDN de terceros que carga (bootstrap, font-awesome,
+// jquery). Sólo se anuncia en el camino aceptado: la negativa de arriba no
+// lleva ninguna cabecera que la distinga de un archivo inexistente.
+header('Referrer-Policy: no-referrer');
 
 // Cargar configuración
 if (file_exists(FS_FOLDER . '/config.php')) {
@@ -48,26 +91,33 @@ if (file_exists($autoloadFile)) {
     require_once $autoloadFile;
 }
 
-// Sesión. El nombre lo resuelve el framework (FS_SESSION_NAME, o el secreto por
-// instalación): fijarlo a 'fsSess' —el nombre de FacturaScripts 2017— dejaba a
-// este script con una sesión propia que ninguna instalación moderna comparte.
-// Debe resolverse DESPUÉS de config.php, que es donde vive FS_SESSION_NAME.
+// Sesión. El nombre lo resuelve `lib/recovery_session.php` sin ninguna clase
+// del core (RACC-08): FS_SESSION_NAME cuando existe, y si no la derivación
+// local sobre el mismo seed que consume el core. Se resuelve DESPUÉS de
+// config.php, que es donde vive FS_SESSION_NAME — salvo en la negativa, donde
+// la lectura de la marca lo hace de forma defensiva.
 $sessionAuthFile = __DIR__ . '/lib/session_auth.php';
 if (file_exists($sessionAuthFile)) {
     require_once $sessionAuthFile;
 }
 
-if (function_exists('system_updater_resolve_framework_session_name')
-    && function_exists('system_updater_configure_php_session')
-) {
-    system_updater_configure_php_session(system_updater_resolve_framework_session_name());
-} else {
-    // Degradación explícita: sin los helpers del plugin se conserva el nombre
-    // histórico para que el script siga siendo autónomo.
-    session_name('fsSess');
-}
+recovery_session_configure(recovery_session_name(FS_FOLDER));
 
 session_start();
+
+// Marca de autorización (RACC-05): se escribe SÓLO después de la comparación
+// constante del secreto, nunca tras llegar aquí por la propia marca. A partir de
+// aquí el secreto ya no hace falta: la sesión lo lleva.
+//
+// La marca guarda además la huella del valor que la autorizó, y se compara con
+// el valor contra el que la puerta respondería ahora (el persistido, o el pin
+// del operador cuando no hay persistido). Rotar el secreto retira así las
+// marcas que emitió el valor antiguo: quien obtuvo el secreto filtrado y ya
+// había abierto una sesión pierde el acceso (RACC-06).
+if ($su_secret_gate['granted']) {
+    $su_grant = recovery_secret_gate_value(FS_FOLDER);
+    recovery_console_mark_authorized($su_grant === null ? null : $su_grant['value']);
+}
 
 // Cargar Backup Manager
 if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
@@ -76,19 +126,31 @@ if (file_exists(__DIR__ . '/lib/backup_manager.php')) {
     die("Error: No se encuentra el plugin system_updater.");
 }
 
-// Conexión a base de datos para autenticación
+// Conexión a base de datos para autenticación.
+//
+// Un fallo de conexión ya no es una parada (RACC-01: config.php es el único
+// "hard stop"): la pantalla de login y la lista de copias se pintan sin
+// credenciales, y este script existe justo para el estado en el que el resto de
+// la instalación no funciona. Las credenciales se evalúan sólo cuando hay base
+// de datos; sin ella el formulario vuelve a mostrarse, que es la respuesta
+// honesta —no hay forma de verificar a nadie— y no una página de error.
+$db = null;
+
 try {
     $db = new mysqli(FS_DB_HOST, FS_DB_USER, FS_DB_PASS, FS_DB_NAME, FS_DB_PORT);
     if ($db->connect_error) {
         throw new Exception("Error de conexión: " . $db->connect_error);
     }
-} catch (Exception $e) {
-    die("Error crítico: No se puede conectar a la base de datos. " . $e->getMessage());
+} catch (Throwable) {
+    // El motivo no se guarda ni se imprime: lo que el operador necesita saber
+    // es que no hay base de datos, y el detalle del motor incluye host y
+    // usuario. La consola ya está detrás del secreto; no hace falta más.
+    $db = null;
 }
 
 // Verificar autenticación
 $user = null;
-if (isset($_SESSION['user_id'])) {
+if ($db !== null && isset($_SESSION['user_id'])) {
     // Verificar que el usuario sigue existiendo y es admin
     $stmt = $db->prepare("SELECT nick, admin FROM fs_users WHERE nick = ?");
     $stmt->bind_param("s", $_SESSION['user_id']);
@@ -103,8 +165,14 @@ if (isset($_SESSION['user_id'])) {
     }
 }
 
-// Procesar login si se envió el formulario
-if (!$user && isset($_POST['nick']) && isset($_POST['password'])) {
+// Procesar login si se envió el formulario. Sin base de datos no se evalúa
+// ninguna credencial, pero el envío queda registrado como tal: el formulario
+// se repinta con el motivo, no con el 404 de la puerta.
+if ($db === null && !$user && isset($_POST['nick']) && isset($_POST['password'])) {
+    $error = 'No se puede conectar a la base de datos.';
+}
+
+if ($db !== null && !$user && isset($_POST['nick']) && isset($_POST['password'])) {
     $nick = $db->real_escape_string($_POST['nick']);
     $password = $_POST['password'];
 
