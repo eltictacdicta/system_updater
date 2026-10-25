@@ -651,4 +651,132 @@ PHP);
             'two consecutive requests produce the same error, so nothing is being regenerated'
         );
     }
+
+    // ---------------------------------------------------------------------
+    // RACC-02 — the install root nobody passed in
+    // ---------------------------------------------------------------------
+
+    /**
+     * RACC-02's "outside the webroot" has to hold for the one caller that
+     * passes no install root at all.
+     *
+     * The library lives at `<root>/plugins/<plugin>/lib`, so the installation
+     * root is three levels up, not two. Two levels names `<root>/plugins`, and
+     * `dirname()` of *that* is `<root>` — the webroot itself — so the candidate
+     * that is supposed to sit beside the installation lands inside it and the
+     * guarantee is silently gone. This is the branch the rest of the suite never
+     * took, because `FS_FOLDER` is defined in the PHPUnit process and every
+     * other case passes an explicit root; the snippet runs in a fresh process
+     * where neither holds.
+     */
+    public function testTheFallbackInstallRootIsTheInstallationAndNotTheWebroot(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+
+        $result = $fixture->runSnippet(<<<'PHP'
+echo json_encode([
+    'root' => recovery_secret_install_root(),
+    'candidates' => recovery_secret_candidates(),
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+        $this->assertSame(0, $result['code'], $result['stderr']);
+        $this->assertSame(
+            [
+                'root' => $fixture->root,
+                'candidates' => [$fixture->siblingSecretPath(), $fixture->nestedSecretPath()],
+            ],
+            json_decode(trim($result['stdout']), true),
+            'the outside-webroot candidate is the sibling of the installation, not of <root>/plugins'
+        );
+    }
+
+    /**
+     * The same branch observed as behaviour instead of arithmetic: a first use
+     * with no install root and no `FS_FOLDER` must persist the secret beside
+     * the installation and leave no copy inside the webroot.
+     */
+    public function testTheFallbackFirstUsePersistsOutsideTheWebroot(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+
+        $result = $fixture->runSnippet(<<<'PHP'
+$value = recovery_secret_ensure();
+echo json_encode([
+    'path' => recovery_secret_path(),
+    'written' => recovery_secret_existing_path(),
+    'length' => $value === null ? 0 : strlen($value),
+    'error' => recovery_secret_last_error(),
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+        $this->assertSame(0, $result['code'], $result['stderr']);
+        $this->assertSame(
+            [
+                'path' => $fixture->siblingSecretPath(),
+                'written' => $fixture->siblingSecretPath(),
+                'length' => 64,
+                'error' => '',
+            ],
+            json_decode(trim($result['stdout']), true),
+            'the fallback resolves a location beside the installation'
+        );
+        $this->assertFileExists($fixture->siblingSecretPath(), 'the secret is persisted outside the webroot');
+        $this->assertFileDoesNotExist(
+            $fixture->root . '/' . RecoverySecretFixture::SECRET_FILENAME,
+            'and no copy is left inside it'
+        );
+        $this->assertFileDoesNotExist($fixture->nestedSecretPath());
+    }
+
+    /**
+     * Where the arithmetic cannot be trusted, the fallback must refuse.
+     *
+     * When the library is not at `<root>/plugins/<plugin>/lib`, the three-level
+     * guess names a directory that is not the installation, and there is no way
+     * to prove that a candidate built from it is outside the webroot. Guessing
+     * anyway is exactly how the secret ends up in it, so the contract is the
+     * loud error RACC-02 already defines: no candidate, no value, nothing
+     * written below the installation and the operator escape named.
+     */
+    public function testTheFallbackRefusesAWebrootItCannotVerify(): void
+    {
+        $fixture = $this->newFixture();
+        $library = $fixture->installLibraryAt('lib');
+
+        $probe = $fixture->root . '/probe.php';
+        file_put_contents(
+            $probe,
+            "<?php\ndeclare(strict_types=1);\n"
+            . 'require_once ' . var_export($library, true) . ";\n"
+            . "\$value = recovery_secret_ensure();\n"
+            . "echo json_encode([\n"
+            . "    'root' => recovery_secret_install_root(),\n"
+            . "    'candidates' => recovery_secret_candidates(),\n"
+            . "    'value' => \$value === null ? null : 'present',\n"
+            . "    'error' => recovery_secret_last_error(),\n"
+            . '], JSON_UNESCAPED_SLASHES);' . "\n"
+        );
+
+        $result = $fixture->runPhpFile($probe);
+
+        $this->assertSame(0, $result['code'], $result['stderr']);
+        $data = json_decode(trim($result['stdout']), true);
+
+        $this->assertSame('', $data['root'], 'a tree that does not verify yields no root at all');
+        $this->assertSame([], $data['candidates'], 'and therefore no candidate that could land in the webroot');
+        $this->assertNull($data['value'], 'nothing is generated without a location that can be proven safe');
+        $this->assertStringContainsString('SU_RECOVERY_SECRET', $data['error'], 'the escape is still named');
+        $this->assertDoesNotMatchRegularExpression(
+            '/[0-9a-f]{64}/',
+            $result['stdout'] . $result['stderr'],
+            'a refusal never discloses a value'
+        );
+
+        foreach (['/' . RecoverySecretFixture::SECRET_FILENAME, '/lib/' . RecoverySecretFixture::SECRET_FILENAME, '/tmp'] as $relative) {
+            $this->assertFileDoesNotExist($fixture->root . $relative, 'nothing is written inside the webroot');
+        }
+    }
 }

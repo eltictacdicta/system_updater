@@ -128,6 +128,32 @@ final class RecoverySecretFixture
     }
 
     /**
+     * Copy the library alone into an arbitrary directory below the install
+     * root, instead of the documented `<root>/plugins/<plugin>/lib` depth.
+     *
+     * That is the shape the fallback install-root resolution must refuse: from
+     * a misplaced library the three-level guess names a directory that is not
+     * the installation, and any candidate built from it cannot be proven to sit
+     * outside the webroot.
+     *
+     * @return string the copied library
+     */
+    public function installLibraryAt(string $relativeDirectory): string
+    {
+        $directory = rtrim($this->root . '/' . trim($relativeDirectory, '/'), '/');
+        if (!is_dir($directory) && !mkdir($directory, 0777, true) && !is_dir($directory)) {
+            throw new \RuntimeException('cannot create the fixture directory at ' . $directory);
+        }
+
+        $target = $directory . '/recovery_secret.php';
+        if (!copy(dirname(__DIR__, 2) . '/lib/recovery_secret.php', $target)) {
+            throw new \RuntimeException('cannot copy the library into ' . $directory);
+        }
+
+        return $target;
+    }
+
+    /**
      * The damaged-`config.php` shape: the first statement is a sentinel write,
      * so "was this file executed?" is a filesystem fact rather than a guess.
      * `$extra` is appended verbatim, which is how a parse error or an operator
