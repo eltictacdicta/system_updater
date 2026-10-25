@@ -180,4 +180,155 @@ final class DownloadBackupScriptTest extends TestCase
             'admin_updater controller must not declare actionDownloadBackup() anymore'
         );
     }
+
+    // ============================================================
+    // BA-01 / CSRF-01 — the guard runs first, the token decides second
+    // ============================================================
+
+    /**
+     * The plugin token is a CSRF control, never an identity, so the session
+     * guard has to answer *before* the token is even read.
+     *
+     * A status-code assertion cannot prove the order, and the task of proving
+     * it is worth stating precisely because both failing orders are plausible:
+     * a **403** proves the guard already passed (the token check produced it),
+     * while a **401** is consistent with either order — the guard could have
+     * denied, or the token could have been read, rejected as unauthenticated
+     * and then denied. This test therefore asserts the *call* order in the
+     * script and, in the next case, that the code after the guard is
+     * unreachable when the guard denies.
+     */
+    #[Test]
+    public function guardRunsBeforeThePluginTokenCheck(): void
+    {
+        $content = (string) file_get_contents(self::SCRIPT);
+
+        $guardAt = strpos($content, 'system_updater_process_init(');
+        $readAt = strpos($content, 'system_updater_csrf_read_from_request(');
+        $validateAt = strpos($content, 'system_updater_csrf_validate(');
+
+        $this->assertNotFalse($guardAt, 'premise: the script initialises the bootstrap');
+        $this->assertNotFalse($readAt, 'premise: the script reads the plugin token');
+        $this->assertNotFalse($validateAt, 'premise: the script validates the plugin token');
+
+        $this->assertLessThan(
+            $readAt,
+            $guardAt,
+            'the bootstrap — which carries the session guard — must run before the token is read'
+        );
+        $this->assertLessThan(
+            $validateAt,
+            $guardAt,
+            'the session guard must run before the token validation decides anything'
+        );
+
+        // The bootstrap is the guard for every action except the three that the
+        // AUTH-05 contract keeps on the plugin token alone.
+        $bootstrap = (string) file_get_contents(
+            FS_FOLDER . '/plugins/system_updater/lib/process_bootstrap.php'
+        );
+
+        $this->assertStringContainsString(
+            '$sessionId = system_updater_require_authenticated_session();',
+            $bootstrap,
+            'the bootstrap must require an authenticated session'
+        );
+
+        preg_match_all('/\$action === \'([^\']+)\'/', $bootstrap, $matches);
+        $this->assertSame(
+            ['start', 'begin', 'chunk'],
+            array_values(array_unique($matches[1] ?? [])),
+            'exactly start/begin/chunk may skip the session guard; any other action is guarded'
+        );
+    }
+
+    /**
+     * AUTH-04 ordering scenario, asserted behaviourally.
+     *
+     * `download_backup.php` reads the token on the line after the bootstrap
+     * returns, so "the guard ran first" is equivalent to "the bootstrap does
+     * not return when the guard denies". This runs the real guard under the
+     * CLI SAPI in a throwaway install root: no session, no cookies, no
+     * database, no config.php. If the guard denied correctly, the sentinel
+     * line never executes; that is the sentinel callable of the task, spelled
+     * as a line of PHP the interpreter cannot skip.
+     */
+    #[Test]
+    public function aDeniedRequestNeverReachesTheTokenCheck(): void
+    {
+        if (!function_exists('exec')) {
+            $this->markTestSkipped('exec() is unavailable, so the ordering probe cannot run.');
+        }
+
+        $root = sys_get_temp_dir() . '/su_order_' . uniqid('', true);
+        $this->assertTrue(
+            mkdir($root . '/sessions', 0700, true),
+            'premise: a throwaway install root'
+        );
+
+        try {
+            $probe = $root . '/probe.php';
+            $guardFile = FS_FOLDER . '/plugins/system_updater/lib/session_auth.php';
+
+            $code = '<?php' . "\n"
+                . 'define("FS_FOLDER", ' . var_export($root, true) . ');' . "\n"
+                . 'ini_set("session.save_path", ' . var_export($root . '/sessions', true) . ');' . "\n"
+                . '$_SERVER["REQUEST_URI"] = "/plugins/system_updater/download_backup.php";' . "\n"
+                . '$_COOKIE = [];' . "\n"
+                . 'require ' . var_export($guardFile, true) . ';' . "\n"
+                . 'system_updater_require_authenticated_session();' . "\n"
+                . 'echo "TOKEN_CHECK_REACHED";' . "\n";
+
+            file_put_contents($probe, $code);
+
+            $stdoutFile = $root . '/stdout.txt';
+            $stderrFile = $root . '/stderr.txt';
+            $ignored = [];
+            $status = 0;
+
+            exec(
+                escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($probe)
+                . ' > ' . escapeshellarg($stdoutFile)
+                . ' 2> ' . escapeshellarg($stderrFile),
+                $ignored,
+                $status
+            );
+
+            $stdout = is_file($stdoutFile) ? (string) file_get_contents($stdoutFile) : '';
+            $stderr = is_file($stderrFile) ? (string) file_get_contents($stderrFile) : '';
+
+            $this->assertSame(1, $status, 'a denied request exits non-zero: ' . $stdout . $stderr);
+            $this->assertStringNotContainsString(
+                'TOKEN_CHECK_REACHED',
+                $stdout,
+                'the guard denied, so the line that reads the token must never execute'
+            );
+            $this->assertSame('', trim($stdout), 'a CLI denial writes nothing to stdout');
+            $this->assertStringContainsString(
+                SYSTEM_UPDATER_GUARD_DENIAL,
+                $stderr,
+                'the refusal on stderr is the same text the HTTP transports emit'
+            );
+        } finally {
+            $this->rrmdir($root);
+        }
+    }
+
+    private function rrmdir(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        foreach (array_diff(scandir($dir) ?: [], ['.', '..']) as $entry) {
+            $path = $dir . DIRECTORY_SEPARATOR . $entry;
+            if (is_dir($path) && !is_link($path)) {
+                $this->rrmdir($path);
+            } else {
+                @unlink($path);
+            }
+        }
+
+        @rmdir($dir);
+    }
 }

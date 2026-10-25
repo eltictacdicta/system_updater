@@ -319,6 +319,46 @@ final class GuardDecisionTest extends TestCase
         $this->assertSame(0, $lookups);
     }
 
+    /**
+     * CSRF-01 (guard half): a valid plugin token proves *provenance*, never an
+     * identity.
+     *
+     * The token is minted only behind an authorized gate, so holding one says
+     * "this browser reached a page that rendered it" — not "somebody logged
+     * in". A request whose only credential is that token must therefore be
+     * refused by the session guard, and must look exactly like an anonymous
+     * request: same verdict, same reason, and no administrator lookup.
+     */
+    public function testAPluginTokenAloneConfersNoIdentity(): void
+    {
+        $lookups = 0;
+        $isAdmin = static function (string $nick) use (&$lookups): bool {
+            $lookups++;
+
+            return true;
+        };
+
+        $decision = $this->decide(
+            [self::PLUGIN_SESSION => $this->pluginSession()],
+            ['su_csrf_token' => str_repeat('a', 64), 'action' => 'status'],
+            $isAdmin
+        );
+
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $decision['verdict']);
+        $this->assertNull($decision['nick']);
+        $this->assertSame(0, $lookups, 'a token cannot justify an administrator lookup');
+        $this->assertSame(
+            SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED,
+            $decision['reason'],
+            'a token-only refusal must be indistinguishable from the anonymous one'
+        );
+        $this->assertSame(
+            json_encode($this->decide([], [], $isAdmin)),
+            json_encode($decision),
+            'CSRF-01: presenting a token must not change the refusal in any way'
+        );
+    }
+
     // ---------------------------------------------------------------------
     // AUTH-04 / AUTH-06 — uniform denial, unchanged expiry
     // ---------------------------------------------------------------------
@@ -390,6 +430,166 @@ final class GuardDecisionTest extends TestCase
 
         $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_DENY, $decision['verdict']);
         $this->assertNull($decision['nick']);
+    }
+
+    // ---------------------------------------------------------------------
+    // AUTH-04 — one refusal, and the same one for every cause
+    // ---------------------------------------------------------------------
+
+    /**
+     * The refusal text has a single name.
+     *
+     * The transport difference (a JSON 401 for the download endpoint, an SSE
+     * `error` event for the process scripts) must never become a denial-reason
+     * difference. Two literals in two places cannot guarantee that; one named
+     * constant can.
+     */
+    public function testTheRefusalTextHasASingleName(): void
+    {
+        $this->assertTrue(
+            defined('SYSTEM_UPDATER_GUARD_DENIAL'),
+            'the refusal text must be a named constant, not a literal copied into each transport'
+        );
+        $this->assertIsString(SYSTEM_UPDATER_GUARD_DENIAL);
+        $this->assertNotSame('', trim(SYSTEM_UPDATER_GUARD_DENIAL));
+    }
+
+    /**
+     * AUTH-04: the 401 body is `{"success":false,"message":"<the constant>"}`,
+     * byte for byte.
+     */
+    public function testTheJsonRefusalCarriesThatExactText(): void
+    {
+        $payload = system_updater_denial_payload();
+
+        $this->assertSame(
+            ['success' => false, 'message' => SYSTEM_UPDATER_GUARD_DENIAL],
+            $payload,
+            'the JSON refusal has exactly two keys and the shared text'
+        );
+        $this->assertSame(
+            '{"success":false,"message":"' . SYSTEM_UPDATER_GUARD_DENIAL . '"}',
+            (string) json_encode($payload, JSON_UNESCAPED_UNICODE),
+            'the serialised body is the documented shape'
+        );
+    }
+
+    /**
+     * AUTH-04: the SSE `error` payload carries the **same string**. The event
+     * keeps its own framing and its `percent`, but not its own wording.
+     */
+    public function testTheSseRefusalCarriesTheSameText(): void
+    {
+        $payload = system_updater_denial_sse_payload();
+
+        $this->assertSame(
+            SYSTEM_UPDATER_GUARD_DENIAL,
+            $payload['message'],
+            'an SSE refusal must not word the denial differently from the 401'
+        );
+        $this->assertSame(0, $payload['percent'], 'the SSE error event still reports its percent');
+    }
+
+    /**
+     * The five causes AUTH-04 enumerates produce one verdict, one reason and —
+     * through the emitter's own seam — one text.
+     */
+    public function testAllFiveDenialCausesCollapseIntoTheSameRefusal(): void
+    {
+        if (!class_exists(\FSFramework\Security\SessionPolicy::class)) {
+            $this->markTestSkipped('SessionPolicy no disponible.');
+        }
+
+        $expiredAt = time() - \FSFramework\Security\SessionPolicy::getAbsoluteTimeout() - 60;
+        $throwing = static function (string $nick): bool {
+            throw new \RuntimeException('database unreachable');
+        };
+
+        $causes = [
+            'anonymous' => $this->decide([], [], $this->verdictIs(true)),
+            'expired' => $this->decide(
+                [self::FRAMEWORK_SESSION => $this->loginSession([
+                    'login_time' => $expiredAt,
+                    'last_activity' => $expiredAt,
+                ])],
+                [],
+                $this->verdictIs(true)
+            ),
+            'unknown nick' => $this->decide(
+                [self::FRAMEWORK_SESSION => $this->loginSession([], 'deleted-user')],
+                [],
+                $this->verdictIs(false)
+            ),
+            'not an administrator' => $this->decide(
+                [self::FRAMEWORK_SESSION => $this->loginSession([], 'operator')],
+                [],
+                $this->verdictIs(false)
+            ),
+            'unresolvable verdict' => $this->decide(
+                [self::FRAMEWORK_SESSION => $this->loginSession()],
+                [],
+                $throwing
+            ),
+        ];
+
+        $serialised = [];
+        foreach ($causes as $cause => $decision) {
+            $this->assertSame(
+                SYSTEM_UPDATER_GUARD_VERDICT_DENY,
+                $decision['verdict'],
+                $cause . ' must be refused'
+            );
+            $this->assertNull($decision['nick'], $cause);
+            $serialised[$cause] = json_encode($decision);
+        }
+
+        $this->assertCount(1, array_unique($serialised), 'every cause must serialise identically');
+
+        // And the emitter cannot reintroduce the difference: it accepts no
+        // cause, holds no copy of the text, and takes both transports from the
+        // shared seam.
+        $body = $this->functionBody($this->guardSource(), 'system_updater_deny_unauthenticated_request');
+
+        $this->assertNotSame('', $body, 'premise: the deny emitter exists');
+        $this->assertStringContainsString(
+            'SYSTEM_UPDATER_GUARD_DENIAL',
+            $body,
+            'the emitter must read the shared constant'
+        );
+        $this->assertStringNotContainsString(
+            'Sesión no válida',
+            $body,
+            'a literal copy inside the emitter is the second source of truth AUTH-04 forbids'
+        );
+        $this->assertStringContainsString('system_updater_denial_payload(', $body);
+        $this->assertStringContainsString('system_updater_denial_sse_payload(', $body);
+
+        $emitter = new \ReflectionFunction('system_updater_deny_unauthenticated_request');
+        $this->assertSame(
+            0,
+            $emitter->getNumberOfParameters(),
+            'an emitter that accepts a cause can word it differently'
+        );
+    }
+
+    /**
+     * AUTH-04: the refusal is HTTP 401 and never a 403.
+     *
+     * The status is not observable from this SAPI (`header()` is a no-op under
+     * CLI), so it is pinned on the emitter body, which is the only place a
+     * denial status is written.
+     */
+    public function testTheRefusalIsA401AndNeverA403(): void
+    {
+        $body = $this->functionBody($this->guardSource(), 'system_updater_deny_unauthenticated_request');
+
+        $this->assertNotSame('', $body);
+        $this->assertStringContainsString('http_response_code(401)', $body);
+        $this->assertStringNotContainsString(
+            'http_response_code(403)',
+            $body,
+            'a 403 from the guard would be indistinguishable from the token check refusing'
+        );
     }
 
     // ---------------------------------------------------------------------

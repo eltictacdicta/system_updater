@@ -594,6 +594,22 @@ if (!defined('SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED')) {
 }
 
 /**
+ * The refusal text, and the only copy of it.
+ *
+ * AUTH-04: every denial — anonymous, expired, unknown nick, non-administrator,
+ * unresolvable verdict — produces the same refusal body, and the transport
+ * difference (a JSON 401 here, an SSE `error` event there) must never become a
+ * denial-reason difference. Two literals cannot promise that; one constant and
+ * two payload builders can.
+ *
+ * Deliberately not named after a cause: the moment it reads like a diagnosis,
+ * somebody will add a second one.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_DENIAL')) {
+    define('SYSTEM_UPDATER_GUARD_DENIAL', 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.');
+}
+
+/**
  * Identity from any candidate session, never from the first non-empty one.
  *
  * An expired candidate contributes no identity. A candidate carrying only
@@ -697,6 +713,28 @@ if (!defined('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED')) {
 }
 
 /**
+ * Diagnostic kind for "the mysqli extension is not loaded in this process".
+ *
+ * A supported backend with no client is the same operator-facing situation as
+ * an unsupported backend — nobody can be verified — but the remedy is completely
+ * different (install an extension, not migrate a database), so it gets its own
+ * kind rather than being folded into the backend one.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING')) {
+    define('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING', 'mysqli_missing');
+}
+
+/**
+ * Diagnostic kind for "the connection constants are not defined".
+ *
+ * The realistic cause is a damaged or half-restored installation whose
+ * `config.php` no longer defines FS_DB_HOST/FS_DB_USER/FS_DB_NAME.
+ */
+if (!defined('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_DB_CONFIG_MISSING')) {
+    define('SYSTEM_UPDATER_GUARD_DIAGNOSTIC_DB_CONFIG_MISSING', 'db_config_missing');
+}
+
+/**
  * Canonical name for the configured database backend.
  *
  * `FS_DB_TYPE` is free-form in legacy installs: `mariadb` speaks the MySQL
@@ -744,20 +782,97 @@ function system_updater_admin_backend_support(?string $dbType = null): array
 }
 
 /**
+ * Connection constants this guard cannot work without.
+ *
+ * `FS_DB_PASS` and `FS_DB_PORT` are read defensively (`defined()` guards) and
+ * have documented defaults, so their absence is legitimate. These three do not.
+ *
+ * @return array<int, string>
+ */
+function system_updater_admin_read_required_constants(): array
+{
+    return ['FS_DB_HOST', 'FS_DB_USER', 'FS_DB_NAME'];
+}
+
+/**
+ * Whether this process can read `fs_users` at all — and, when it cannot, why.
+ *
+ * The guard is fail-closed either way; what this removes is the *silence*. A
+ * missing `mysqli` extension and a `config.php` that lost its connection
+ * constants both used to look exactly like a visitor with no session: `null`
+ * from the resolver, one anonymous denial, no operator-visible cause.
+ *
+ * Pure over its two overrides, so a suite with no database can assert both
+ * branches without uninstalling an extension or breaking `config.php`.
+ *
+ * Precedence is deliberate: no client outranks no configuration, because
+ * installing the extension is a prerequisite for the constants to matter.
+ *
+ * @param bool|null $mysqliAvailable override for "mysqli is loaded"
+ * @param array<int, string>|null $definedConstants override for "which of the
+ *        required constants exist"; `null` asks PHP
+ * @return array{available: bool, diagnostic: string, missing: array<int, string>}
+ */
+function system_updater_admin_read_availability(?bool $mysqliAvailable = null, ?array $definedConstants = null): array
+{
+    if (($mysqliAvailable ?? class_exists('mysqli')) !== true) {
+        return [
+            'available' => false,
+            'diagnostic' => SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING,
+            'missing' => ['mysqli'],
+        ];
+    }
+
+    $missing = [];
+    foreach (system_updater_admin_read_required_constants() as $name) {
+        $isDefined = $definedConstants === null ? defined($name) : in_array($name, $definedConstants, true);
+        if (!$isDefined) {
+            $missing[] = $name;
+        }
+    }
+
+    if ($missing !== []) {
+        return [
+            'available' => false,
+            'diagnostic' => SYSTEM_UPDATER_GUARD_DIAGNOSTIC_DB_CONFIG_MISSING,
+            'missing' => $missing,
+        ];
+    }
+
+    return ['available' => true, 'diagnostic' => '', 'missing' => []];
+}
+
+/**
  * Operator-facing line for an administrator read that cannot be performed.
  *
  * Deliberately *not* the uniform denial text: that text is what the caller
  * sees. This one is what the operator sees, so it names the backend and what is
  * missing. A bare `null` was the defect — it silently turned "we cannot check"
  * into "you are not logged in".
+ *
+ * @param array<int, string> $missing what the diagnostic determined is absent
  */
-function system_updater_admin_read_diagnostic_message(string $diagnostic, string $backend): string
+function system_updater_admin_read_diagnostic_message(string $diagnostic, string $backend, array $missing = []): string
 {
     if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED) {
         return 'system_updater: no se puede verificar la cuenta de administrador. Este guard solo'
             . ' lee fs_users con mysqli y la instalación usa el motor ' . $backend . '. Toda acción'
             . ' protegida (status, progress, descargas) será rechazada hasta que la instalación use'
             . ' MySQL/MariaDB o el guard incorpore un lector para ' . $backend . '.';
+    }
+
+    if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING) {
+        return 'system_updater: no se puede verificar la cuenta de administrador. La extensión mysqli de'
+            . ' PHP no está cargada en este proceso y es el único cliente con el que este guard lee'
+            . ' fs_users. Toda acción protegida (status, progress, descargas) será rechazada hasta que la'
+            . ' extensión esté disponible.';
+    }
+
+    if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_DB_CONFIG_MISSING) {
+        return 'system_updater: no se puede verificar la cuenta de administrador. Faltan las constantes'
+            . ' de conexión ' . implode(', ', $missing) . ' (config.php), así que este guard no puede'
+            . ' abrir la base de datos. Toda acción protegida (status, progress, descargas) será'
+            . ' rechazada hasta que estén definidas.';
     }
 
     return 'system_updater: no se puede verificar la cuenta de administrador (' . $diagnostic
@@ -783,8 +898,10 @@ function system_updater_admin_read_diagnostics(): array
  * Once per process per diagnostic: `status` and `progress` poll every couple of
  * seconds, and flooding the log would bury the first line — the only one an
  * operator reads.
+ *
+ * @param array<int, string> $missing passed through to the message
  */
-function system_updater_report_admin_read_unavailable(string $diagnostic, string $backend): void
+function system_updater_report_admin_read_unavailable(string $diagnostic, string $backend, array $missing = []): void
 {
     $key = $diagnostic . ':' . $backend;
     $reported = system_updater_admin_read_diagnostics();
@@ -796,7 +913,7 @@ function system_updater_report_admin_read_unavailable(string $diagnostic, string
     $reported[$key] = true;
     $GLOBALS['system_updater_admin_read_diagnostics'] = $reported;
 
-    error_log(system_updater_admin_read_diagnostic_message($diagnostic, $backend));
+    error_log(system_updater_admin_read_diagnostic_message($diagnostic, $backend, $missing));
 }
 
 /**
@@ -821,6 +938,12 @@ function system_updater_reset_admin_read_diagnostics(): void
  * anonymous visitor must not look the same to the operator (see
  * {@see system_updater_admin_backend_support()}).
  *
+ * The same holds for the two ways the reader environment can be unusable
+ * without being a backend problem: no `mysqli` extension, and no connection
+ * constants. Both are diagnosed by
+ * {@see system_updater_admin_read_availability()} before a connection is
+ * attempted — never discovered by a silent `null`.
+ *
  * Reading the row directly is deliberate. The standalone scripts bootstrap
  * only `config.php` plus the Composer autoloader, so the legacy `fs_user`
  * model is not loadable here — measured in this container: with only Composer
@@ -831,9 +954,16 @@ function system_updater_reset_admin_read_diagnostics(): void
  *
  * @param string $nick user whose `fs_users.admin` flag is authoritative
  * @param string|null $dbType backend override; `null` reads `FS_DB_TYPE`
+ * @param bool|null $mysqliAvailable override for "the mysqli extension is loaded"
+ * @param array<int, string>|null $definedConstants override for "which required
+ *        constants exist"; `null` asks PHP
  */
-function system_updater_resolve_admin_verdict(string $nick, ?string $dbType = null): ?bool
-{
+function system_updater_resolve_admin_verdict(
+    string $nick,
+    ?string $dbType = null,
+    ?bool $mysqliAvailable = null,
+    ?array $definedConstants = null
+): ?bool {
     $nick = trim($nick);
     if ($nick === '') {
         return false;
@@ -852,11 +982,17 @@ function system_updater_resolve_admin_verdict(string $nick, ?string $dbType = nu
         return null;
     }
 
-    if (!class_exists('mysqli')
-        || !defined('FS_DB_HOST')
-        || !defined('FS_DB_USER')
-        || !defined('FS_DB_NAME')
-    ) {
+    // Then classify the reader environment for the same reason: a missing
+    // extension and a broken config.php are operator problems that used to
+    // present as "you are not logged in".
+    $availability = system_updater_admin_read_availability($mysqliAvailable, $definedConstants);
+    if (!$availability['available']) {
+        system_updater_report_admin_read_unavailable(
+            $availability['diagnostic'],
+            SYSTEM_UPDATER_GUARD_BACKEND_MYSQL,
+            $availability['missing']
+        );
+
         return null;
     }
 
@@ -959,9 +1095,38 @@ function system_updater_require_authenticated_session(): string
     return session_id();
 }
 
+/**
+ * The JSON refusal body shared by every denial (AUTH-04).
+ *
+ * @return array{success: false, message: string}
+ */
+function system_updater_denial_payload(): array
+{
+    return [
+        'success' => false,
+        'message' => SYSTEM_UPDATER_GUARD_DENIAL,
+    ];
+}
+
+/**
+ * The SSE refusal payload shared by every denial (AUTH-04).
+ *
+ * Same `message` as {@see system_updater_denial_payload()}; only the framing
+ * differs, because the transport is the one thing that legitimately differs.
+ *
+ * @return array{message: string, percent: int}
+ */
+function system_updater_denial_sse_payload(): array
+{
+    return [
+        'message' => SYSTEM_UPDATER_GUARD_DENIAL,
+        'percent' => 0,
+    ];
+}
+
 function system_updater_deny_unauthenticated_request(): void
 {
-    $message = 'Error: Sesión no válida. Por favor, inicie sesión nuevamente.';
+    $message = SYSTEM_UPDATER_GUARD_DENIAL;
 
     if (php_sapi_name() === 'cli') {
         fwrite(STDERR, $message . PHP_EOL);
@@ -981,19 +1146,16 @@ function system_updater_deny_unauthenticated_request(): void
         }
 
         echo "event: error\n";
-        echo 'data: ' . json_encode([
-            'message' => $message,
-            'percent' => 0,
-        ], JSON_UNESCAPED_UNICODE) . "\n\n";
+        echo 'data: ' . json_encode(
+            system_updater_denial_sse_payload(),
+            JSON_UNESCAPED_UNICODE
+        ) . "\n\n";
         @flush();
         exit;
     }
 
     http_response_code(401);
     header('Content-Type: application/json; charset=UTF-8');
-    echo json_encode([
-        'success' => false,
-        'message' => $message,
-    ], JSON_UNESCAPED_UNICODE);
+    echo json_encode(system_updater_denial_payload(), JSON_UNESCAPED_UNICODE);
     exit;
 }
