@@ -296,10 +296,26 @@ function system_updater_normalize_cookie_path_value(string $path): string
     return str_ends_with($normalized, '/') ? $normalized : $normalized . '/';
 }
 
-function system_updater_configure_php_session(string $sessionName): void
+/**
+ * Apply the framework session configuration to the PHP session module.
+ *
+ * @param string $sessionName session name to adopt
+ * @param bool $withCookieParams whether the browser-facing cookie parameters
+ *                               must be configured too. An isolated read turns
+ *                               them off: it must not write a cookie, and
+ *                               `session_set_cookie_params()` warns loudly when
+ *                               cookie emission is already suspended.
+ */
+function system_updater_configure_php_session(string $sessionName, bool $withCookieParams = true): void
 {
     if (defined('FS_SESSION_SAVE_PATH') && trim((string) FS_SESSION_SAVE_PATH) !== '') {
         session_save_path(trim((string) FS_SESSION_SAVE_PATH));
+    }
+
+    if (!$withCookieParams) {
+        session_name($sessionName);
+
+        return;
     }
 
     $idleTimeout = class_exists('FSFramework\\Security\\SessionPolicy')
@@ -321,6 +337,48 @@ function system_updater_configure_php_session(string $sessionName): void
     ]);
 
     session_name($sessionName);
+}
+
+/**
+ * Stop `session_start()` from writing session headers, remembering the state.
+ *
+ * Must run while no session is active: PHP refuses to change these ini values
+ * during an active session. The two settings are the whole header surface of
+ * a session start — `session.use_cookies` writes `Set-Cookie`, and
+ * `session.cache_limiter` writes `Expires`/`Pragma`/`Cache-Control`.
+ *
+ * @return array{use_cookies: string, cache_limiter: string}
+ */
+function system_updater_suspend_session_headers(): array
+{
+    $previous = [
+        'use_cookies' => (string) ini_get('session.use_cookies'),
+        'cache_limiter' => (string) ini_get('session.cache_limiter'),
+    ];
+
+    ini_set('session.use_cookies', '0');
+    ini_set('session.cache_limiter', '');
+
+    return $previous;
+}
+
+/**
+ * Restore what {@see system_updater_suspend_session_headers()} suspended.
+ *
+ * Leaves the module alone when a session is somehow still active: PHP would
+ * reject the change and emit a warning into the response, which is worse than
+ * the caller's own start applying the previous values again.
+ *
+ * @param array{use_cookies: string, cache_limiter: string} $previous
+ */
+function system_updater_restore_session_headers(array $previous): void
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return;
+    }
+
+    ini_set('session.use_cookies', (string) ($previous['use_cookies'] ?? '1'));
+    ini_set('session.cache_limiter', (string) ($previous['cache_limiter'] ?? 'nocache'));
 }
 
 /**
@@ -416,6 +474,18 @@ function system_updater_collect_session_candidates(array $sessionNames, array $c
 /**
  * Read one session by cookie name and leave the caller's session untouched.
  *
+ * The read is silent: no `Set-Cookie` for the candidate session, no cache
+ * directives from the session cache limiter, and both ini settings restored
+ * afterwards so the rest of the request sees the module exactly as before. A
+ * `status`/`progress` poll runs this once per candidate and must not rewrite
+ * the browser's cookies while it does.
+ *
+ * Ordering matters and is load-bearing: `session_set_cookie_params()` warns
+ * when cookie emission is suspended, so the session is configured first, and
+ * the suspension starts only once the caller's session is closed (PHP refuses
+ * to change these ini values during an active session). The restore runs before
+ * the caller's session is reopened, for the same reason.
+ *
  * @return array<string, mixed>
  */
 function system_updater_read_session_file(string $sessionName, string $sessionId): array
@@ -429,21 +499,33 @@ function system_updater_read_session_file(string $sessionName, string $sessionId
         session_write_close();
     }
 
-    $_SESSION = [];
-    system_updater_configure_php_session($sessionName);
-    session_id($sessionId);
-    $started = @session_start(['read_and_close' => true]);
-    $session = $started && is_array($_SESSION ?? null) ? $_SESSION : [];
+    $session = [];
+    $suspendedIni = null;
 
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        session_write_close();
+    try {
+        $_SESSION = [];
+        system_updater_configure_php_session($sessionName, false);
+        $suspendedIni = system_updater_suspend_session_headers();
+        session_id($sessionId);
+        $started = @session_start(['read_and_close' => true]);
+        $session = $started && is_array($_SESSION ?? null) ? $_SESSION : [];
+    } finally {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+
+        $_SESSION = [];
+
+        if (is_array($suspendedIni)) {
+            system_updater_restore_session_headers($suspendedIni);
+        }
     }
-
-    $_SESSION = [];
 
     if ($wasActive) {
         // Put the caller's session back: the bootstrap returns session_id()
-        // and later reads/writes that same session.
+        // and later reads/writes that same session. Its cookie was already
+        // written when the bootstrap opened it, so the same name and value are
+        // re-sent here at worst — never a cookie for somebody else's session.
         system_updater_configure_php_session($savedName);
         session_id($savedId);
         @session_start();
