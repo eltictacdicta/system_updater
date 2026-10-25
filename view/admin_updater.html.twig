@@ -1334,7 +1334,9 @@ $(document).ready(function() {
             headers: { 'Accept': 'text/event-stream' }
         }).then(function(response) {
             if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
+                var httpError = new Error('HTTP ' + response.status);
+                httpError.status = response.status;
+                throw httpError;
             }
             return response.text();
         }).then(function(body) {
@@ -1421,7 +1423,10 @@ $(document).ready(function() {
             }
 
             finishRestoreAsError(
-                'La sesión dejó de ser válida durante la restauración (' + error.message + '). '
+                (error.status === 401
+                    ? 'La sesión dejó de ser válida durante la restauración (' + error.message + '). '
+                    : 'La restauración se interrumpió por un error del servidor o de la red (' + error.message + '). '
+                )
                 + 'Vuelve a iniciar sesión y abre de nuevo el actualizador para comprobar el estado. '
                 + 'No se puede confirmar que la restauración haya terminado.'
             );
