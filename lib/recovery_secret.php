@@ -45,6 +45,13 @@ declare(strict_types=1);
  * state where the application cannot boot, so a secret stored by the
  * application would be unavailable exactly when it is needed.
  *
+ * Both candidates are derived from the installation root. When the caller
+ * passes none and `FS_FOLDER` is not defined, the root is inferred from this
+ * file's own depth and then *verified* against the tree — see
+ * {@see recovery_secret_detect_install_root()}. A tree that does not verify
+ * yields no candidate at all, because a guessed candidate is one whose position
+ * relative to the webroot cannot be stated.
+ *
  * If both locations are lost (the file was deleted, or the installation was
  * moved to a host where neither is writable), the secret is regenerated on the
  * next request and disclosed once through the PHP error log. An operator who
@@ -168,11 +175,25 @@ function recovery_secret_last_error(?string $message = null): string
  * the CLI and the gate cannot drift apart, and so it always names the two
  * things an operator needs: where it tried, and the escape that bypasses the
  * filesystem entirely.
+ *
+ * "Where it tried" is an empty list when the install root could not be
+ * verified, and the message says so instead of printing a placeholder path: an
+ * operator has to be able to tell "nothing is writable" apart from "this file
+ * cannot tell where the installation is".
  */
 function recovery_secret_no_location_message(?string $installRoot = null): string
 {
+    $candidates = recovery_secret_candidates($installRoot);
+
+    if ($candidates === []) {
+        return 'No usable location for the recovery console secret: the installation'
+            . ' root could not be verified from ' . __DIR__ . ', so no candidate can'
+            . ' be proven to sit outside the webroot.'
+            . ' Set SU_RECOVERY_SECRET in config.php to bypass the filesystem entirely.';
+    }
+
     return 'No writable location for the recovery console secret. Tried: '
-        . implode(', ', recovery_secret_candidates($installRoot))
+        . implode(', ', $candidates)
         . '. Make one of those directories writable by the PHP user, or set'
         . ' SU_RECOVERY_SECRET in config.php.';
 }
@@ -193,6 +214,10 @@ function recovery_secret_write_failure_message(string $target): string
 /**
  * Resolve the installation root. Everything else in this file is a pure
  * function of it, which is what lets the suite run against a temp tree.
+ *
+ * `''` means "there is no root this file can vouch for", and every caller
+ * turns it into the documented loud error rather than into a path. See
+ * {@see recovery_secret_detect_install_root()}.
  */
 function recovery_secret_install_root(?string $installRoot = null): string
 {
@@ -201,21 +226,70 @@ function recovery_secret_install_root(?string $installRoot = null): string
     }
 
     if (defined('FS_FOLDER')) {
-        return rtrim((string) FS_FOLDER, '/\\');
+        $folder = rtrim((string) FS_FOLDER, '/\\');
+        if ($folder !== '') {
+            return $folder;
+        }
     }
 
-    return rtrim(dirname(dirname(__DIR__)), '/\\');
+    return recovery_secret_detect_install_root();
+}
+
+/**
+ * The install root inferred from this file's own location, or `''`.
+ *
+ * This file lives at `<root>/plugins/<plugin>/lib`, so the installation root is
+ * three levels up — two levels names `<root>/plugins`, and the sibling of
+ * `<root>/plugins` is `<root>` itself, i.e. the webroot. Getting that depth
+ * wrong does not fail loudly: it moves the "outside the webroot" candidate
+ * *inside* it and quietly loses the RACC-02 guarantee. That is why the
+ * arithmetic is never returned on its own. It is checked against the tree
+ * first: the parent of this file's parent has to be named `plugins`, and
+ * `<root>/plugins/<plugin>` has to resolve to the very directory this file sits
+ * in. A deployment that does not answer both questions yields `''`, and the
+ * caller reports "no usable location" instead of writing the secret somewhere
+ * it cannot vouch for.
+ */
+function recovery_secret_detect_install_root(): string
+{
+    $pluginDirectory = dirname(__DIR__);
+    $pluginsDirectory = dirname($pluginDirectory);
+
+    if (basename($pluginsDirectory) !== 'plugins') {
+        return '';
+    }
+
+    $candidate = dirname($pluginsDirectory);
+    if ($candidate === '' || $candidate === '.') {
+        return '';
+    }
+
+    $roundTrip = realpath($candidate . '/plugins/' . basename($pluginDirectory));
+    if ($roundTrip === false || $roundTrip !== realpath($pluginDirectory)) {
+        return '';
+    }
+
+    return rtrim($candidate, '/\\');
 }
 
 /**
  * Candidate locations, in the documented order: outside the webroot first,
  * inside it only as a last resort.
  *
+ * An unresolvable install root produces no candidates at all. That is a
+ * deliberate empty list rather than a guess: every candidate is derived from
+ * the root, so without one there is no path whose position relative to the
+ * webroot can be stated, and inventing one is precisely the mistake RACC-02
+ * forbids.
+ *
  * @return string[]
  */
 function recovery_secret_candidates(?string $installRoot = null): array
 {
     $root = recovery_secret_install_root($installRoot);
+    if ($root === '') {
+        return [];
+    }
 
     return [
         dirname($root) . '/' . recovery_secret_filename(),
