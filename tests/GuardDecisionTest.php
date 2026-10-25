@@ -540,6 +540,56 @@ final class GuardDecisionTest extends TestCase
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Load strictness — the file must not depend on the bootstrap
+    // ---------------------------------------------------------------------
+
+    /**
+     * This file loads its own dependency at file scope, before any `setUp()`.
+     *
+     * When that path was built from the framework's install-root constant, a
+     * bootstrap that did not define it killed the whole suite at load time with
+     * "Undefined constant" instead of failing one test — the file was not even
+     * collected. The same constant was used to read the guard source, so the
+     * two had to be fixed together.
+     *
+     * Proven the only way it can be: a subprocess that requires the composer
+     * autoloader and this file, without defining anything, and then calls the
+     * private source helper through reflection.
+     */
+    public function testContractFileLoadsWithoutTheInstallRootConstant(): void
+    {
+        if (!function_exists('exec')) {
+            $this->markTestSkipped('exec() is unavailable, so the load probe cannot run.');
+        }
+
+        $autoload = dirname(__DIR__, 3) . '/vendor/autoload.php';
+        $this->assertFileExists($autoload, 'premise: the composer autoloader');
+
+        $probe = 'require ' . var_export($autoload, true) . ';'
+            . 'require ' . var_export(__DIR__ . '/GuardDecisionTest.php', true) . ';'
+            . '$reflection = new ReflectionClass(' . var_export(self::class, true) . ');'
+            . '$method = $reflection->getMethod("guardSource");'
+            . '$method->setAccessible(true);'
+            . '$source = $method->invoke($reflection->newInstanceWithoutConstructor());'
+            . 'echo is_string($source) && $source !== "" ? "contract-loaded" : "guard-source-empty";';
+
+        $output = [];
+        $status = 0;
+        exec(
+            escapeshellarg(PHP_BINARY) . ' -d display_errors=1 -d error_reporting=E_ALL -r '
+            . escapeshellarg($probe) . ' 2>&1',
+            $output,
+            $status
+        );
+
+        $printed = implode("\n", $output);
+
+        $this->assertSame(0, $status, 'the file must load with nothing defined: ' . $printed);
+        $this->assertStringContainsString('contract-loaded', $printed);
+        $this->assertStringNotContainsString('guard-source-empty', $printed);
+    }
+
     private function guardSource(): string
     {
         return (string) file_get_contents(FS_FOLDER . '/plugins/system_updater/lib/session_auth.php');
