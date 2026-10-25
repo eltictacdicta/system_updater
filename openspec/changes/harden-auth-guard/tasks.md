@@ -429,6 +429,10 @@ extension, or with `FS_DB_HOST`/`FS_DB_USER`/`FS_DB_NAME` undefined, still retur
 resolver without a diagnostic. It is the same failure class as the finding above and is left for
 W2's refusal surface rather than widened into this review fix.
 
+> **Closed in W2** (see the "Applied note (folded into PR 2)" under PR 2): both paths now classify
+> the reader environment before connecting, refuse with `null` exactly as before, and write one
+> operator-visible line per distinct cause.
+
 ---
 
 ## PR 2 — W2: Refusal surface, ordering, client tolerance, minting subset (AUTH-04, AUTH-05 subset, CSRF-01 guard half, BA-01, BA-02)
@@ -452,28 +456,28 @@ retry branch in `view/admin_updater.html.twig` is independently revertible.
 
 ### Phase 1: One refusal, one order (TDD)
 
-- [ ] 1.1 **[TEST] [RED] Uniform refusal.** Assert that `system_updater_deny_unauthenticated_request()`
+- [x] 1.1 **[TEST] [RED] Uniform refusal.** Assert that `system_updater_deny_unauthenticated_request()`
   emits the *same* message for every reason, that the JSON body is
   `{"success":false,"message":"<the constant>"}`, and that the SSE event payload's `message` is the
   **same string** (AUTH-04: "the transport difference must never become a denial-reason difference").
   RED today because the strings are literals in two functions while the guard has no reason
   vocabulary. Seed the constant in the same commit only after the assertion is red.
-- [ ] 1.2 Introduce `SYSTEM_UPDATER_GUARD_DENIAL` (or an equivalent single constant) and consume it
+- [x] 1.2 Introduce `SYSTEM_UPDATER_GUARD_DENIAL` (or an equivalent single constant) and consume it
   in both emitters. No message text may change: the shipped string stays the operator-facing text.
-- [ ] 1.3 **[TEST] [RED] Ordering is asserted, not inferred.** Two complementary assertions:
+- [x] 1.3 **[TEST] [RED] Ordering is asserted, not inferred.** Two complementary assertions:
   (a) a source ordering assertion on `download_backup.php` — the
   `system_updater_process_init(... 'plain' ...)` call precedes the first
   `system_updater_csrf_read_from_request()` call; (b) a behavioural assertion with the guard
   instrumented: with an injected deny verdict and a valid-looking token, the handler body is not
   reached (a sentinel callable is never invoked). Note in the test why the status code alone cannot
   prove the order (a 403 would prove the opposite, a 401 could be produced either way).
-- [ ] 1.4 **[TEST] BA-02 client tolerance** (source assertions on `view/admin_updater.html.twig`):
+- [x] 1.4 **[TEST] BA-02 client tolerance** (source assertions on `view/admin_updater.html.twig`):
   a `!response.ok` denial during a restore is retried (`restoreConsecutiveFailures`), the modal keeps
   the progress state rather than switching to a terminal error, no abort request is issued, and
   after the retry budget the message says the session must be re-established **without** claiming a
   successful restore. RED because that last branch does not exist (today's message talks about
   resuming and releasing maintenance). Implementation is a message/branch change in the same file.
-- [ ] 1.5 **[TEST] `CsrfMintingPointsTest::noUnauthorizedEntryPointCanMint()`** — enumerate every
+- [x] 1.5 **[TEST] `CsrfMintingPointsTest::noUnauthorizedEntryPointCanMint()`** — enumerate every
   `.php` file under `plugins/system_updater/` that references `system_updater_csrf_generate(`,
   `system_updater_csrf_field(` or `system_updater_csrf_meta(`, resolve each to its HTTP entry point
   (`lib/*` → the entry points that include it), and assert every entry point is in
@@ -484,11 +488,33 @@ retry branch in `view/admin_updater.html.twig` is independently revertible.
 
 ### PR 2 verification
 
-- [ ] `--filter GuardDecisionTest`, `--filter CsrfMintingPointsTest`, `--filter DownloadBackupScriptTest`, `--filter DownloadBackupHandlerTest`
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
-- [ ] `ddev exec php -l` on every changed PHP file
+- [x] `--filter GuardDecisionTest` (34 / 115), `--filter CsrfMintingPointsTest` (1 / 12),
+  `--filter DownloadBackupScriptTest` (11 / 27), `--filter DownloadBackupHandlerTest` (15 / 37),
+  `--filter RestoreSteppedUiTest` (12 / 37), `--filter AdminBackendSupportTest` (23 / 109)
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **379 / 976 /
+  2 skipped**, 0 failures, 0 errors (W1 was **362 / 870 / 2 skipped**)
+- [x] `ddev exec php -l` on every changed PHP file
 - [ ] PR body states that a 403-versus-401 assertion alone does not prove ordering, and what was
   asserted instead
+
+**Applied note (folded into PR 2).** The gap W1 recorded under "Known remaining silent-deny path
+(recorded, not fixed)" is closed here, in the same failure class as the unsupported-backend fix and
+by the same means: `system_updater_admin_read_availability()` classifies the reader **environment**
+(no `mysqli` extension, or a `config.php` without FS_DB_HOST/FS_DB_USER/FS_DB_NAME) **after** the
+backend and **before** any connection, refuses with `null` exactly as before, and writes one
+operator-visible line per distinct cause (AUTH-04 holds: the caller's refusal is byte-identical to
+the anonymous one, asserted). No PostgreSQL driver was added; the gate remains one client and one
+backend. Tests: six new cases in `tests/AdminBackendSupportTest.php` (23 / 109 total).
+
+**Two deviations worth naming.** (1) U2.2 also introduced
+`system_updater_denial_payload()` / `system_updater_denial_sse_payload()`, because "the same string
+in both transports" is not assertable in-process while the emitters build their JSON inline and
+`header()`/`exit` are untestable under the CLI SAPI. The seam is pure and the emitted bytes are
+unchanged. (2) The U2.3 behavioural half runs the real `system_updater_require_authenticated_session()`
+in a CLI subprocess with a throwaway install root (no session, no cookie, no database, no
+`config.php`) and checks that the sentinel line after it never executes — a status code cannot prove
+the order, and the plugin's HTTP harness arrives in PR 4.
+
 
 ---
 
