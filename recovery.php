@@ -59,6 +59,11 @@ $su_secret_gate = recovery_secret_gate($su_secret_candidate, FS_FOLDER, FS_FOLDE
 if (!$su_secret_gate['granted']
     && !recovery_console_authorized_by_marker(FS_FOLDER, FS_FOLDER . '/config.php')
 ) {
+    // El rechazo no puede añadir ni una cabecera que un fichero inexistente no
+    // lleve ya: PHP anuncia `X-Powered-By` en toda respuesta de script y el 404
+    // del servidor no lo trae, así que esa cabecera delataba por sí sola que
+    // hay un script en esta ruta.
+    header_remove('X-Powered-By');
     http_response_code(404);
     echo 'Not Found';
     exit;
