@@ -534,13 +534,13 @@ rollback plan states.
 | U3.2 | `lib/recovery_secret.php` — generation + persistence with `0600`, loud failure on unwritable | ~105 | — | Delete the file |
 | U3.3 | **[TEST] [RED]** resolution order: operator pin → persisted value; branch 2 needs no `config.php` and loads no class | ~60 | Temp roots + sentinel `config.php` | Revert test additions |
 | U3.4 | Resolution + CLI `--secret` / `--rotate-secret` + first-generation log line + web-flag inertness | ~80 | `php` subprocess (CLI) and `php -S` (web) | Remove the CLI branches |
-| U3.5 | **[TEST]** unwritable location is a loud error, never a per-request regeneration | ~45 | `chmod 0555` on a temp dir (uid 1000 in this container) | Revert test additions |
+| U3.5 | **[TEST]** unwritable location is a loud error, never a per-request regeneration | ~45 | `chmod 0555` on a temp dir (skipped, visibly, where the suite runs privileged) | Revert test additions |
 
 **Unit → command.** U3.1/U3.3/U3.5 `--filter RecoverySecretTest`; U3.2/U3.4 `ddev exec php -l plugins/system_updater/lib/recovery_secret.php` plus the CLI probes inside `RecoverySecretTest` (they spawn `php <tmproot>/plugins/system_updater/recovery.php`, never the real installation).
 
 ### Phase 1: The value exists and survives (TDD)
 
-- [ ] 1.1 **[TEST] [RED]** Shape and persistence: the resolved secret is 64 hex characters
+- [x] 1.1 **[TEST] [RED]** Shape and persistence: the resolved secret is 64 hex characters
   (`strlen === 64 && ctype_xdigit`); a second resolution in the same temp root returns the identical
   value and does not rewrite the file; two different temp roots produce two different values; the
   value is not `sha1($root)`, not `md5($root)`, not a substring of either, and does not contain the
@@ -548,11 +548,11 @@ rollback plan states.
   Permissions asserted with `fileperms() & 0777 === 0600`. The stored location must be **outside**
   the install root when a writable sibling exists — assert the resolved path is not inside the temp
   root used as the webroot in that fixture.
-- [ ] 1.2 `lib/recovery_secret.php` — `recovery_secret_generate(): string` (`bin2hex(random_bytes(32))`),
+- [x] 1.2 `lib/recovery_secret.php` — `recovery_secret_generate(): string` (`bin2hex(random_bytes(32))`),
   `recovery_secret_store(string $value): bool`, `recovery_secret_path(): string` (candidate list:
   outside-webroot sibling first, inside-webroot last resort), and the documented write with
   `chmod 0600`. A failed write returns `false` and never regenerates per request.
-- [ ] 1.3 **[TEST] [RED] Resolution order.** With `SU_RECOVERY_SECRET` defined in the sentinel
+- [x] 1.3 **[TEST] [RED] Resolution order.** With `SU_RECOVERY_SECRET` defined in the sentinel
   `config.php`: the constant wins and the persisted file is neither read nor rewritten (assert the
   file's mtime and contents are unchanged). Without the constant and with a **fatally broken**
   `config.php` (a file containing invalid PHP): the persisted value is still returned, no class is
@@ -560,7 +560,7 @@ rollback plan states.
   is emitted. **Read "Delta conflict resolved at apply time" below first** — the pin branch and the
   "wrong secret never loads `config.php`" scenario cannot both hold literally, and the test must
   encode the resolution, not one horn of the contradiction.
-- [ ] 1.4 Resolution + CLI. `recovery_secret_resolve(): string` implements the documented order.
+- [x] 1.4 Resolution + CLI. `recovery_secret_resolve(): string` implements the documented order.
   CLI: `php <root>/plugins/system_updater/recovery.php --secret` prints the current value and opens
   no DB connection (assert the sentinel `config.php` was not executed); `--rotate-secret` prints and
   persists a **new** value and a later request carrying the old value is refused by PR 4's gate.
@@ -571,18 +571,51 @@ rollback plan states.
   response is PR 4's 404 and the secret never appears in a body or a header. Until PR 4 exists,
   assert the weaker, still-meaningful half: the CLI branches are guarded by
   `PHP_SAPI === 'cli'` and the secret is not echoed on the web path.
-- [ ] 1.5 **[TEST]** Unwritable location: create the install root, `chmod 0555` the only candidate
+- [x] 1.5 **[TEST]** Unwritable location: create the install root, `chmod 0555` the only candidate
   parent, delete the persisted file, resolve → the operator-visible error names the failure, no new
   secret is generated, and two consecutive requests produce the same error (no per-request
   regeneration).
 
 ### PR 3 verification
 
-- [ ] `--filter RecoverySecretTest`
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
-- [ ] `ddev exec php -l plugins/system_updater/lib/recovery_secret.php`
-- [ ] Confirm no secret file was created anywhere under the real `FS_FOLDER`
+- [x] `--filter RecoverySecretTest` — OK (19 tests, 135 assertions)
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **399 / 1114 / 2 skipped**, 0 failures (baseline **380 / 979 / 2 skipped**)
+- [x] `ddev exec php -l plugins/system_updater/lib/recovery_secret.php` — also `recovery.php`, `tests/RecoverySecretTest.php` and `tests/Support/RecoverySecretFixture.php`
+- [x] Confirm no secret file was created anywhere under the real `FS_FOLDER`
   (`git status --porcelain` in the plugin stays clean apart from the intended files)
+
+### PR 3 review fixes (CodeRabbit, three findings)
+
+- [x] **Finding 1 — the fallback install root.** `__DIR__` is `<root>/plugins/system_updater/lib`,
+  so two `dirname()` calls named `<root>/plugins`; `dirname()` of that put the "outside the webroot"
+  candidate at `<root>/system_updater_recovery_secret.php`, i.e. **inside** the webroot, for the one
+  caller that passes no root and runs without `FS_FOLDER`. Corrected to three levels and, more
+  importantly, no longer trusted as arithmetic: the plugins container must be named `plugins` and
+  `<root>/plugins/<plugin>` must resolve to this file's own directory, otherwise the resolution
+  yields **no root and no candidates** — the loud error, never a guessed path.
+  Pinned by `testTheFallbackInstallRootIsTheInstallationAndNotTheWebroot`,
+  `testTheFallbackFirstUsePersistsOutsideTheWebroot` and
+  `testTheFallbackRefusesAWebrootItCannotVerify`, all in a fresh process where `FS_FOLDER` does not
+  exist (the reason the existing cases never took the branch).
+- [x] **Finding 2 — the unwritable-location cases under a privileged host.** `chmod 0555` does not
+  restrict root, so on a root CI container the location stayed writable, a secret was generated and
+  both cases failed. The precondition is now *observed* instead of assumed
+  (`makeSecretLocationsUnwritable(): bool`) and the case skips visibly when the host cannot produce
+  the state. Verified: uid 1000 runs both cases (2 tests, 19 assertions), uid 0 reports two skips
+  and zero failures.
+- [x] **Finding 3 — the temp file holding the secret.** `file_put_contents()` created it with the
+  process umask (typically `0644`) and the `chmod(0600)` landed afterwards; a partial write returned
+  `false` and left the prefix on disk; the byte count was never verified. The write now runs under
+  `umask(0077)` restored in a `finally` (including when it throws), verifies
+  `written === strlen($payload)`, and removes the temp file on **every** failure path — short write,
+  failed write, failed rename and throw. Still temp + `rename`, still `0600` on the final file.
+  Pinned by `testTheSecretFileIsCreatedUnderAnOwnerOnlyUmask` and
+  `testAPartialWriteIsRejectedAndLeavesNoTemporaryFileBehind`, observed through
+  `tests/Support/PartialWriteStream.php` (the only seat from which creation-time umask and a short
+  write are observable without racing the writer).
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **404 / 1138 / 2 skipped**, 0 failures
+- [x] `ddev exec php -l` on `lib/recovery_secret.php`, `tests/RecoverySecretTest.php`,
+  `tests/Support/RecoverySecretFixture.php` and `tests/Support/PartialWriteStream.php`
 
 ---
 
