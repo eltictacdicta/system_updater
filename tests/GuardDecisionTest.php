@@ -572,6 +572,26 @@ final class GuardDecisionTest extends TestCase
         );
     }
 
+    /**
+     * AUTH-04: the refusal is HTTP 401 and never a 403.
+     *
+     * The status is not observable from this SAPI (`header()` is a no-op under
+     * CLI), so it is pinned on the emitter body, which is the only place a
+     * denial status is written.
+     */
+    public function testTheRefusalIsA401AndNeverA403(): void
+    {
+        $body = $this->functionBody($this->guardSource(), 'system_updater_deny_unauthenticated_request');
+
+        $this->assertNotSame('', $body);
+        $this->assertStringContainsString('http_response_code(401)', $body);
+        $this->assertStringNotContainsString(
+            'http_response_code(403)',
+            $body,
+            'a 403 from the guard would be indistinguishable from the token check refusing'
+        );
+    }
+
     // ---------------------------------------------------------------------
     // AUTH-03 — the administrator verdict fails closed
     // ---------------------------------------------------------------------
