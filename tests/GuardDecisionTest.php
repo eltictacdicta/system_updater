@@ -497,6 +497,49 @@ final class GuardDecisionTest extends TestCase
         );
     }
 
+    // ---------------------------------------------------------------------
+    // AUTH-06 — a genuine administrator session keeps working
+    // ---------------------------------------------------------------------
+
+    /**
+     * The regression contract AUTH-01 makes fragile: the same browser carries
+     * a non-empty plugin session and the framework session written by the
+     * application login, and a status poll must resolve the login's nick.
+     */
+    public function testGenuineAdministratorSessionIsAccepted(): void
+    {
+        $decision = $this->decide(
+            [
+                self::PLUGIN_SESSION => $this->pluginSession(),
+                self::FRAMEWORK_SESSION => $this->loginSession(),
+            ],
+            ['action' => 'status', 'session' => 'framework-id'],
+            $this->verdictIs(true)
+        );
+
+        $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT, $decision['verdict']);
+        $this->assertSame('admin', $decision['nick']);
+    }
+
+    /**
+     * Repeated polling must produce the same decision: nothing is memoized
+     * between calls, and the second poll must not depend on the first.
+     */
+    public function testRepeatedPollsResolveTheSameNick(): void
+    {
+        $sessions = [
+            self::PLUGIN_SESSION => $this->pluginSession(),
+            self::FRAMEWORK_SESSION => $this->loginSession(),
+        ];
+
+        foreach (['status', 'progress', 'progress'] as $index => $action) {
+            $decision = $this->decide($sessions, ['action' => $action], $this->verdictIs(true));
+
+            $this->assertSame(SYSTEM_UPDATER_GUARD_VERDICT_ACCEPT, $decision['verdict'], (string) $index);
+            $this->assertSame('admin', $decision['nick'], (string) $index);
+        }
+    }
+
     private function guardSource(): string
     {
         return (string) file_get_contents(FS_FOLDER . '/plugins/system_updater/lib/session_auth.php');
