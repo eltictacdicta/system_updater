@@ -1421,9 +1421,9 @@ $(document).ready(function() {
             }
 
             finishRestoreAsError(
-                'No se pudo continuar tras varios intentos (' + error.message + '). El avance queda guardado en el '
-                + 'servidor, pero volver a iniciar la restauración la reinicia desde el principio. Si el sitio quedó '
-                + 'en mantenimiento, se libera solo al usar el panel.'
+                'La sesión dejó de ser válida durante la restauración (' + error.message + '). '
+                + 'Vuelve a iniciar sesión y abre de nuevo el actualizador para comprobar el estado. '
+                + 'No se puede confirmar que la restauración haya terminado.'
             );
         });
     }
