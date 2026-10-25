@@ -81,6 +81,33 @@ final class RecoverySecretTest extends TestCase
     }
 
     /**
+     * RACC-02's loud-error state, only where the host can actually produce it.
+     *
+     * `chmod 0555` is enforced by the kernel's permission check, and a
+     * privileged process (root — what a good many CI containers give PHPUnit)
+     * skips that check: the directory stays writable, a secret gets generated
+     * and the cases below would fail for a reason that has nothing to do with
+     * the library. The precondition is therefore *observed* instead of assumed
+     * — the modes are applied and then checked. When the observation says the
+     * state was not reached, the case is skipped, visibly, rather than passing
+     * without exercising anything; on a host where `0555` means something it
+     * runs exactly as before.
+     */
+    private function withoutWritableSecretLocations(RecoverySecretFixture $fixture): void
+    {
+        if ($fixture->makeSecretLocationsUnwritable()) {
+            return;
+        }
+
+        $this->markTestSkipped(
+            'cannot make the secret locations unwritable for uid '
+            . (function_exists('posix_geteuid') ? (string) posix_geteuid() : 'unknown')
+            . ': chmod 0555 does not restrict a privileged process, so RACC-02\'s'
+            . ' loud-error branch is unreachable from this host'
+        );
+    }
+
+    /**
      * RACC-02: the value is `random_bytes(32)` rendered as hex, so it has a
      * fixed, checkable shape — 64 characters, all of them hex digits.
      */
@@ -571,7 +598,7 @@ PHP);
     public function testAnUnwritableLocationIsALoudErrorAndNeverRegeneratesPerRequest(): void
     {
         $fixture = $this->newFixture();
-        $fixture->makeSecretLocationsUnwritable();
+        $this->withoutWritableSecretLocations($fixture);
         recovery_secret_last_error('');
 
         $first = recovery_secret_ensure($fixture->root);
@@ -628,7 +655,7 @@ PHP);
         $fixture = $this->newFixture();
         $fixture->installConsole();
         $fixture->writeSentinelConfig();
-        $fixture->makeSecretLocationsUnwritable();
+        $this->withoutWritableSecretLocations($fixture);
 
         $read = $fixture->runConsole('--secret');
 

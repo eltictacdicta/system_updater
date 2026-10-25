@@ -42,8 +42,10 @@ namespace Tests\SystemUpdater\Support;
  * harness must still be able to observe the failure it caused.
  *
  * Subprocesses are the only way to observe a real CLI SAPI, a real exit code
- * and a real `error_log()` file; the container runs them as uid 1000, so
- * `chmod 0555` on a directory really does refuse writes.
+ * and a real `error_log()` file. They run as the same user as the suite, so
+ * `chmod 0555` on a directory refuses writes for both — unless that user is
+ * privileged, which is why {@see makeSecretLocationsUnwritable()} reports
+ * whether the state was reached instead of assuming it.
  */
 final class RecoverySecretFixture
 {
@@ -91,11 +93,24 @@ final class RecoverySecretFixture
      * RACC-02's "no writable location" state: neither the sibling of the
      * installation nor the install root itself accepts a write, so the
      * last-resort `tmp/` cannot be created either.
+     *
+     * The return value is the *observation*, not the attempt: `chmod` is
+     * enforced by the kernel's permission check, and a privileged process
+     * (root, which is what a good many CI containers give PHPUnit) bypasses
+     * that check entirely. There the modes are applied and the directory stays
+     * writable, so the caller can skip a case whose precondition the host
+     * cannot produce instead of asserting against a state that never happened.
+     *
+     * @return bool whether the state was actually reached
      */
-    public function makeSecretLocationsUnwritable(): void
+    public function makeSecretLocationsUnwritable(): bool
     {
         @chmod($this->base, 0555);
         @chmod($this->root, 0555);
+
+        clearstatcache();
+
+        return !is_writable($this->base) && !is_writable($this->root);
     }
 
     public function restoreSecretLocationModes(): void
