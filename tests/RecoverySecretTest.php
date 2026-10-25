@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Tests\SystemUpdater;
 
 use PHPUnit\Framework\TestCase;
+use Tests\SystemUpdater\Support\PartialWriteStream;
 use Tests\SystemUpdater\Support\RecoverySecretFixture;
 
 require_once dirname(__DIR__) . '/lib/recovery_secret.php';
+require_once __DIR__ . '/Support/PartialWriteStream.php';
 require_once __DIR__ . '/Support/RecoverySecretFixture.php';
 
 /**
@@ -778,5 +780,83 @@ PHP);
         foreach (['/' . RecoverySecretFixture::SECRET_FILENAME, '/lib/' . RecoverySecretFixture::SECRET_FILENAME, '/tmp'] as $relative) {
             $this->assertFileDoesNotExist($fixture->root . $relative, 'nothing is written inside the webroot');
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // RACC-02 — the write itself: owner-only from creation, atomic, clean
+    // ---------------------------------------------------------------------
+
+    /**
+     * The file must be owner-only *from the moment it exists*.
+     *
+     * `file_put_contents()` creates with the process umask, and the `chmod()`
+     * that follows is the fix for exactly that: it lands after the bytes are
+     * already readable, and it never lands at all if the process dies inside
+     * the window. So the claim cannot be "the file ends up `0600`" — the
+     * existing permissions case covers that and a permissive umask satisfies
+     * it. The claim is the umask in force at creation, which
+     * {@see PartialWriteStream} is the only place to observe without racing
+     * the writer.
+     *
+     * The interceptor is configured to refuse the write, so the same case also
+     * pins that the caller's umask is restored on the failure path: a library
+     * that narrowed the process umask for everyone else would be its own bug.
+     */
+    public function testTheSecretFileIsCreatedUnderAnOwnerOnlyUmask(): void
+    {
+        PartialWriteStream::reset();
+
+        $previousUmask = umask(0022);
+
+        try {
+            $stored = recovery_secret_store(recovery_secret_generate(), PartialWriteStream::target());
+            $umaskAfterStore = umask();
+        } finally {
+            umask($previousUmask);
+        }
+
+        $this->assertFalse($stored, 'the interceptor refuses the write, so nothing is published');
+        $this->assertSame(
+            0077,
+            PartialWriteStream::$umaskAtCreation,
+            'the file must be owner-only at creation, not only after the chmod() that follows'
+        );
+        $this->assertSame(0022, $umaskAfterStore, 'the caller umask is restored, including on the failure path');
+    }
+
+    /**
+     * A write that stopped short must leave nothing behind.
+     *
+     * `file_put_contents()` reports a partial write as `false`, with the
+     * accepted prefix already on disk. Returning on that `false` without
+     * removing the temp file leaves the first characters of a secret sitting
+     * beside the real one — readable by whoever can read the directory, and
+     * invisible to the code that later rotates the value as if it had never
+     * been written.
+     */
+    public function testAPartialWriteIsRejectedAndLeavesNoTemporaryFileBehind(): void
+    {
+        PartialWriteStream::reset();
+        PartialWriteStream::$acceptedBytes = 40;
+
+        $target = PartialWriteStream::target();
+        $value = recovery_secret_generate();
+
+        $this->assertFalse(
+            recovery_secret_store($value, $target),
+            'a write that stopped short must never report success'
+        );
+
+        $this->assertSame(40, PartialWriteStream::$bytesWritten, 'the failure under test is a partial write');
+        $this->assertLessThan(
+            strlen(recovery_secret_payload($value)),
+            PartialWriteStream::$bytesWritten,
+            'and it really is a prefix, not the whole payload'
+        );
+        $this->assertFalse(
+            PartialWriteStream::exists(PartialWriteStream::$openedPath),
+            'the temp file holding the prefix must be removed'
+        );
+        $this->assertFalse(PartialWriteStream::exists($target), 'and nothing may be published at the target');
     }
 }
