@@ -72,6 +72,9 @@ final class RecoverySecretFixture
         'lib/recovery_policy.php',
         'lib/recovery_legacy_hash.php',
         'lib/recovery_login_token.php',
+        'lib/session_name.php',
+        'lib/csrf_token.php',
+        'lib/recovery_csrf.php',
     ];
 
     /** Parent of the install root: the outside-webroot candidate. */

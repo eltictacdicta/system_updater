@@ -27,6 +27,13 @@ require_once __DIR__ . '/lib/recovery_session.php';
 // sin clase, sin autoloader y sin un solo fichero del core (RACC-01).
 require_once __DIR__ . '/lib/recovery_handler.php';
 
+// Acuñación del token del plugin (RACC-07). El console es el SEGUNDO punto de
+// acuñación autorizado, y sólo después de sus dos puertas. Este módulo llega a
+// `system_updater_csrf_generate()` a través de `lib/csrf_token.php` y
+// `lib/session_name.php`, los dos plugin-locales: el grafo del console sigue sin
+// una sola clase del core (RACC-01).
+require_once __DIR__ . '/lib/recovery_csrf.php';
+
 // Escapes de CLI (RACC-06): `--secret` lee el valor actual y `--rotate-secret`
 // lo regenera. El guard de SAPI es lo único que separa estas ramas del mundo
 // web: un request normal —incluido uno que lleve `?--secret`— no tiene ninguna
@@ -61,9 +68,16 @@ if (PHP_SAPI === 'cli') {
 $su_secret_candidate = isset($_GET['secret']) && is_string($_GET['secret']) ? $_GET['secret'] : '';
 $su_secret_gate = recovery_secret_gate($su_secret_candidate, FS_FOLDER, FS_FOLDER . '/config.php');
 
-if (!$su_secret_gate['granted']
-    && !recovery_console_authorized_by_marker(FS_FOLDER, FS_FOLDER . '/config.php')
-) {
+// La marca sólo se consulta cuando el secreto NO abrió la puerta: es la forma en
+// que RACC-05 evita reenviar el secreto en cada request. Se nombra el resultado
+// porque es la primera de las dos puertas de RACC-07 y el mint la necesita como
+// hecho, no como condición anónima dentro de un `if`.
+$su_console_authorized = $su_secret_gate['granted'];
+if (!$su_console_authorized) {
+    $su_console_authorized = recovery_console_authorized_by_marker(FS_FOLDER, FS_FOLDER . '/config.php');
+}
+
+if (!$su_console_authorized) {
     // El rechazo no puede añadir ni una cabecera que un fichero inexistente no
     // lleve ya: PHP anuncia `X-Powered-By` en toda respuesta de script y el 404
     // del servidor no lo trae, así que esa cabecera delataba por sí sola que
@@ -293,6 +307,23 @@ $backupManager = new backup_manager(FS_FOLDER);
 $message = '';
 $messageType = 'info';
 
+// Acuñación del token del plugin (RACC-07). Este punto es deliberadamente el
+// único: está DESPUÉS del `exit` del render de login —así que la segunda puerta
+// ya está cerrada cuando el mint no debe ocurrir— y después de la comparación
+// constante del secreto o de la marca que la sustituye (RACC-04/RACC-05). El
+// valor no se imprime en ningún otro sitio: ni en la negativa, que termina
+// mucho antes, ni en una línea de log.
+//
+// `config_loaded` es un hecho en esta línea: sin config.php el script muere
+// arriba, y `authenticated` se pasa desde `$user` en vez de darlo por supuesto,
+// para que el mint vuelva a comprobar la puerta que el `if` anterior acaba de
+// dejar pasar.
+$su_csrf_token = recovery_csrf_mint_token([
+    'secret_granted' => $su_console_authorized,
+    'config_loaded' => true,
+    'authenticated' => is_array($user),
+]);
+
 // Listar backups
 $backups = $backupManager->list_backups_grouped();
 ?>
@@ -441,6 +472,13 @@ $backups = $backupManager->list_backups_grouped();
 
     <script>
     (function() {
+        // RACC-07: el token que acuñó este render. `json_encode` con los flags
+        // HEX evita que el valor pueda cerrar la etiqueta `<script>`; el valor no
+        // existe fuera de un render autenticado.
+        var suCsrfToken = <?php echo json_encode(
+            (string) $su_csrf_token,
+            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+        ); ?>;
         var restoreEventSource = null;
         var restoreLog = [];
 
@@ -455,7 +493,8 @@ $backups = $backupManager->list_backups_grouped();
 
             jQuery('#restoreProgressModal').modal('show');
 
-            var sseUrl = 'process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type);
+            var sseUrl = 'process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type)
+                + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
 
             restoreEventSource = new EventSource(sseUrl);
 

@@ -6,19 +6,12 @@
  * save path, and cookie settings as FSFramework before validating login.
  */
 
-function system_updater_resolve_session_name(): string
-{
-    // El plugin usa su propia sesión independiente del framework
-    // para evitar conflictos con las sesiones del framework
-    if (defined('SYSTEM_UPDATER_SESSION_NAME') && trim((string) SYSTEM_UPDATER_SESSION_NAME) !== '') {
-        return trim((string) SYSTEM_UPDATER_SESSION_NAME);
-    }
-
-    $seed = defined('FS_FOLDER') ? (string) FS_FOLDER : dirname(dirname(dirname(__DIR__)));
-    $seed = str_replace('\\', '/', $seed);
-
-    return 'SU_SESS_' . substr(sha1($seed . '_system_updater'), 0, 12);
-}
+// El nombre de la sesión del plugin vive aparte (lib/session_name.php): el
+// console de recuperación también lo necesita y no puede cargar este fichero,
+// porque aquí vive el bootstrap del framework y ese es justo el grafo que
+// RACC-01 prohíbe en el console. La derivación es la misma; sólo cambia de
+// sitio, y la comparten los dos (RACC-07).
+require_once __DIR__ . '/session_name.php';
 
 /**
  * Framework session cookie name, as the core itself resolves it.

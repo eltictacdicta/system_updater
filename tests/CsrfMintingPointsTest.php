@@ -190,6 +190,12 @@ final class CsrfMintingPointsTest extends TestCase
     /**
      * Files that invoke a minting helper, excluding the module that defines them.
      *
+     * Comments are stripped first, for the same reason the console's own tests
+     * strip them: a docblock that *names* a helper — to explain that this module
+     * is the one the console reaches it through, say — is not a call site, and
+     * counting it would turn the enumeration into a spellcheck of the prose.
+     * Only code that can actually call the function counts.
+     *
      * @param array<int, string> $productionFiles
      * @return array<int, string>
      */
@@ -203,13 +209,36 @@ final class CsrfMintingPointsTest extends TestCase
                 continue;
             }
 
-            $source = (string) file_get_contents($root . '/' . $relative);
+            $source = $this->codeWithoutComments((string) file_get_contents($root . '/' . $relative));
             if (preg_match($pattern, $source) === 1) {
                 $minters[] = $relative;
             }
         }
 
         return $minters;
+    }
+
+    /**
+     * Source without comments or docblocks.
+     *
+     * `token_get_all()` is used rather than a regex so a `//` inside a string
+     * literal is not mistaken for a comment — this scan decides which files can
+     * mint a credential, and a rule that can be argued with by quoting is not a
+     * rule.
+     */
+    private function codeWithoutComments(string $source): string
+    {
+        $code = '';
+
+        foreach (token_get_all($source) as $token) {
+            if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+
+            $code .= is_array($token) ? $token[1] : $token;
+        }
+
+        return $code;
     }
 
     /**
