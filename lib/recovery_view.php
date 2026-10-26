@@ -173,6 +173,10 @@ function recovery_view_restore_driver(string $csrfToken): string
         var restoreFinished = false;
         var restoreFailures = 0;
         var restoreSteps = 0;
+        // `begin` arma el estado en disco; hasta que una respuesta trae progreso
+        // no hay nada que reanudar, y un reintento en `chunk` pediría avanzar un
+        // estado que todavía no existe.
+        var restoreArmed = false;
 
         // Un único constructor de URL. Todo request pasa por aquí, así que el
         // token viaja en todos: `start`/`begin`/`chunk` lo exigen y
@@ -190,6 +194,7 @@ function recovery_view_restore_driver(string $csrfToken): string
             restoreFinished = false;
             restoreFailures = 0;
             restoreSteps = 0;
+            restoreArmed = false;
 
             updateProgress(0, 'Iniciando restauración...');
             document.getElementById('restoreDetails').innerHTML = '<small class="text-muted">Conectando al servidor...</small>';
@@ -239,6 +244,9 @@ function recovery_view_restore_driver(string $csrfToken): string
 
                     if (evt.event === 'progress') {
                         sawProgress = true;
+                        // Progreso significa que el servidor ya leyó el estado
+                        // armado: desde acá `chunk` es la acción correcta.
+                        restoreArmed = true;
 
                         if (evt.data.step === 'busy') {
                             busy = true;
@@ -298,21 +306,43 @@ function recovery_view_restore_driver(string $csrfToken): string
                     return;
                 }
 
+                // Se reintenta la acción que estaba en vuelo. `chunk` sólo tiene
+                // sentido cuando `begin` ya produjo progreso; si el que falló fue
+                // el propio `begin`, el estado no está armado y hay que repetirlo.
+                var retryAction = restoreArmed ? 'chunk' : action;
+                var status = typeof error.status === 'number' ? error.status : 0;
+
+                // Un 4xx no es un corte: el servidor recibió el request y lo
+                // rechazó. Reintentarlo gasta el presupuesto en una respuesta ya
+                // decidida y disfraza la causa, que es una sesión o un token que
+                // dejó de valer.
+                if (status >= 400 && status < 500) {
+                    finishRestoreAsError(
+                        'La sesión o el token de esta consola fue rechazado (' + error.message + '). '
+                        + 'El servidor respondió y rechazó la petición: reintentarla no la va a aceptar. '
+                        + 'Vuelve a iniciar sesión y abre de nuevo la consola para comprobar el estado. '
+                        + 'No se puede confirmar que la restauración haya terminado.'
+                    );
+                    return;
+                }
+
                 restoreFailures++;
 
-                // Un corte no pierde trabajo: el checkpoint queda en disco, así que
-                // se reintenta y se reanuda desde el último punto guardado.
+                // Un corte o un 5xx no pierde trabajo: el checkpoint queda en
+                // disco, así que se reintenta la misma acción y se reanuda desde
+                // el último punto guardado.
                 if (restoreFailures <= 5) {
-                    addLogEntry('↻ Corte o error de red (' + error.message + '). Reintentando desde el último punto guardado...');
+                    addLogEntry('↻ Fallo transitorio (' + error.message + ') en «' + retryAction + '». Reintentando «' + retryAction + '»...');
                     window.setTimeout(function() {
-                        runRestoreStep('chunk');
+                        runRestoreStep(retryAction);
                     }, 1500);
                     return;
                 }
 
                 finishRestoreAsError(
                     'La restauración se interrumpió por un error del servidor o de la red (' + error.message + '). '
-                    + 'El punto de guardado queda en disco: vuelve a abrir la consola para comprobar el estado. '
+                    + 'El punto de guardado queda en disco, pero esta consola no puede confirmarlo. '
+                    + 'Vuelve a iniciar sesión y abre de nuevo la consola para comprobar el estado. '
                     + 'No se puede confirmar que la restauración haya terminado.'
                 );
             });
