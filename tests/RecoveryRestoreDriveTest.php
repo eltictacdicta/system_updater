@@ -48,8 +48,6 @@ require_once dirname(__DIR__) . '/lib/recovery_view.php';
  */
 final class RecoveryRestoreDriveTest extends TestCase
 {
-    private const TOKEN = 'a3f1c8d29b4e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8';
-
     /**
      * The whole flow, in one case: the transport is the stepped one and every
      * request carries the console's token.
@@ -57,9 +55,10 @@ final class RecoveryRestoreDriveTest extends TestCase
     #[Test]
     public function theRestoreFlowIssuesBeginThenChunkWithTheTokenOnEveryRequest(): void
     {
-        $driver = recovery_view_restore_driver(self::TOKEN);
+        $token = $this->token();
+        $driver = recovery_view_restore_driver($token);
 
-        $this->assertStringContainsString(self::TOKEN, $driver, 'the driver carries the token the render minted');
+        $this->assertStringContainsString($token, $driver, 'the driver carries the token the render minted');
 
         $this->assertStringContainsString(
             "runRestoreStep('begin')",
@@ -118,7 +117,7 @@ final class RecoveryRestoreDriveTest extends TestCase
     #[Test]
     public function aLockedStepWaitsAndATransportCutResumesFromTheCheckpoint(): void
     {
-        $driver = recovery_view_restore_driver(self::TOKEN);
+        $driver = recovery_view_restore_driver($this->token());
         $code = $this->codeWithoutComments($driver);
 
         $this->assertStringContainsString('busy', $code, 'the server locks the step while another process holds it');
@@ -240,6 +239,15 @@ final class RecoveryRestoreDriveTest extends TestCase
         $this->assertStringNotContainsString('<script>alert(1)</script>', $rows, 'the group name is escaped');
         $this->assertStringNotContainsString('<img src=x', $rows, 'and so is every file name');
         $this->assertStringContainsString('&lt;script&gt;', $rows);
+    }
+
+    /**
+     * A token shaped like the one the console mints, generated per case: this
+     * file asserts plumbing, and a committed literal would read as a credential.
+     */
+    private function token(): string
+    {
+        return bin2hex(random_bytes(32));
     }
 
     /**

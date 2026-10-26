@@ -66,6 +66,10 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
     private const CONSOLE_URL = '/plugins/system_updater/recovery.php';
     private const HTTP_SESSION = 'FSSESS_mint_http';
 
+    /** The plugin session the seeded cases present, pinned by the fixture config. */
+    private const PLUGIN_SESSION = 'SU_SESS_fixture';
+    private const PLUGIN_SESSION_ID = 'abcdef0123456789abcdef0123456789';
+
     private string $savePath = '';
 
     protected function setUp(): void
@@ -111,7 +115,7 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
     #[RunInSeparateProcess]
     public function theTokenIsMintedAfterTheSecretAndAfterAuthenticationInThatOrder(): void
     {
-        $console = $this->openConsoleSession(['user_nick' => 'admin']);
+        $this->openConsoleSession(['user_nick' => 'admin']);
 
         $steps = [];
         $token = recovery_csrf_mint_token(
@@ -150,8 +154,6 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
             system_updater_csrf_validate($token),
             'the token validates in the session that minted it'
         );
-
-        $this->assertSame('admin', $console['identity'], 'premise: the console was authenticated');
     }
 
     /**
@@ -440,6 +442,151 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
     }
 
     /**
+     * Scenario 6 of RACC-07, and CSRF-01's "not an identity either", with a
+     * token this console minted.
+     *
+     * `download_backup.php` is session-guarded, so a valid plugin token and no
+     * login-written session must produce the uniform 401 of `AUTH-04` — and the
+     * token check must never be reached, which is why the expected status is 401
+     * and not the 403 a rejected token produces.
+     */
+    #[Test]
+    public function aConsoleMintedTokenGrantsNothingOnTheAdminSurface(): void
+    {
+        $harness = $this->processHarness();
+        $token = bin2hex(random_bytes(32));
+
+        $harness->seedSession(self::PLUGIN_SESSION, self::PLUGIN_SESSION_ID, [
+            'system_updater' => [
+                'csrf_tokens' => [
+                    'system_updater_csrf' => ['value' => $token, 'created_at' => time()],
+                ],
+            ],
+        ]);
+
+        $response = $harness->request(
+            '/plugins/system_updater/download_backup.php?file=x.zip&su_csrf_token=' . $token,
+            ['cookies' => [self::PLUGIN_SESSION => self::PLUGIN_SESSION_ID]]
+        );
+
+        $this->assertSame(401, $response['status'], 'a token is not a session: ' . $response['body']);
+        $this->assertStringNotContainsString('Content-Disposition', $response['headers']);
+        $this->assertStringNotContainsString($token, $response['body'], 'and the credential is not echoed back');
+    }
+
+    /**
+     * Scenario 3: the minted token is still *required*. The console minting does
+     * not relax `ensure_request_csrf()` — with the plugin session present and no
+     * token, `begin` is refused as a CSRF failure and no restore state is armed.
+     */
+    #[Test]
+    public function theSteppedActionsStillRefuseARequestWithoutTheToken(): void
+    {
+        $harness = $this->processHarness();
+
+        $harness->seedSession(self::PLUGIN_SESSION, self::PLUGIN_SESSION_ID, [
+            'system_updater' => [
+                'csrf_tokens' => [
+                    'system_updater_csrf' => ['value' => bin2hex(random_bytes(32)), 'created_at' => time()],
+                ],
+            ],
+        ]);
+
+        $withoutToken = $harness->request(
+            '/plugins/system_updater/process_restore.php?action=begin&file=x_complete.zip&type=complete',
+            ['cookies' => [self::PLUGIN_SESSION => self::PLUGIN_SESSION_ID]]
+        );
+
+        $this->assertStringContainsString(
+            'Token CSRF',
+            $withoutToken['body'],
+            'begin without a token is refused as a CSRF failure: ' . $withoutToken['body']
+        );
+        $this->assertStringNotContainsString('event: progress', $withoutToken['body'], 'and nothing is armed');
+        $this->assertStringNotContainsString('Archivo de backup no encontrado', $withoutToken['body']);
+    }
+
+    /**
+     * Scenario 1, at the seam where it is observable: the token the console's
+     * policy mints is the one `begin` accepts.
+     *
+     * This console cannot complete a restore in this suite — that needs a real
+     * installation and a database — but "the request is refused with a CSRF
+     * error" is the failure RACC-07 exists to remove, and it is exactly what
+     * changes when the token is present: the step runs and the server answers
+     * with progress or with the missing-backup error instead.
+     */
+    #[Test]
+    public function theSteppedActionsAcceptTheTokenTheConsoleMinted(): void
+    {
+        $harness = $this->processHarness();
+        $token = bin2hex(random_bytes(32));
+
+        $harness->seedSession(self::PLUGIN_SESSION, self::PLUGIN_SESSION_ID, [
+            'system_updater' => [
+                'csrf_tokens' => [
+                    'system_updater_csrf' => ['value' => $token, 'created_at' => time()],
+                ],
+            ],
+        ]);
+
+        $response = $harness->request(
+            '/plugins/system_updater/process_restore.php?action=begin&file=missing_complete.zip'
+            . '&type=complete&su_csrf_token=' . $token,
+            ['cookies' => [self::PLUGIN_SESSION => self::PLUGIN_SESSION_ID]]
+        );
+
+        $this->assertStringNotContainsString(
+            'Token CSRF',
+            $response['body'],
+            'a valid plugin token must not be refused: ' . $response['body']
+        );
+        $this->assertStringContainsString(
+            'Archivo de backup no encontrado',
+            $response['body'],
+            'the step ran and answered about the backup, not about the credential: ' . $response['body']
+        );
+    }
+
+    /**
+     * The console plus the two process endpoints the last three cases observe.
+     *
+     * `SYSTEM_UPDATER_SESSION_NAME` pins the plugin session name so a session can
+     * be seeded without re-deriving the hash the fixture root would produce; it is
+     * the constant the library documents for exactly this.
+     */
+    private function processHarness(): ConsoleHttpHarness
+    {
+        $harness = $this->newHarness();
+
+        foreach ([
+            'download_backup.php',
+            'process_restore.php',
+            'lib/process_bootstrap.php',
+            'lib/csrf_guard.php',
+            'lib/download_backup_handler.php',
+            'lib/maintenance_mode_compat.php',
+            'lib/debug_log.php',
+            'lib/session_auth.php',
+        ] as $relative) {
+            $harness->installFixtureFile($relative);
+        }
+
+        $harness->boot(implode("\n", [
+            "define('FS_DB_HOST', '127.0.0.1');",
+            "define('FS_DB_PORT', 1);",
+            "define('FS_DB_USER', 'nobody');",
+            "define('FS_DB_PASS', 'nothing');",
+            "define('FS_DB_NAME', 'none');",
+            "define('FS_SESSION_NAME', '" . self::HTTP_SESSION . "');",
+            "define('SYSTEM_UPDATER_SESSION_NAME', '" . self::PLUGIN_SESSION . "');",
+            '',
+        ]));
+
+        return $harness;
+    }
+
+    /**
      * The fixture the two HTTP cases start: the console graph, an application
      * session name and a database that cannot be reached. The last one is what
      * keeps `$user` null, which is exactly the state under test.
@@ -492,9 +639,8 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
      * does after `REC-06` writes it, and close it so its file exists on disk.
      *
      * @param array<string, mixed> $identity
-     * @return array{identity: mixed}
      */
-    private function openConsoleSession(array $identity, ?string $sessionId = null): array
+    private function openConsoleSession(array $identity, ?string $sessionId = null): void
     {
         session_name(self::CONSOLE_SESSION);
         session_id($sessionId ?? bin2hex(random_bytes(16)));
@@ -507,8 +653,6 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
         }
 
         session_write_close();
-
-        return ['identity' => $identity['user_nick'] ?? null];
     }
 
     /**
