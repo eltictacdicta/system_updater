@@ -60,6 +60,19 @@ require_once __DIR__ . '/recovery_login_token.php';
  * symbol. The core throttle is detected with `class_exists(..., false)` —
  * autoload disabled — so the console can use it when the panel already loaded
  * it in the same process and can never pull it in when the core is damaged.
+ *
+ * One budget per account, not one per spelling
+ * --------------------------------------------
+ * The row is read with `SELECT * FROM fs_users WHERE nick = ?` under a
+ * case- and accent-insensitive collation, so `admin`, `Admin`, `ÁDMIN` and
+ * `ádmin` reach the same verifier. A counter keyed by the typed string would
+ * therefore give each spelling its own budget and multiply REC-04's ceiling by
+ * the number of spellings an attacker cared to type. Every counter path below
+ * is named by {@see recovery_policy_counter_subject()} instead — one folded
+ * value for the shared consult, the reservation, the release and the two
+ * accounting writes — while the lookup and the identity keep the typed nick and
+ * the row's own bytes respectively. The fold over-counts rather than
+ * under-counts, for the reason stated in that function.
  */
 
 /** A read the handler performed, in the order it happened (REC-01, REC-03). */
@@ -146,11 +159,12 @@ function recovery_handler_client_ip(array $server): string
  *      is a repeat and must not cost a ban read either;
  *   2. **ban** — read-only, from the file the primary login writes (REC-03).
  *      Skipped entirely when step 1 closed the request;
- *   3. **throttle** — shared mode only: `LoginThrottle`'s check. In fallback
- *      mode there is nothing to pre-read, because step 4 decides and charges
- *      under one lock;
- *   4. **reserve** — fallback mode only: the atomic charge (REC-04). A refusal
- *      ends the request here and the verdict is never reached;
+ *   3. **throttle** — shared mode only: `LoginThrottle`'s check, asked about the
+ *      folded subject. In fallback mode there is nothing to pre-read, because
+ *      step 4 decides and charges under one lock;
+ *   4. **reserve** — fallback mode only: the atomic charge (REC-04), also keyed
+ *      by the folded subject. A refusal ends the request here and the verdict is
+ *      never reached;
  *   5. **lookup**, then **verify** — the row is read inside the verdict, so it
  *      can only happen after every gate passed, and
  *      {@see recovery_policy_verify_credentials()} is called **exactly once**
@@ -166,10 +180,12 @@ function recovery_handler_client_ip(array $server): string
  *   - `is_banned(ip, now): bool` — defaults to "not banned" for a caller that
  *     deliberately wants the ban gate out of the way, which is only ever a test;
  *   - `reserve(nick, ip, now): array{reserved: bool, throttled: bool}` and
- *     `release(nick, ip): bool` — the fallback budget;
+ *     `release(nick, ip): bool` — the fallback budget. The pipeline calls them
+ *     with the folded subject, never with the typed nick;
  *   - `record(bucket, nick, ip, now)` and `clear(bucket, nick, ip, now)` — the
- *     two accounting writes;
- *   - `shared_throttled(nick, ip): bool` — the core throttle's read;
+ *     two accounting writes; `nick` is the same folded subject;
+ *   - `shared_throttled(nick, ip): bool` — the core throttle's read, also asked
+ *     about the folded subject;
  *   - `shared_available: bool` — `null` detects it with autoload disabled.
  *
  * @param array<string, mixed> $submission `token`, `nick`, `password`, `ip`, `now`
@@ -194,6 +210,14 @@ function recovery_handler_authenticate(array $submission, array $seams = []): ar
     $shared = isset($seams['shared_available']) && is_bool($seams['shared_available'])
         ? $seams['shared_available']
         : recovery_policy_shared_throttle_available();
+
+    // The budget's subject, folded once here so every counter path below — the
+    // shared consult, the reservation, the two accounting writes — names the
+    // same bucket. The lookup keeps the typed `$nick`: it is the field the
+    // database compares, and the identity it answers is written byte for byte.
+    // A pure string fold, not a read: it touches nothing the token verdict
+    // guards, so computing it before that verdict costs the order nothing.
+    $subject = recovery_policy_counter_subject($nick);
 
     $steps = [];
 
@@ -236,7 +260,7 @@ function recovery_handler_authenticate(array $submission, array $seams = []): ar
             //    reserve() to a core class.
             $steps[] = RECOVERY_HANDLER_STEP_THROTTLE;
             $facts['throttled'] = isset($seams['shared_throttled']) && is_callable($seams['shared_throttled'])
-                ? (bool) ($seams['shared_throttled'])($nick, $ip)
+                ? (bool) ($seams['shared_throttled'])($subject, $ip)
                 : false;
         } elseif (isset($seams['reserve']) && is_callable($seams['reserve'])) {
             // 4. Fallback mode: the reservation is the budget, and the policy
@@ -291,7 +315,7 @@ function recovery_handler_authenticate(array $submission, array $seams = []): ar
     //    counted at all.
     if ($result['record_failure'] === true && isset($seams['record']) && is_callable($seams['record'])) {
         $steps[] = RECOVERY_HANDLER_STEP_RECORD;
-        ($seams['record'])($result['bucket'], $nick, $ip, $now);
+        ($seams['record'])($result['bucket'], $subject, $ip, $now);
     }
 
     // The success-clear. A reserved submission was already released by the
@@ -303,7 +327,7 @@ function recovery_handler_authenticate(array $submission, array $seams = []): ar
         && is_callable($seams['clear'])
     ) {
         $steps[] = RECOVERY_HANDLER_STEP_CLEAR;
-        ($seams['clear'])($result['bucket'], $nick, $ip, $now);
+        ($seams['clear'])($result['bucket'], $subject, $ip, $now);
     }
 
     $identity = null;
@@ -393,6 +417,12 @@ function recovery_handler_write_identity(array $identity, ?callable $regenerate 
  * Is the nick throttled in the core's shared budget? False when the console
  * cannot see that budget at all.
  *
+ * `$nick` is the folded counter subject from
+ * {@see recovery_policy_counter_subject()}, not the spelling the client typed:
+ * the caller folds it once so this read and the two writes below name one
+ * bucket. `LoginThrottle` lower-cases ASCII again on its way to the cache key,
+ * so for an ASCII subject the bucket is exactly the one the panel login uses.
+ *
  * `recovery_policy_shared_throttle_available()` is the only gate: it answers
  * with autoload disabled, so this never pulls a core class into a process that
  * did not already have one (RACC-01). When the class is absent the answer is
@@ -411,6 +441,10 @@ function recovery_handler_shared_throttled(string $nick, string $ip): bool
 
 /**
  * Charge one failed attempt to the core's shared budget, when it is visible.
+ *
+ * `$nick` is the folded counter subject, exactly as
+ * {@see recovery_handler_shared_throttled()} documents: the charge must land on
+ * the bucket the consult asked about.
  */
 function recovery_handler_shared_record(string $nick, string $ip): void
 {
@@ -423,6 +457,9 @@ function recovery_handler_shared_record(string $nick, string $ip): void
 
 /**
  * Release the core's shared budget for this nick, when it is visible.
+ *
+ * The subject is the same folded value the charge used, so a successful login
+ * releases the bucket it was measured against rather than a spelling's bucket.
  */
 function recovery_handler_shared_clear(string $nick, string $ip): void
 {
@@ -447,7 +484,9 @@ function recovery_handler_shared_clear(string $nick, string $ip): void
  *     (REC-03). It never writes;
  *   - the budget is the fallback counter when the core throttle is invisible —
  *     the state a damaged core always produces — and the core's two calls when
- *     it is not.
+ *     it is not. Every counter seam is handed the folded subject from
+ *     {@see recovery_policy_counter_subject()}, so none of them derives a
+ *     bucket name of its own and no spelling can open a second budget;
  *
  * `$db` is the console's live `mysqli`. A `null` here means the caller already
  * decided the database boundary was not reached; the lookup is then absent
