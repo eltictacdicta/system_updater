@@ -1234,13 +1234,13 @@ console's gate.
 
 ### Phase 1: The allowlist and the helper (TDD)
 
-- [ ] 1.1 **[TEST] [RED]** Build a temp staging tree containing the eight names plus `vendor/`,
+- [x] 1.1 **[TEST] [RED]** Build a temp staging tree containing the eight names plus `vendor/`,
   `themes/`, `view/`, `plugins/` (with `plugins/system_updater/openspec/specs/pu.md`), `src/`,
   `base/`, `model/`, `controller/`, `images/`, `imgs/`, `tmp/`, `backups/`, `config.php`,
   `.htaccess`, and one file inside each. Assert after the prune: none of the eight exists; every
   other entry exists and its contents are byte-identical; `plugins/system_updater/openspec/specs/pu.md`
   is still there. RED today: nothing prunes, all eight survive.
-- [ ] 1.2 Declare the allowlist **once** (a class constant or a private static method returning the
+- [x] 1.2 Declare the allowlist **once** (a class constant or a private static method returning the
   eight literal names, the house shape of `coreRootCopyExcludes()`), and implement
   `pruneNonRuntimeDirectories(string $baseDir): array` returning `['removed' => [...],
   'failed' => [name => reason]]`. Rules, all from `PU-16`: closed list; single path segment only
@@ -1248,7 +1248,7 @@ console's gate.
   never traverse a symlink; a missing candidate is a silent no-op; a failed removal is recorded and
   does not throw and does not change the caller's return value. Note in the docblock that
   `coreRootCopyExcludes()` exclusion is **not** the mechanism and MUST NOT become the only one.
-- [ ] 1.3 **[TEST] [RED]** The negative cases: a symlink inside the base pointing outside →
+- [x] 1.3 **[TEST] [RED]** The negative cases: a symlink inside the base pointing outside →
   refused and reported, the target's contents unchanged; a candidate whose resolved path escapes the
   base → refused; a run on a tree already pruned → `removed` and `failed` both empty; an unwritable
   directory (precondition **observed**, `markTestSkipped` with a recorded reason on a privileged
@@ -1259,7 +1259,7 @@ console's gate.
 
 ### Phase 2: Both source branches (TDD)
 
-- [ ] 2.1 **[TEST] [RED]** Synthetic ZIPs holding the eight names plus runtime entries, extracted
+- [x] 2.1 **[TEST] [RED]** Synthetic ZIPs holding the eight names plus runtime entries, extracted
   through the production `extractZipSafe()` (via `ReflectionMethod`), in **both** shapes:
   (a) the branch-archive shape, where everything sits one level down under
   `<repo>-<branch>/` — the shape every real update has, because GitHub archives are named after the
@@ -1269,7 +1269,7 @@ console's gate.
   `findFirstDirectory()` returns (the one the copy reads) and runtime entries do. Then the failure
   half: an archive carrying a `../` entry is refused and **no** directory was removed from the
   destination (the prune did not run on a failed extraction). RED today on the positive halves.
-- [ ] 2.2 Wire it: in `extractZipSafe()` immediately after `$result = $zip->extractTo($destination)`
+- [x] 2.2 Wire it: in `extractZipSafe()` immediately after `$result = $zip->extractTo($destination)`
   returns `true` and before the method returns (never before, never when `$result` is falsy), and in
   `prepareCoreSource()` on the clone directory before it is returned, so the branch the updater
   prefers when `git` is available is covered by the same list and the same helper. **Resolve the
@@ -1281,7 +1281,7 @@ console's gate.
 
 ### Phase 3: The anti-drift test (TDD, last)
 
-- [ ] 3.1 **[TEST]** `CoreUpdaterPruneTest::theAllowlistMatchesTheCoreSampleDenyBlock()`:
+- [x] 3.1 **[TEST]** `CoreUpdaterPruneTest::theAllowlistMatchesTheCoreSampleDenyBlock()`:
   - **always runs**: the plugin's declared allowlist equals the eight literal names stated by
     `PU-16` (so a silent removal or addition is RED without the core repository present);
   - **drift half**: read `dirname(__DIR__, 3) . '/nginx-sample.conf'` (the file sits at
@@ -1297,13 +1297,25 @@ console's gate.
 
 ### PR 9 verification
 
-- [ ] `--filter CoreUpdaterPruneTest` — record tests/assertions and whether any case skipped
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
-  against the baseline measured immediately before U9.1
-- [ ] `ddev exec php -l plugins/system_updater/lib/core_updater.php plugins/system_updater/tests/CoreUpdaterPruneTest.php`
-- [ ] `git status --porcelain` shows only `lib/core_updater.php` and the new test file (plus
+- [x] `--filter CoreUpdaterPruneTest` — record tests/assertions and whether any case skipped
+  → **14 tests, 224 assertions, 0 skipped** (the drift half ran against this checkout's
+  `nginx-sample.conf`); the baseline-measuring run before U9.1 was 426 tests / 1314 assertions /
+  2 skipped
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
+  against the baseline measured immediately before U9.1 → **440 tests, 1538 assertions, 2 skipped,
+  0 failures** (the 2 skips are the pre-existing ones; +14 tests, +224 assertions)
+- [x] Counts re-measured at the review-fix commit. The first recording of this block was wrong: it
+  said **12 tests / 203 assertions** for the filtered run and **438 / 1517 / 2** for the suite, while
+  the same two commands reported **13 / 209** and **439 / 1523 / 2**. The values above are the
+  current measured ones and include the separator-containment test added for the review
+  (`14 = 13 + 1` tests, `224 = 209 + 15` assertions). All eight slice commits touch only
+  `lib/core_updater.php` and `tests/CoreUpdaterPruneTest.php`, so the whole suite delta against the
+  426 / 1314 baseline belongs to this slice and the arithmetic closes on both sides.
+- [x] `ddev exec php -l plugins/system_updater/lib/core_updater.php plugins/system_updater/tests/CoreUpdaterPruneTest.php`
+- [x] `git status --porcelain` shows only `lib/core_updater.php` and the new test file (plus
   `openspec/`, which is working-tree only); **no** file under the core repository is modified
 - [ ] PR body states that `nginx-sample.conf` was read and not edited, and names the skip condition
+  (no PR was opened in the apply phase; the statement is recorded in the apply report)
 
 **Recorded consequences of this slice** (they belong in the PR body, not only here): `docs/` and
 `extras/` leave an installation on the first update after this ships (because
