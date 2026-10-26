@@ -305,8 +305,9 @@ final class CoreUpdaterPruneTest extends TestCase
             'the prune must never delete through a symlink'
         );
         $this->assertTrue(is_link($link), 'the link itself must be left alone, not resolved and removed');
-        $this->assertFileExists(
-            $staging . '/openspec/keep.md',
+        $this->assertSame(
+            $this->sorted(array_diff(self::PLANNING_DIRECTORIES, ['docs'])),
+            $this->sorted($report['removed']),
             'a refused candidate must not stop the remaining names'
         );
     }
