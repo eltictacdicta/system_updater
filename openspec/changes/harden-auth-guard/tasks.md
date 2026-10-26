@@ -1648,6 +1648,15 @@ runtime dependency, which is the whole basis of the decision.
 
 ## Delta conflict resolved at apply time (RACC-03 vs RACC-01/RACC-04)
 
+> **SUPERSEDED on 2026-10-26 by the product owner, in the post-verify fix branch
+> `fix/harden-auth-guard-criticals`.** The resolution below is what the apply phase shipped and
+> what the verify phase measured as **C-2**. The product owner has decided the opposite: **the
+> operator pin wins, always**, and `config.php` is consulted on every gate evaluation as the
+> accepted cost. See "Post-verify fixes (C-1, C-2, W-1)" at the end of this file for the new
+> binding order, the preservation properties and the evidence. Step 3 below (the pin as a
+> *lost-file* escape only) is no longer the behaviour; steps 1 and 2 are no longer the gate's
+> comparison order.
+
 The deltas contradict each other in one place, and the contradiction is load-bearing for PR 3 and
 PR 4. It is recorded here rather than papered over; the resolution below is binding for apply and
 must be reported in `verify-report.md`.
@@ -1707,3 +1716,95 @@ narrowed to what *is* observable; none is silently dropped.
   revert leaves the persisted secret orphaned and harmless.
 - **`--rotate-secret` invalidates the old value immediately**; every browser that has the old
   console URL must be re-opened with the new one.
+
+---
+
+## Post-verify fixes (C-1, C-2, W-1)
+
+Branch `fix/harden-auth-guard-criticals`, three commits off `master` (`51df7f8`). Each fix was
+written RED first against the defect the verify phase measured; each commit is green on its own
+(`phpunit -c plugins/system_updater/phpunit.xml`).
+
+### C-1 — `RACC-02` per-installation uniqueness (commit `549d5b9`)
+
+- [x] **RED** `tests/RecoverySecretSharedParentTest.php` — two install roots under one parent
+  (`<parent>/vhostA`, `<parent>/vhostB`). Measured before the fix: both resolved
+  `<parent>/system_updater_recovery_secret.php`, both read the same 64-hex value, and install B's
+  gate returned `granted: true` for install A's secret. Three cases, three failures.
+- [x] `recovery_secret_install_directory()`: the outside-webroot candidate now lives in
+  `<parent>/system_updater_recovery_<first 16 hex of sha256(realpath(root))>/`.
+  `recovery_secret_candidates()` returns that path first, `<root>/tmp/…` second (already keyed on
+  the root, so it needed no change).
+- [x] Still outside the webroot (survives a damaged core), still `0600` inside a `0700` directory
+  (asserted), still the same operator-facing file name.
+- [x] The value is still `random_bytes(32)`: the digest names a *location* and is never a seed
+  (asserted against md5/sha1/sha256 of the install path).
+- [x] GREEN regression: B's gate rejects A's secret, accepts its own, and the mirror holds.
+- [x] Both test harnesses (`RecoverySecretFixture`, `ConsoleHttpHarness`) now take the candidate
+  path from `recovery_secret_candidates()` instead of re-deriving it. The duplicated formula is
+  what kept the defect invisible: each fixture allocated its own parent, so the copy agreed with
+  itself.
+
+### C-2 — `RACC-03` / `RACC-06` escape 3: the operator pin wins (commit `7bd9126`)
+
+- [x] **Decision (product owner, 2026-10-26)**: the resolution order is `SU_RECOVERY_SECRET` from
+  `config.php` first, the persisted per-installation value second. `config.php` is loaded on every
+  gate evaluation — the accepted cost. The deltas are **not** amended here; that is a separate
+  phase.
+- [x] **RED** at the library level: `testTheOperatorPinWinsOverADifferentPersistedValue` failed on
+  "the operator pin is what the gate answers against"; at the HTTP level: "the pin must open the
+  console with the secret file present: `Not Found` / Failed asserting that 404 is identical to
+  200" — the verify phase's measurement, reproduced.
+- [x] `recovery_secret_gate()` consults the pin first (`recovery_secret_operator_pin()`), falls back
+  to `recovery_secret_gate_value()` (same order), and only then to first-use generation.
+- [x] `recovery_secret_operator_pin()` is now idempotent (skips a `config.php` this request already
+  ran, and one whose pin is already visible) and uses `@include`, so it is safe to call on every
+  evaluation and cannot redeclare anything the console or the session-name reader loads.
+- [x] Preservation property 1 — a damaged/unparseable `config.php` is silent and falls back to the
+  persisted value: `testADamagedConfigFallsBackToThePersistedValueSilently` (no parse error in body
+  or stderr) and `testAConfigThatWarnsLeavesNothingInTheResponseOrTheLog` (with
+  `display_errors=0`, a warning from the file does not reach the error log either; the test goes
+  red if the `@` is removed).
+- [x] Preservation property 2 — the refusal shape is unchanged: absent/empty/wrong stay one
+  byte-identical 404 with the same header set, both with and without a pin configured
+  (`testTheRefusalShapeIsUnchangedWhenAPinIsConfigured`).
+- [x] Preservation property 3 — no secret value in a body, a header or a log (asserted on the pin,
+  the persisted value and the generation line).
+- [x] Tests that pinned the old order were rewritten, not deleted: the persisted-first comparison
+  case, the "pin grants only when nothing is persisted" case, and the marker case that asserted a
+  rotation displaces the pin (now: the pin still wins, so the marker survives).
+
+### W-1 — `RACC-01` missing `config.php` is a 500 that names the directory (commit `94eaca9`)
+
+- [x] **RED** `testAMissingConfigIsAFiveHundredThatNamesTheDirectory`: measured `200` with
+  `Error: No se encuentra el archivo config.php.` — no directory, no 500.
+- [x] The branch now sets `Content-Type: text/plain; charset=utf-8`, answers `500` and names
+  `FS_FOLDER`.
+- [x] It cannot be confused with the gate's 404: the gate is decided first, and the same missing
+  file without the secret still answers 404 (asserted in the same case). No stack trace, no
+  credential, no secret.
+- [x] The config path stays a literal in `require_once`, so `RACC-01`'s statically enumerated
+  include graph still resolves that one external entry.
+
+### Verification of this branch
+
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` →
+  **650 tests / 2515 assertions / 2 skipped, 0 failures** (baseline was 641 / 2382 / 2).
+- [x] Each commit green on its own: `549d5b9` → 645/2411/2; `94eaca9` → 646/2431/2; `7bd9126` →
+  650/2515/2.
+- [x] No `openspec/` file is committed on this branch: `tasks.md` edits and `verify-report.md` stay
+  in the working tree for the delta-amendment phase.
+- [ ] **Not done here (separate phases)**: amend `RACC-01`'s "a wrong secret never reaches
+  `config.php`" scenario, `RACC-03`'s "the gate answers before `config.php` is loaded" scenario and
+  `RACC-06`'s escape-3 wording to the decided order; re-run the verify phase; then archive.
+
+### Operator note on the C-1 relocation (no migration step)
+
+The outside-webroot candidate moved from `<parent>/system_updater_recovery_secret.php` to
+`<parent>/system_updater_recovery_<digest>/system_updater_recovery_secret.php`. There is deliberately
+**no legacy-path fallback**: adopting an old file would hand one installation a copy of its
+neighbour's secret, which is the defect being removed. The cost is a one-time retirement of any
+value written before this branch. It has no installed base — the per-installation secret is
+introduced by this same unreleased change — and, if a branch build did write one, the documented
+RACC-06 sinks recover the new value (`php recovery.php --secret`, `--rotate-secret`, or the single
+generation line in the PHP error log).
