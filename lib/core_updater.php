@@ -28,6 +28,20 @@ class core_updater
     private $messages = [];
 
     /**
+     * Names the prune actually removed from the current staging source.
+     *
+     * @var array<int, string>
+     */
+    private $prunedDirectories = [];
+
+    /**
+     * Non-runtime directories that survived the prune, name => reason.
+     *
+     * @var array<string, string>
+     */
+    private $pruneFailures = [];
+
+    /**
      * @param string|null $rootPath
      */
     public function __construct($rootPath = null)
@@ -69,6 +83,8 @@ class core_updater
     {
         $this->errors = [];
         $this->messages = [];
+        $this->prunedDirectories = [];
+        $this->pruneFailures = [];
 
         $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
@@ -127,6 +143,11 @@ class core_updater
                 'success' => false,
                 'errors' => $this->errors,
             ];
+        }
+
+        $pruneMessage = $this->pruneOutcomeMessage();
+        if ($pruneMessage !== '') {
+            $reportProgress('prune', $pruneMessage, 58);
         }
 
         $reportProgress('copy_prepare', 'Limpiando archivos antiguos del núcleo...', 60);
@@ -197,6 +218,8 @@ class core_updater
             'bundled_plugins_added' => $pluginsSync['added'],
             'bundled_plugins_errors' => $pluginsSync['errors'],
             'backup_created' => (bool) $createBackup,
+            'pruned_directories' => $this->prunedDirectories,
+            'prune_failures' => $this->pruneFailures,
         ];
     }
 
@@ -243,6 +266,13 @@ class core_updater
             foreach (self::CORE_REPOSITORY_BRANCHES as $branch) {
                 if ($this->cloneGitRepository(self::CORE_REPOSITORY_URL, $branch, $clonePath)) {
                     $usedGitClone = true;
+
+                    // PU-16: a clone of the branch carries the same eight
+                    // directories. Pruning only the ZIP path would leave the
+                    // property false on the branch the updater prefers whenever
+                    // git is available.
+                    $this->recordPruneReport($this->pruneStagingSource($clonePath));
+
                     return $clonePath;
                 }
             }
@@ -588,6 +618,14 @@ class core_updater
 
         $result = $zip->extractTo($destination);
         $zip->close();
+
+        // PU-16: only a successful extraction is pruned. A refused or partial
+        // tree is already reported and cleaned up as a unit; deleting from it
+        // would turn one failure into a second, unreported one.
+        if ($result === true) {
+            $this->recordPruneReport($this->pruneStagingSource($destination));
+        }
+
         return $result;
     }
 
@@ -676,6 +714,339 @@ class core_updater
             'imgs',
             '.ddev',
         ];
+    }
+
+    /**
+     * The core's non-runtime trees: planning, documentation, development
+     * tooling and analysis. PU-16's closed allowlist, declared here and read
+     * only by the prune, so the list and the code cannot drift apart.
+     *
+     * `themes/` is deliberately absent because it holds the CSS and JS the
+     * browser fetches, and nothing under `plugins/` is ever a candidate because
+     * a plugin's own `openspec/` — including this plugin's — lives there.
+     *
+     * A new name is added here by decision, never by pattern: the list fails
+     * closed, so a directory the core adds later is harmless rather than
+     * deleted before anyone decided it was disposable.
+     *
+     * @return array<int, string>
+     */
+    private static function nonRuntimeDirectories()
+    {
+        return [
+            'openspec',
+            'docs',
+            'tools',
+            'extras',
+            'odd',
+            'dev-tools',
+            'managed_context',
+            'test_suite_analysis',
+        ];
+    }
+
+    /**
+     * A candidate is a single path segment naming a directory in the staging
+     * root: no separator and no traversal, so the closed list can never become
+     * a path expression.
+     *
+     * @param string $name
+     *
+     * @return bool
+     */
+    private function isPrunableDirectoryName($name)
+    {
+        if (!is_string($name) || $name === '' || $name === '.' || $name === '..') {
+            return false;
+        }
+
+        return strpos($name, '/') === false
+            && strpos($name, '\\') === false
+            && strpos($name, '..') === false;
+    }
+
+    /**
+     * Whether a resolved path is strictly inside a resolved base directory.
+     *
+     * Both arguments are `realpath()` output, which is exactly the problem:
+     * `realpath()` answers with `\` on Windows and `/` everywhere else, so a
+     * prefix test assembled from one hard-coded separator refuses a legitimate
+     * child on the host that uses the other one. Both sides are therefore
+     * folded to `/` and stripped of trailing separators, and the base is then
+     * terminated with a single `/` before the prefix test — the separator the
+     * comparison itself owns, not the one the platform returned.
+     *
+     * Refusing is the safe direction and stays so: an unresolvable, empty or
+     * unrelated path yields false, and the terminating separator keeps a
+     * sibling whose name merely starts with the base's (`stage-extra/` next to
+     * `stage/`) from being read as a child.
+     *
+     * @param string $base
+     * @param string $candidate
+     *
+     * @return bool
+     */
+    private function isPathInsideBase($base, $candidate)
+    {
+        if (!is_string($base) || !is_string($candidate)) {
+            return false;
+        }
+
+        $baseNormalised = $this->normalisePathForComparison($base);
+        $candidateNormalised = $this->normalisePathForComparison($candidate);
+
+        if ($baseNormalised === '' || $candidateNormalised === '') {
+            return false;
+        }
+
+        return strpos($candidateNormalised . '/', $baseNormalised . '/') === 0;
+    }
+
+    /**
+     * Fold a path to the single separator the containment comparison uses,
+     * without a trailing one. Never used to touch the filesystem: it exists so
+     * the verdict cannot depend on which separator the host resolves with.
+     *
+     * @param string $path
+     *
+     * @return string
+     */
+    private function normalisePathForComparison($path)
+    {
+        return rtrim(str_replace('\\', '/', $path), '/');
+    }
+
+    /**
+     * Remove the non-runtime directories from a staging source after a
+     * successful extraction.
+     *
+     * Confined by construction to the directory the update is about to copy
+     * from; the installation root is never a base. Every candidate must be a
+     * plain single-segment name from the closed list, must resolve inside the
+     * base, and is never followed through a symlink: a linked candidate is
+     * refused and reported, never traversed. A missing name is a silent no-op,
+     * so running the prune twice changes nothing. A directory that cannot be
+     * removed is reported and does not throw, so the caller's outcome never
+     * depends on the prune.
+     *
+     * `coreRootCopyExcludes()` is NOT this mechanism and must not become the
+     * only one: excluding the names from the copy still leaves the full tree
+     * inside the web root for the whole update, because the staging directory
+     * is only deleted after the copy.
+     *
+     * @param string $baseDir
+     *
+     * @return array{removed: array<int, string>, failed: array<string, string>}
+     */
+    private function pruneNonRuntimeDirectories($baseDir)
+    {
+        $report = ['removed' => [], 'failed' => []];
+
+        if (!is_string($baseDir) || $baseDir === '' || !is_dir($baseDir) || is_link($baseDir)) {
+            return $report;
+        }
+
+        $base = realpath($baseDir);
+        if ($base === false) {
+            return $report;
+        }
+
+        foreach (self::nonRuntimeDirectories() as $name) {
+            if (!$this->isPrunableDirectoryName($name)) {
+                $report['failed'][$name] = 'not a single path segment';
+                continue;
+            }
+
+            $candidate = rtrim($base, '/\\') . '/' . $name;
+
+            if (!file_exists($candidate) && !is_link($candidate)) {
+                continue;
+            }
+
+            if (is_link($candidate)) {
+                $report['failed'][$name] = 'symlink refused: nothing is deleted through a link';
+                continue;
+            }
+
+            if (!is_dir($candidate)) {
+                $report['failed'][$name] = 'not a directory';
+                continue;
+            }
+
+            $resolved = realpath($candidate);
+            if ($resolved === false || !$this->isPathInsideBase($base, $resolved)) {
+                $report['failed'][$name] = 'resolves outside the staging directory';
+                continue;
+            }
+
+            $this->deleteStagingDirectory($resolved);
+
+            if (file_exists($resolved) || is_link($resolved)) {
+                $report['failed'][$name] = 'could not be removed';
+                continue;
+            }
+
+            $report['removed'][] = $name;
+        }
+
+        return $report;
+    }
+
+    /**
+     * Delete a directory tree without ever entering a symlink.
+     *
+     * `deleteDirectoryRecursive()` decides with `is_dir()`, which follows a
+     * link, so a link found inside an allowlisted directory would make it
+     * delete files outside the staging tree — and then leave the candidate in
+     * place. Here a link is unlinked as a link, whatever it points at, and only
+     * real directories are entered. The candidate itself has already been
+     * proven not to be a link and to resolve inside the staging directory.
+     *
+     * @param string $dir
+     *
+     * @return bool
+     */
+    private function deleteStagingDirectory($dir)
+    {
+        if (is_link($dir) || !is_dir($dir)) {
+            return @unlink($dir);
+        }
+
+        $entries = @scandir($dir);
+        if (!is_array($entries)) {
+            return false;
+        }
+
+        foreach (array_diff($entries, ['.', '..']) as $entry) {
+            $path = $dir . '/' . $entry;
+
+            if (is_link($path) || !is_dir($path)) {
+                @unlink($path);
+                continue;
+            }
+
+            $this->deleteStagingDirectory($path);
+        }
+
+        return @rmdir($dir);
+    }
+
+    /**
+     * Prune the effective source root of a staging extraction.
+     *
+     * A branch archive extracts into its own top-level directory
+     * (`<repo>-<branch>/`), one level below the destination: that child is the
+     * directory the copy reads, so pruning the outer destination would find
+     * none of the eight, report success and change nothing. An uploaded ZIP
+     * whose root already is the core tree has no such child and is pruned in
+     * place. Both shapes are covered here rather than inferred at the call site.
+     *
+     * @param string $destination
+     *
+     * @return array{removed: array<int, string>, failed: array<string, string>}
+     */
+    private function pruneStagingSource($destination)
+    {
+        $root = $this->resolveStagingSourceRoot($destination);
+
+        if ($root === null) {
+            return ['removed' => [], 'failed' => []];
+        }
+
+        return $this->pruneNonRuntimeDirectories($root);
+    }
+
+    /**
+     * Accumulate a prune report for the current update.
+     *
+     * Never touches `$this->errors`: a directory that survives the prune is a
+     * visible note in the result, not a failed update. Name-keyed so the same
+     * failure recorded by two source branches is reported once.
+     *
+     * @param array{removed: array<int, string>, failed: array<string, string>} $report
+     *
+     * @return void
+     */
+    private function recordPruneReport($report)
+    {
+        foreach ($report['removed'] as $name) {
+            if (!in_array($name, $this->prunedDirectories, true)) {
+                $this->prunedDirectories[] = $name;
+            }
+        }
+
+        foreach ($report['failed'] as $name => $reason) {
+            if (!array_key_exists($name, $this->pruneFailures)) {
+                $this->pruneFailures[$name] = $reason;
+            }
+        }
+    }
+
+    /**
+     * One progress line describing what the prune did, or '' when it had
+     * nothing to report (an already-pruned source stays silent).
+     *
+     * @return string
+     */
+    private function pruneOutcomeMessage()
+    {
+        $parts = [];
+
+        if (!empty($this->prunedDirectories)) {
+            $parts[] = 'Directorios no runtime eliminados del paquete: '
+                . implode(', ', $this->prunedDirectories) . '.';
+        }
+
+        if (!empty($this->pruneFailures)) {
+            $survivors = [];
+            foreach ($this->pruneFailures as $name => $reason) {
+                $survivors[] = $name . ' (' . $reason . ')';
+            }
+
+            $parts[] = 'No se pudieron eliminar: ' . implode(', ', $survivors) . '.';
+        }
+
+        return implode(' ', $parts);
+    }
+
+    /**
+     * The directory a staging extraction is copied from.
+     *
+     * A single top-level directory and nothing else means a branch archive
+     * (`fs-framework-master/`); anything else means the archive root already is
+     * the core tree. A link is never resolved: it would move the prune outside
+     * the staging directory.
+     *
+     * @param string $destination
+     *
+     * @return string|null
+     */
+    private function resolveStagingSourceRoot($destination)
+    {
+        if (!is_string($destination) || $destination === '' || !is_dir($destination) || is_link($destination)) {
+            return null;
+        }
+
+        $resolved = realpath($destination);
+        if ($resolved === false) {
+            return null;
+        }
+
+        $entries = @scandir($resolved);
+        if (!is_array($entries)) {
+            return null;
+        }
+
+        $entries = array_values(array_diff($entries, ['.', '..']));
+
+        if (count($entries) === 1) {
+            $only = $resolved . '/' . $entries[0];
+            if (is_dir($only) && !is_link($only)) {
+                return $only;
+            }
+        }
+
+        return $resolved;
     }
 
     /**
