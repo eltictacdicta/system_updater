@@ -766,6 +766,57 @@ class core_updater
     }
 
     /**
+     * Whether a resolved path is strictly inside a resolved base directory.
+     *
+     * Both arguments are `realpath()` output, which is exactly the problem:
+     * `realpath()` answers with `\` on Windows and `/` everywhere else, so a
+     * prefix test assembled from one hard-coded separator refuses a legitimate
+     * child on the host that uses the other one. Both sides are therefore
+     * folded to `/` and stripped of trailing separators, and the base is then
+     * terminated with a single `/` before the prefix test — the separator the
+     * comparison itself owns, not the one the platform returned.
+     *
+     * Refusing is the safe direction and stays so: an unresolvable, empty or
+     * unrelated path yields false, and the terminating separator keeps a
+     * sibling whose name merely starts with the base's (`stage-extra/` next to
+     * `stage/`) from being read as a child.
+     *
+     * @param string $base
+     * @param string $candidate
+     *
+     * @return bool
+     */
+    private function isPathInsideBase($base, $candidate)
+    {
+        if (!is_string($base) || !is_string($candidate)) {
+            return false;
+        }
+
+        $baseNormalised = $this->normalisePathForComparison($base);
+        $candidateNormalised = $this->normalisePathForComparison($candidate);
+
+        if ($baseNormalised === '' || $candidateNormalised === '') {
+            return false;
+        }
+
+        return strpos($candidateNormalised . '/', $baseNormalised . '/') === 0;
+    }
+
+    /**
+     * Fold a path to the single separator the containment comparison uses,
+     * without a trailing one. Never used to touch the filesystem: it exists so
+     * the verdict cannot depend on which separator the host resolves with.
+     *
+     * @param string $path
+     *
+     * @return string
+     */
+    private function normalisePathForComparison($path)
+    {
+        return rtrim(str_replace('\\', '/', $path), '/');
+    }
+
+    /**
      * Remove the non-runtime directories from a staging source after a
      * successful extraction.
      *
@@ -800,15 +851,13 @@ class core_updater
             return $report;
         }
 
-        $basePrefix = rtrim($base, '/') . '/';
-
         foreach (self::nonRuntimeDirectories() as $name) {
             if (!$this->isPrunableDirectoryName($name)) {
                 $report['failed'][$name] = 'not a single path segment';
                 continue;
             }
 
-            $candidate = $basePrefix . $name;
+            $candidate = rtrim($base, '/\\') . '/' . $name;
 
             if (!file_exists($candidate) && !is_link($candidate)) {
                 continue;
@@ -825,7 +874,7 @@ class core_updater
             }
 
             $resolved = realpath($candidate);
-            if ($resolved === false || strpos(rtrim($resolved, '/') . '/', $basePrefix) !== 0) {
+            if ($resolved === false || !$this->isPathInsideBase($base, $resolved)) {
                 $report['failed'][$name] = 'resolves outside the staging directory';
                 continue;
             }
