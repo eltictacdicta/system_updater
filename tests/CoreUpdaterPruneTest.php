@@ -642,4 +642,127 @@ final class CoreUpdaterPruneTest extends TestCase
             'FS_FOLDER is the installation root; it must never be pruned'
         );
     }
+
+    /**
+     * PU-16, "the allowlist and the core sample cannot drift".
+     *
+     * Two enforcement points of one decision: the filesystem (never write it)
+     * and the edge (refuse to serve it). The always-runnable half pins the
+     * plugin's declaration to the eight names the requirement states, so a
+     * silent addition or removal is red with or without the core repository
+     * present. The drift half compares that set with the core sample's planning
+     * deny block and reports a visible skip naming the path it looked for when
+     * the plugin is checked out standalone.
+     *
+     * The runtime and operator denies of the sample (`/vendor/`, `/tmp/`,
+     * `/backups/`, `/.git/`) are excluded by name: they are paths this
+     * requirement must never touch, and treating them as members would widen
+     * the allowlist silently.
+     */
+    public function testTheAllowlistMatchesTheCoreSampleDenyBlock(): void
+    {
+        $allowlist = $this->declaredAllowlist();
+
+        // Always runs first: a silent removal or addition is red on its own.
+        $expected = self::PLANNING_DIRECTORIES;
+        sort($expected);
+        sort($allowlist);
+
+        $this->assertSame(
+            $expected,
+            $allowlist,
+            'PU-16: the declared allowlist must be exactly the eight stated names and no others'
+        );
+
+        $samplePath = dirname(__DIR__, 3) . '/nginx-sample.conf';
+
+        if (!is_file($samplePath)) {
+            $this->markTestSkipped(
+                'the two-list comparison did NOT run: the core sample was not found at '
+                . $samplePath
+                . '. The eight-name assertion above did run; this plugin also ships standalone,'
+                . ' where the core sample does not exist.'
+            );
+        }
+
+        $denied = $this->planningDenies($samplePath);
+
+        $this->assertSame(
+            8,
+            count($denied),
+            'the planning block of ' . $samplePath . ' must deny exactly eight top-level directories'
+        );
+
+        foreach (['vendor', 'tmp', 'backups', '.git'] as $runtimeOrOperatorPath) {
+            $this->assertNotContains(
+                $runtimeOrOperatorPath,
+                $denied,
+                $samplePath . ': /' . $runtimeOrOperatorPath . '/ is a runtime or operator deny, not a planning one'
+            );
+            $this->assertNotContains(
+                $runtimeOrOperatorPath,
+                $allowlist,
+                'PU-16 forbids the prune from ever touching /' . $runtimeOrOperatorPath . '/'
+            );
+        }
+
+        sort($denied);
+
+        $this->assertSame(
+            $denied,
+            $allowlist,
+            'the plugin allowlist and ' . $samplePath . ' deny the same decision;'
+            . ' a name added to one and not the other is a defect in either direction'
+        );
+    }
+
+    /**
+     * The plugin's single declaration, read through the same private seam the
+     * updater uses. Never a copy of the list: this is the production value.
+     *
+     * @return array<int, string>
+     */
+    private function declaredAllowlist(): array
+    {
+        $method = new \ReflectionMethod(\core_updater::class, 'nonRuntimeDirectories');
+        $method->setAccessible(true);
+
+        $declared = $method->invoke(null);
+
+        $this->assertIsArray($declared, 'the allowlist must be declared exactly once, as a list');
+
+        return array_values($declared);
+    }
+
+    /**
+     * Top-level directory names denied in the core sample's planning block, and
+     * only those. The block starts at its own comment and ends where the next
+     * section does, so the plugin regex denies below never enter the set.
+     *
+     * @return array<int, string>
+     */
+    private function planningDenies(string $samplePath): array
+    {
+        $content = (string) file_get_contents($samplePath);
+
+        $marker = 'Planning, documentation and analysis trees';
+        $start = strpos($content, $marker);
+
+        $this->assertNotFalse(
+            $start,
+            'the planning block is missing from ' . $samplePath
+            . ': the sample no longer carries the second enforcement point'
+        );
+
+        $block = substr($content, (int) $start);
+
+        $sectionEnd = strpos($block, '# ---');
+        if ($sectionEnd !== false) {
+            $block = substr($block, 0, $sectionEnd);
+        }
+
+        preg_match_all('#^\s*location\s+\^~\s+/([A-Za-z0-9._-]+)/\s*\{#m', $block, $matches);
+
+        return array_values(array_unique($matches[1]));
+    }
 }
