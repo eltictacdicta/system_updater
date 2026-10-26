@@ -313,6 +313,39 @@ final class CoreUpdaterPruneTest extends TestCase
     }
 
     /**
+     * PU-16, "MUST NOT delete through a symlink": a link found *inside* a
+     * candidate is unlinked as a link, never entered. The candidate's own
+     * refusal rule is not enough — the recursion is where a tree gets deleted
+     * from the wrong filesystem.
+     */
+    public function testALinkNestedInsideACandidateIsNeverTraversed(): void
+    {
+        $staging = $this->tempDir . '/staging';
+        mkdir($staging . '/openspec', 0755, true);
+        file_put_contents($staging . '/openspec/keep.md', 'planning');
+
+        $outside = $this->tempDir . '/outside_nested';
+        mkdir($outside, 0755, true);
+        file_put_contents($outside . '/precious.txt', 'must survive');
+
+        if (!@symlink($outside, $staging . '/openspec/link')) {
+            $this->markTestSkipped(
+                'this host cannot create the nested symlink under ' . $staging
+                . ', so PU-16\'s "no deletion through a link" clause cannot be exercised'
+            );
+        }
+
+        $report = $this->prune($staging);
+
+        $this->assertContains('openspec', $report['removed']);
+        $this->assertFileExists(
+            $outside . '/precious.txt',
+            'a link inside a candidate must be unlinked, never entered: the tree outside the staging'
+            . ' directory lost a file'
+        );
+    }
+
+    /**
      * PU-16, "An unremovable directory is reported and the update still
      * completes": the survivor is named, the other seven are still attempted,
      * and nothing throws.
