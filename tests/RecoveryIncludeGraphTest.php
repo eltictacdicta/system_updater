@@ -66,6 +66,7 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
         'lib/session_name.php',
         'lib/csrf_token.php',
         'lib/recovery_csrf.php',
+        'lib/recovery_view.php',
     ];
 
     /**
@@ -86,6 +87,7 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
         self::PLUGIN . '/lib/recovery_policy.php',
         self::PLUGIN . '/lib/recovery_secret.php',
         self::PLUGIN . '/lib/recovery_session.php',
+        self::PLUGIN . '/lib/recovery_view.php',
         self::PLUGIN . '/lib/session_name.php',
     ];
 

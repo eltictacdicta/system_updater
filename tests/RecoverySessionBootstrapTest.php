@@ -50,6 +50,7 @@ final class RecoverySessionBootstrapTest extends ConsoleHttpTestCase
         'lib/session_name.php',
         'lib/csrf_token.php',
         'lib/recovery_csrf.php',
+        'lib/recovery_view.php',
     ];
 
     /**

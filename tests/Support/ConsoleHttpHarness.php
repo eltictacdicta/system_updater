@@ -82,6 +82,7 @@ final class ConsoleHttpHarness
         'lib/session_name.php',
         'lib/csrf_token.php',
         'lib/recovery_csrf.php',
+        'lib/recovery_view.php',
     ];
 
     /** Parent of the install root: the outside-webroot secret candidate. */

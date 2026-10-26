@@ -34,6 +34,13 @@ require_once __DIR__ . '/lib/recovery_handler.php';
 // una sola clase del core (RACC-01).
 require_once __DIR__ . '/lib/recovery_csrf.php';
 
+// El render autenticado (RACC-07): la tabla de copias y el driver de
+// restauración por pasos. Es un formateador puro —no lee request, sesión ni
+// disco— y por eso las dos propiedades que RACC-07 exige del HTML emitido («todo
+// control lleva el token» y «ningún control que ya sabemos rechazado») se pueden
+// afirmar sobre su salida y no sobre la intención del template.
+require_once __DIR__ . '/lib/recovery_view.php';
+
 // Escapes de CLI (RACC-06): `--secret` lee el valor actual y `--rotate-secret`
 // lo regenera. El guard de SAPI es lo único que separa estas ramas del mundo
 // web: un request normal —incluido uno que lleve `?--secret`— no tiene ninguna
@@ -378,45 +385,12 @@ $backups = $backupManager->list_backups_grouped();
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($backups as $group): ?>
-                            <tr>
-                                <td>
-                                    <strong>
-                                        <?php echo htmlspecialchars((string) $group['base_name'], ENT_QUOTES | ENT_HTML5, 'UTF-8'); ?>
-                                    </strong><br>
-                                    <?php if ($group['complete']): ?><span class="label label-primary">Completo</span>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <?php echo date('d/m/Y H:i', $group['timestamp']); ?>
-                                </td>
-                                <td>
-                                    <?php if ($group['complete']): ?>
-                                        <a href="#"
-                                            class="btn btn-danger btn-sm restore-btn"
-                                            data-file="<?php echo htmlspecialchars($group['complete']['name']); ?>"
-                                            data-type="complete">
-                                            <i class="fa fa-undo"></i> Restaurar Todo
-                                        </a>
-                                        <?php if (!empty($group['can_restore_database']) && !empty($group['database_restore_file'])): ?>
-                                        <a href="#"
-                                            class="btn btn-warning btn-sm restore-btn"
-                                            data-file="<?php echo htmlspecialchars($group['database_restore_file']); ?>"
-                                            data-type="database">
-                                            <i class="fa fa-database"></i> Restaurar BD
-                                        </a>
-                                        <?php endif; ?>
-                                    <?php else: ?>
-                                        <span class="text-muted">Solo backup completo soportado en recuperación</span>
-                                    <?php endif; ?>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                        <?php if (empty($backups)): ?>
-                            <tr>
-                                <td colspan="3" class="text-center">No se encontraron copias de seguridad.</td>
-                            </tr>
-                        <?php endif; ?>
+                        <?php
+                        // RACC-07: sin token no se pinta ningún control de
+                        // restauración, porque el servidor rechazaría cada
+                        // request. La lista se pinta igual.
+                        echo recovery_view_backup_rows($backups, (string) $su_csrf_token !== '');
+                        ?>
                     </tbody>
                 </table>
             </div>
@@ -470,146 +444,13 @@ $backups = $backupManager->list_backups_grouped();
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.4.1/js/bootstrap.min.js"></script>
 
-    <script>
-    (function() {
-        // RACC-07: el token que acuñó este render. `json_encode` con los flags
-        // HEX evita que el valor pueda cerrar la etiqueta `<script>`; el valor no
-        // existe fuera de un render autenticado.
-        var suCsrfToken = <?php echo json_encode(
-            (string) $su_csrf_token,
-            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
-        ); ?>;
-        var restoreEventSource = null;
-        var restoreLog = [];
-
-        function startRestore(file, type) {
-            restoreLog = [];
-            updateProgress(0, 'Iniciando restauración...');
-            document.getElementById('restoreDetails').innerHTML = '<small class="text-muted">Conectando al servidor...</small>';
-            document.getElementById('restoreCompleteBtn').style.display = 'none';
-            document.getElementById('restoreErrorBtn').style.display = 'none';
-            document.getElementById('modalSpinner').classList.add('fa-spin');
-            document.getElementById('statusSpinner').classList.add('fa-spin');
-
-            jQuery('#restoreProgressModal').modal('show');
-
-            var sseUrl = 'process_restore.php?action=start&file=' + encodeURIComponent(file) + '&type=' + encodeURIComponent(type)
-                + '&su_csrf_token=' + encodeURIComponent(suCsrfToken);
-
-            restoreEventSource = new EventSource(sseUrl);
-
-            restoreEventSource.addEventListener('start', function(e) {
-                var data = JSON.parse(e.data);
-                addLogEntry('Iniciando: ' + data.message);
-            });
-
-            restoreEventSource.addEventListener('init', function(e) {
-                var data = JSON.parse(e.data);
-                updateProgress(data.percent, data.message);
-                addLogEntry(data.message);
-            });
-
-            restoreEventSource.addEventListener('phase', function(e) {
-                var data = JSON.parse(e.data);
-                addLogEntry('=== Fase: ' + data.message + ' ===');
-            });
-
-            restoreEventSource.addEventListener('progress', function(e) {
-                var data = JSON.parse(e.data);
-                updateProgress(data.percent, data.message);
-                if (data.step && data.step.indexOf('_progress') === -1) {
-                    addLogEntry(data.message);
-                }
-            });
-
-            restoreEventSource.addEventListener('complete', function(e) {
-                var data = JSON.parse(e.data);
-                updateProgress(100, data.message, 'success');
-                addLogEntry('✓ ' + data.message);
-                document.getElementById('restoreCompleteBtn').style.display = 'inline-block';
-                document.getElementById('modalSpinner').classList.remove('fa-spin');
-                document.getElementById('statusSpinner').classList.remove('fa-spin');
-                restoreEventSource.close();
-            });
-
-            restoreEventSource.addEventListener('error', function(e) {
-                var data = JSON.parse(e.data);
-                updateProgress(data.percent || 0, data.message, 'danger');
-                addLogEntry('✗ ERROR: ' + data.message);
-                document.getElementById('restoreErrorBtn').style.display = 'inline-block';
-                document.getElementById('modalSpinner').classList.remove('fa-spin');
-                document.getElementById('statusSpinner').classList.remove('fa-spin');
-                restoreEventSource.close();
-            });
-
-            restoreEventSource.onerror = function() {
-                updateProgress(0, 'Error de conexión con el servidor', 'danger');
-                addLogEntry('✗ Error de conexión');
-                document.getElementById('restoreErrorBtn').style.display = 'inline-block';
-                document.getElementById('modalSpinner').classList.remove('fa-spin');
-                document.getElementById('statusSpinner').classList.remove('fa-spin');
-                restoreEventSource.close();
-            };
-        }
-
-        function updateProgress(percent, message, type) {
-            var progressBar = document.getElementById('restoreProgressBar');
-            var statusMessage = document.getElementById('restoreStatusMessage');
-            var statusText = document.getElementById('restoreStatusText');
-
-            progressBar.style.width = percent + '%';
-            progressBar.setAttribute('aria-valuenow', percent);
-            progressBar.textContent = percent + '%';
-
-            statusText.textContent = message;
-
-            statusMessage.className = 'alert text-center';
-            progressBar.className = 'progress-bar progress-bar-striped active progress-bar-danger';
-
-            if (type === 'success') {
-                statusMessage.classList.add('alert-success');
-                progressBar.classList.remove('active');
-                progressBar.classList.remove('progress-bar-danger');
-                progressBar.classList.add('progress-bar-success');
-            } else if (type === 'danger') {
-                statusMessage.classList.add('alert-danger');
-            } else {
-                statusMessage.classList.add('alert-info');
-            }
-        }
-
-        function addLogEntry(message) {
-            restoreLog.push('[' + new Date().toLocaleTimeString() + '] ' + message);
-            var detailsDiv = document.getElementById('restoreDetails');
-            detailsDiv.innerHTML = restoreLog.map(function(entry) {
-                return '<div>' + entry + '</div>';
-            }).join('');
-            detailsDiv.scrollTop = detailsDiv.scrollHeight;
-        }
-
-        jQuery(document).ready(function() {
-            jQuery('.restore-btn').on('click', function(e) {
-                e.preventDefault();
-
-                var file = jQuery(this).data('file');
-                var type = jQuery(this).data('type') || 'complete';
-
-                if (file) {
-                    var confirmMessage = '¡ADVERTENCIA! Esto sobrescribirá TODOS los archivos y la base de datos. ¿Estás seguro?';
-                    if (type === 'database') {
-                        confirmMessage = '¿Restaurar SOLO la base de datos? Los archivos del sistema no se modificarán.';
-                    }
-
-                    if (confirm(confirmMessage)) {
-                        startRestore(file, type);
-                    }
-                } else {
-                    alert('Error: No se pudo determinar el archivo de backup');
-                }
-            });
-        });
-    })();
-    </script>
+    <?php
+    // RACC-07: el driver por pasos (`begin` + N x `chunk`), con el token en cada
+    // request. Sustituye a `new EventSource('process_restore.php?action=start…')`,
+    // que no llevaba token —el servidor lo rechazaba— y usaba el camino de un
+    // solo request, que en el host de producción no puede terminar.
+    echo recovery_view_restore_driver((string) $su_csrf_token);
+    ?>
 </body>
 
 </html>
