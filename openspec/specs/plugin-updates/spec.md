@@ -237,3 +237,216 @@ AND MUST NOT resolver versiones mixtas del grafo `require` (limitación conocida
 - WHEN cada plugin se resuelve por separado
 - THEN cada uno MUST resolver su propia versión compatible sin coordinar el grafo
 - AND el sistema MUST NOT intentar resolver el grafo completo.
+
+### PU-16 — Una actualización del core MUST NOT escribir el árbol de planificación del core en la instalación
+
+Después de una extracción correcta de una actualización del core, el actualizador MUST eliminar
+los directorios no operativos que acaba de escribir, a partir de una **lista blanca explícita**.
+La lista blanca MUST ser exactamente:
+
+`openspec/`, `docs/`, `tools/`, `extras/`, `odd/`, `dev-tools/`, `managed_context/`,
+`test_suite_analysis/`
+
+La eliminación MUST estar gobernada por esa lista literal — **nunca un comodín, nunca un patrón y
+nunca "todo lo que no esté en una lista de conservación"**. Una regla expresada como "borrar lo que
+no sea operativo" eliminaría el próximo directorio que añada el core antes de que nadie haya
+decidido que es prescindible; la lista blanca es la única forma que falla en cerrado.
+
+Los ocho nombres MUST declararse en un único lugar del plugin y ser consumidos por la eliminación,
+de modo que la lista y el código no puedan divergir.
+
+**La poda pertenece a `core_updater::extractZipSafe()`**
+
+La poda MUST ejecutarse dentro de `core_updater::extractZipSafe()`, inmediatamente después de que
+`$zip->extractTo($destination)` devuelva `true`, y antes de que el método retorne. MUST ser un
+único helper compartido, para que la segunda rama de origen quede cubierta por la misma lista y las
+mismas reglas: `core_updater::prepareCoreSource()` también devuelve un árbol completo cuando
+`cloneGitRepository()` tiene éxito, y un clon de `master` arrastra los mismos ocho directorios.
+Ambas ramas de origen MUST podarse antes de que `copyDirectorySelective()` escriba nada en la
+instalación. Una poda sólo en la rama ZIP dejaría la propiedad falsa en la rama que el actualizador
+prefiere cuando `git` está disponible. Se permite —sin exigirse— añadir los ocho nombres a
+`coreRootCopyExcludes()` como defensa en profundidad.
+
+**El directorio base es el que se copia, no el destino exterior.** Un archivo de rama se extrae en
+su propio directorio de nivel superior (`fs-framework-master/`), un nivel por debajo del
+`$destination` que recibe `extractZipSafe()`; `findFirstDirectory()` existe precisamente para
+encontrarlo, y es lo que devuelve `prepareCoreSource()` y lo que lee la copia. Podar sólo el
+`$destination` exterior no encontraría ninguno de los ocho, reportaría éxito y no cambiaría nada —
+una implementación vacua que satisface a un test descuidado y deja el árbol en su sitio. La
+propiedad exigida se enuncia sobre el directorio que se entrega a `copyDirectorySelective()`:
+después de que el actualizador prepare un origen, **ese** directorio no contiene ninguno de los
+ocho. Una implementación MUST por tanto resolver la raíz efectiva del origen y podar allí, y MUST
+cubrir las dos formas de la rama ZIP (un archivo de rama con su propio directorio de nivel superior,
+y un ZIP subido cuya raíz ya es el árbol del core).
+
+**La poda MUST NOT tocar datos operativos ni del usuario**
+
+La lista blanca es cerrada. Nada fuera de ella MUST eliminarse. En particular la poda MUST NOT
+tocar `vendor/`, `themes/`, `view/`, `plugins/`, `src/`, `base/`, `model/`, `controller/`,
+`images/`, `imgs/`, `tmp/`, `backups/`, `apk/`, `translations/`, `config/`, `config.php`,
+`.git/`, `.htaccess`, ni ningún directorio que contenga un backup creado por este plugin.
+
+El `openspec/` propio de un plugin vive en `plugins/<plugin>/openspec/` y por tanto **no está en
+riesgo**: cuelga de `plugins/`, que es un único segmento de ruta que nunca está en la lista blanca,
+y la eliminación nunca recursa en un directorio que no se le indicó. Los artefactos SDD de los
+plugins — incluido el `plugins/system_updater/openspec/` de este mismo change — MUST sobrevivir a
+toda actualización del core. Lo mismo se aplica a un directorio `docs/` o `tools/` anidado dentro de
+un plugin o un tema: sólo el directorio de **nivel superior** nombrado en la lista blanca es
+candidato.
+
+**La eliminación MUST estar confinada y MUST NOT seguir enlaces simbólicos hacia fuera**
+
+Cada eliminación MUST quedar confinada al directorio de staging que pobló
+`prepareCoreSource()` (`<root>/tmp/core_update` y su único hijo de nivel superior). La poda MUST NOT
+invocarse nunca sobre `$this->rootPath` (la instalación).
+
+Para cada nombre, el helper MUST resolver el candidato y rechazarlo salvo que resuelva **dentro** del
+directorio de staging: una ruta que resuelva fuera MUST rechazarse y reportarse, y nada fuera MUST
+eliminarse. La eliminación MUST NOT seguir un enlace simbólico fuera del directorio de staging y
+MUST NOT borrar a través de un enlace: un candidato que sea un enlace simbólico se rechaza o se
+desenlaza como enlace, nunca se atraviesa.
+
+**Idempotencia: un directorio que no se puede eliminar se reporta, no es fatal**
+
+Un directorio ausente **no es un error**: la poda es idempotente y ejecutarla dos veces sobre el
+mismo árbol MUST producir ningún error nuevo, ningún mensaje nuevo y ningún cambio de resultado.
+
+Un directorio que no se puede eliminar (permisos, un montaje de sólo lectura, un archivo bloqueado en
+el host) MUST reportarse **sin hacer fallar la actualización**. El operador MUST poder verlo: el
+resultado de la actualización MUST nombrar el directorio que sobrevivió, de modo que "el árbol sigue
+ahí" sea visible en el resultado y no se infiera desde el servidor web. Una poda parcial MUST dejar
+que se intenten los nombres restantes, y la actualización MUST completarse con `success` sin cambios
+por el resultado de la poda.
+
+**La poda sólo se ejecuta tras una extracción correcta**
+
+La poda MUST ejecutarse sólo después de una extracción **correcta** (`extractTo()` devolvió `true`,
+o el directorio del clon existe y está completo). MUST NOT ejecutarse sobre una extracción fallida,
+rechazada o parcial: una extracción fallida ya se reporta y se limpia como una unidad, y borrar de un
+árbol a medio escribir convierte un fallo en un segundo fallo no reportado.
+
+**Dos puntos de aplicación, una sola decisión — y un test que lo demuestre**
+
+La lista blanca del plugin y el bloque de denegación de `nginx-sample.conf` del core son **dos
+puntos de aplicación de una sola decisión**: el sistema de archivos (no escribirlo nunca) y el borde
+(negarse a servirlo). MUST NOT divergir. Un nombre añadido a uno y no al otro es un defecto de este
+requisito, en cualquiera de las dos direcciones.
+
+Esa divergencia MUST detectarla un test, no la revisión. El test MUST afirmar que la lista blanca del
+plugin es igual al conjunto de nombres de directorio de nivel superior que la muestra del core deniega
+en su bloque "Planning, documentation and analysis trees" — los ocho nombres anteriores y ningún
+otro. La comparación MUST NOT absorber las demás denegaciones de la muestra (`/vendor/`, `/tmp/`,
+`/backups/`, `/.git/`) ni sus denegaciones a nivel de archivo: son las rutas operativas y de operador
+que este requisito MUST NOT tocar, y tratarlas como miembros del conjunto ensancharía la lista blanca
+en silencio.
+
+La muestra del core vive en `../../nginx-sample.conf` respecto del directorio del plugin
+(`plugins/system_updater` → la raíz del repositorio del core), que es `dirname(__DIR__, 3)` desde un
+archivo bajo `plugins/system_updater/tests/`. El test PUEDE leer ese archivo. Como este plugin también
+se distribuye como repositorio independiente, donde la muestra del core no existe, el test MUST
+degradar con elegancia cuando falte — y MUST decirlo en lugar de pasar de forma vacua:
+
+- la afirmación **siempre ejecutable** MUST ejecutarse igualmente: fija la lista blanca a los ocho
+  nombres literales que este requisito enuncia, de modo que una eliminación o adición silenciosa es
+  RED con y sin el repositorio del core presente;
+- la afirmación de divergencia MUST omitirse de forma **visible**, con un mensaje que nombre la ruta
+  resuelta que buscó y declare que la comparación de las dos listas **no** se ejecutó. Una suite en
+  verde con un skip no advertido es el pase vacuo que esta cláusula existe para prohibir.
+
+**No sustituye al borde, ni es la misma decisión que `coreRootCopyExcludes()`**
+
+Este requisito no exige a ningún operador desplegar la muestra de nginx, configurar un proxy inverso
+ni cambiar un servidor. Elimina la necesidad de que esa decisión sea la *única*.
+
+Añadir los ocho nombres a `coreRootCopyExcludes()` PUEDE hacerse como defensa en profundidad, pero
+MUST NOT ser el único mecanismo: la exclusión en la copia por sí sola deja igualmente el árbol
+completo dentro del webroot, bajo `tmp/core_update`, durante toda la actualización, porque ese
+directorio sólo se elimina después de la copia.
+
+#### Scenario: una actualización nueva elimina los ocho y deja intactos los directorios operativos
+
+- GIVEN un directorio de staging que contiene los ocho directorios de planificación más `vendor/`,
+  `themes/`, `view/`, `plugins/`, `src/`, `base/`, `model/`, `controller/`, `images/`, `imgs/`,
+  `tmp/`, `backups/`, `config.php` y `.htaccess` — en las dos formas: directamente en la raíz (un ZIP
+  subido) y un nivel por debajo de `<repo>-<branch>/` (un archivo de rama)
+- WHEN una actualización del core extrae correctamente
+- THEN ninguno de los ocho directorios de planificación existe en el directorio desde el que la
+  actualización copia después
+- AND toda entrada operativa y de datos de usuario enumerada arriba sigue presente y sin modificar
+- AND la raíz de la instalación resultante no contiene ninguno de los ocho
+
+#### Scenario: una segunda actualización no hace nada
+
+- GIVEN un directorio de staging del que los ocho directorios ya se eliminaron
+- WHEN la poda se ejecuta otra vez
+- THEN no elimina nada
+- AND no registra ningún error ni ningún mensaje
+- AND el resultado de la actualización es idéntico al de la primera ejecución
+
+#### Scenario: un directorio ausente no hace fallar la actualización
+
+- GIVEN un árbol de origen que nunca contuvo uno de los ocho nombres
+- WHEN la poda se ejecuta
+- THEN el nombre ausente no es un error
+- AND la actualización se completa con `success` verdadero
+
+#### Scenario: un directorio que no se puede eliminar se reporta y la actualización se completa
+
+- GIVEN que uno de los ocho directorios no se puede eliminar
+- WHEN la actualización termina
+- THEN el resultado de la actualización nombra ese directorio como no eliminado
+- AND la actualización se completa igualmente con `success` verdadero
+- AND el directorio superviviente es el único que el resultado nombra
+
+#### Scenario: una ruta que resuelve fuera del staging se rechaza
+
+- GIVEN un candidato dentro del directorio de staging que resuelve fuera de él (un enlace simbólico
+  que apunta fuera del árbol, o una ruta resuelta que no comparte el prefijo del staging)
+- WHEN la poda lo evalúa
+- THEN se rechaza y se reporta
+- AND nada fuera del directorio de staging se elimina
+- AND el enlace simbólico no se atraviesa
+
+#### Scenario: los artefactos SDD de los plugins sobreviven
+
+- GIVEN una instalación con `plugins/system_updater/openspec/` y el `plugins/<name>/openspec/` de
+  otro plugin
+- WHEN una actualización del core termina
+- THEN ambos directorios y sus archivos siguen presentes
+
+#### Scenario: una extracción fallida nunca se poda
+
+- GIVEN una extracción que devuelve `false` (un nombre de entrada rechazado, un archivo ilegible, un
+  `ZipArchive` ausente)
+- WHEN la actualización aborta
+- THEN la poda no se ejecutó
+- AND ningún directorio de planificación se eliminó del árbol parcial
+- AND el fallo reportado es el fallo de extracción, sin cambios
+
+#### Scenario: la rama de clonado por git también se poda, y la raíz de la instalación nunca
+
+- GIVEN un origen preparado por `prepareCoreSource()` mediante `cloneGitRepository()`
+- WHEN la actualización continúa hacia la copia
+- THEN los ocho directorios se eliminan del directorio del clon
+- AND la poda nunca se invocó sobre la raíz de la instalación
+- AND un `openspec/` preexistente en la raíz de la instalación no fue creado ni eliminado por la poda
+
+#### Scenario: la lista blanca y la muestra del core no pueden divergir
+
+- GIVEN la lista blanca declarada por el plugin
+- WHEN el test enumera los nombres de directorio de nivel superior denegados en el bloque de
+  planificación de la muestra del core
+- THEN los dos conjuntos son idénticos y contienen los ocho nombres anteriores
+- AND cuando la muestra del core está ausente, la afirmación de los ocho nombres se ejecuta igualmente
+  y la comparación se reporta como omitida con la ruta resuelta que buscó
+
+**Consecuencias registradas (nombradas, no ocultas)**
+
+| # | Consecuencia | Por qué se acepta / qué significa |
+|---|---|---|
+| 1 | `docs/` y `extras/` desaparecen de una instalación en la **primera** actualización posterior a este cambio; los otros seis sólo si nunca se escribieron | `cleanupRootDirectories()` ya borra `docs/` y `extras/` de la raíz antes de la copia y hoy la copia los restaura; una vez que el origen ya no los lleva, la restauración no puede ocurrir |
+| 2 | Las instalaciones que ya recibieron el árbol conservan los seis directorios restantes hasta que un operador los elimine | Este requisito no elimina nada que no acabe de escribir: la poda está confinada al directorio de staging y tiene prohibido explícitamente ejecutarse contra la raíz de la instalación. Esas rutas siguen cubiertas por la denegación de borde (`nginx-sample.conf`), que es el segundo punto de aplicación |
+| 3 | Un desarrollador que trabaja sobre un **checkout git** y ejecuta el actualizador pierde estos directorios del árbol de trabajo | El actualizador ya borra `docs/`, `extras/`, `vendor/` y más de un checkout (`cleanupRootDirectories()`); la ruta de actualización no es la ruta de desarrollo. Un `git checkout -- .` los restaura y ningún comportamiento operativo depende de ellos |
+| 4 | `tools/phpstan-plugins.php` y `dev-tools/` dejan de estar presentes en una instalación actualizada | Son herramientas de desarrollo propiedad del core que se invocan con `composer phpstan` / `composer phpstan:plugins`, comandos de desarrollo, no operativos. La puerta de PHPStan no se ve afectada porque se ejecuta en un clon, no en una instalación actualizada |
+| 5 | Las instalaciones ZIP de plugins (`plugin_downloader::extractZipSafe()` y `updater_manager::extractZipSafe()`) **no** se tocan | Extraen dentro de `plugins/`, así que el `openspec/` propio de un plugin aterriza bajo `plugins/<name>/` — el directorio que este requisito protege. Extender la poda a ellos eliminaría artefactos SDD de plugins |
+| 6 | Un árbol de origen de terceros o hecho a mano (un ZIP subido por el operador) se poda con la misma lista | La ruta de subida (`prepareCoreSource()`) pasa por el mismo `extractZipSafe()`. Un ZIP de proveedor que legítimamente incluya un directorio `docs/` lo pierde; es la misma decisión aplicada a todo origen |

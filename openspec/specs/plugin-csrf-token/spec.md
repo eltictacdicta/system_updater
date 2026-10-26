@@ -102,6 +102,74 @@ Rewritten `csrf_guard.php` MUST validate via `system_updater_csrf_validate()`. M
 - THEN controller forms use `fsc.csrf_field_html` (core token)
 - AND JavaScript SSE URLs use `su_csrf_token` from plugin meta tag
 
+### Requirement: A CSRF Token Is Never an Authentication Credential
+
+`CSRF-01`. No value validated by this capability MUST confer, extend or restore an authenticated
+identity. A valid `su_csrf_token` proves only *"this request reached a page that rendered the
+token, and that page was reached through one of the two authorized gates"*. It MUST NOT be
+accepted as evidence that a user is logged in, and it MUST NOT substitute for a session
+written by a real login.
+
+The session guard of the standalone process scripts MUST NOT consult framework CSRF state
+for any purpose: not `CsrfManager`, not `_csrf`, not `_token`, not `X-CSRF-Token`. This
+also removes the last authorization decision in this plugin that depended on the core's
+session store, which the capability's Token Storage requirement already keeps the plugin
+out of.
+
+This requirement does not weaken `su_csrf_token`. Its security property is **provenance**,
+and provenance is **two authorized minting points, each behind its own honest gate**: the
+`#[AdminOnly]` `admin_updater` page, gated by the attribute plus an authenticated
+administrator session, and `recovery.php`, gated by the A2 per-installation secret compared
+constant-time plus an administrator session in the console (`RACC-07`). Storage in
+`SU_SESS`, format, 4 h TTL and `hash_equals()` comparison are unchanged, and the token
+remains the only authenticator for `start`/`begin`/`chunk`. Minting is authorized from
+either gate and from nowhere else.
+
+*Recorded reversal.* An earlier revision of this delta said "only a rendered `#[AdminOnly]`
+page mints it" and "single minting point". The product owner reversed that framing; a
+second gated point trades one strong provenance for another equally strong one. Any contract
+test asserting that no second point exists MUST be rewritten to assert that only these two
+points exist, each behind its own gate.
+
+#### Scenario: A token does not open a session-guarded endpoint
+
+- GIVEN a request carrying a valid `su_csrf_token` and no login-written session
+- WHEN a session-guarded action is requested (`download_backup.php`, or any `process_*`
+  action other than `start`/`begin`/`chunk`)
+- THEN the request is refused
+- AND the refusal comes from the session guard, not from the token check
+
+#### Scenario: A framework token is not a session either
+
+- GIVEN a request carrying `_csrf_token`, `_token` or `X-CSRF-Token` obtained from a public
+  page
+- WHEN any guarded action is requested
+- THEN the request is refused
+- AND no core CSRF manager was consulted
+
+#### Scenario: The plugin token keeps its own contract
+
+- GIVEN a valid `su_csrf_token` for the current `SU_SESS` session
+- WHEN `action=start` is requested
+- THEN it is accepted exactly as before this change
+- AND its storage, TTL and comparison semantics are unchanged
+
+#### Scenario: Only the two authorized minting points exist
+
+- GIVEN the production call graph after this change
+- WHEN every HTTP entry point able to reach the minting helpers is enumerated
+- THEN the set is exactly two: a render of the `#[AdminOnly]` `admin_updater` page, and
+  `recovery.php`'s render after the secret gate and after administrator authentication
+- AND no `process_*` script mints a token
+- AND no third entry point mints one
+
+#### Scenario: A recovery-minted token is not an identity either
+
+- GIVEN a token minted by `recovery.php` after both of its gates
+- WHEN it is presented with no login-written session to a session-guarded action
+- THEN the request is refused with the guard's uniform 401 (`AUTH-04`)
+- AND the token conferred no identity, exactly as an admin-minted token would not
+
 ## Security Constraints
 
 - MUST use `hash_equals()` for all comparisons (timing-safe)

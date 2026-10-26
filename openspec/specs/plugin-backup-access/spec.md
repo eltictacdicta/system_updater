@@ -90,6 +90,12 @@ session and a valid CSRF token. It MUST stream the requested file with
 `Content-Disposition: attachment` and `Content-Type: application/octet-stream`,
 and MUST log every download (user, file, size, IP, timestamp).
 
+The endpoint MUST refuse on the **session guard** before the plugin-token check, so an
+anonymous caller always sees the documented 401 and never a 403. A CSRF token of any kind —
+framework or plugin — MUST NOT convert an anonymous request into an authenticated one, and
+a structurally valid session for a **non-administrator** MUST be refused with the same 401
+and the same body as the anonymous case.
+
 #### Scenario: Admin downloads a real backup
 
 - GIVEN an authenticated admin session and a valid CSRF token
@@ -110,6 +116,44 @@ and MUST log every download (user, file, size, IP, timestamp).
 - WHEN the endpoint is called
 - THEN HTTP 403 with a JSON error body
 - AND the failure is logged
+
+#### Scenario: Anonymous request carrying a self-minted framework token is 401
+
+- GIVEN no session, and `_csrf_token` (or `_token`, or `X-CSRF-Token`) minted for the
+  requester's own anonymous session by the public login page
+- WHEN `download_backup.php?file=<valid name>` is called
+- THEN HTTP 401 with a JSON error body
+- AND the response is not a 403
+- AND the plugin-token check was never reached
+
+*(Previously unasserted: this request returned 403, which proved the guard had already
+passed.)*
+
+#### Scenario: Authenticated non-administrator is 401 with the anonymous body
+
+- GIVEN a session written by a real login for a user whose `admin` flag is false
+- AND a valid `su_csrf_token` for that session
+- WHEN the endpoint is called
+- THEN HTTP 401
+- AND the body is byte-identical to the anonymous case
+- AND no file stream is emitted
+
+#### Scenario: The guard runs before the token check
+
+- GIVEN an anonymous request carrying a `su_csrf_token` that is valid in some session
+- WHEN the endpoint is called
+- THEN the refusal is produced by the session guard
+- AND the order is asserted by instrumenting the guard's verdict, not inferred from the
+  status code alone
+
+#### Scenario: A genuine administrator is unaffected
+
+- GIVEN an administrator session written by the application login and a valid
+  `su_csrf_token`
+- WHEN the endpoint is called with a legitimate filename
+- THEN HTTP 200 with the file stream, `Content-Disposition: attachment` and the correct
+  `Content-Length`
+- AND a log line is appended
 
 ### Requirement: Path Traversal Protection
 
@@ -199,6 +243,13 @@ request restore can never complete.
 The restore state MUST be persisted so an interrupted restore resumes from the
 last executed statement instead of restarting the import.
 
+The restore rewrites the application database, `fs_users` included. A `progress`/`status`
+poll served during that window re-reads `fs_users` to verify the administrator flag
+(`AUTH-03`, fail-closed). The polling client MUST therefore treat a **transient** denial
+during an in-progress restore as retryable: it MUST retry with backoff and MUST NOT present
+it as a failed restore, and it MUST NOT cancel or abort the server-side restore (which
+continues under `ignore_user_abort`).
+
 #### Scenario: begin arms state, heartbeat and maintenance
 
 - GIVEN an authenticated admin with a valid plugin CSRF token
@@ -228,6 +279,21 @@ last executed statement instead of restarting the import.
 
 - GIVEN a persisted restore state
 - THEN it contains no database password or other secret
+
+#### Scenario: A transient denial during restore does not surface as failure
+
+- GIVEN an in-progress stepped restore whose `fs_users` table is momentarily unavailable
+- WHEN a `progress` poll receives the guard's denial
+- THEN the client retries with backoff
+- AND the restore modal keeps showing progress, not an error
+- AND no abort request is issued
+
+#### Scenario: A permanent denial still surfaces
+
+- GIVEN a session that is no longer valid after the restore finished
+- WHEN a poll is issued and keeps being denied after the retry budget
+- THEN the UI reports that the session must be re-established
+- AND it does not claim a successful restore on unverified evidence
 
 ### Requirement: UI Download Action
 
