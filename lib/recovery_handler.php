@@ -331,7 +331,11 @@ function recovery_handler_authenticate(array $submission, array $seams = []): ar
         'outcome' => $result['outcome'],
         'phase' => $result['phase'],
         'message' => recovery_policy_failure_message($result['phase'], $shared),
-        'row' => $row,
+        // The row is handed back because the console renders the nick from it,
+        // and nothing else: the stored digest and the salt stay inside this
+        // function. There is no caller that needs them, and a value with no
+        // caller is a value that eventually ends up in a log line or a template.
+        'row' => $row === null ? null : array_diff_key($row, ['password' => true, 'salt' => true]),
         'identity' => $identity,
         'steps' => $steps,
     ];

@@ -547,6 +547,21 @@ final class RecoveryHandlerTest extends TestCase
         );
     }
 
+    #[Test]
+    public function theRowsCredentialMaterialNeverLeavesTheHandler(): void
+    {
+        $counts = [];
+        $seams = self::seams(['row' => self::row(['salt' => 'per-row-salt'])], $counts);
+        $seams['verifier'] = self::countingVerifier($counts);
+
+        $result = recovery_handler_authenticate(self::submission(), $seams);
+
+        $this->assertSame('ok', $result['outcome']);
+        $this->assertArrayNotHasKey('password', (array) $result['row'], 'the console keeps the row for its nick, not its hash');
+        $this->assertArrayNotHasKey('salt', (array) $result['row']);
+        $this->assertSame('admin', $result['row']['nick']);
+    }
+
     private function codeWithoutComments(string $source): string
     {
         $code = '';
