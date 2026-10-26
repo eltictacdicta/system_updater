@@ -272,6 +272,7 @@ final class RecoveryFallbackLimiterTest extends TestCase
             'token_valid' => true,
             'ip_banned' => false,
             'throttled' => $consult['throttled'],
+            'nick' => 'admin',
             'row' => ['nick' => 'admin', 'password' => 'bcrypt', 'admin' => 1],
             'plain' => 'correct',
         ], function (?array $row, string $plain) use (&$calls): string {

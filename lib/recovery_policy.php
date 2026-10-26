@@ -29,12 +29,32 @@ declare(strict_types=1);
  * The order is the requirement
  * ----------------------------
  * REC-02 and REC-03 are ordering requirements wearing the costume of counting
- * rules. {@see recovery_policy_evaluate()} therefore encodes the whole order in
- * one place - form token, then ban bucket, then throttle, then credential - and
- * short-circuits: a closed gate returns before the verdict is called, so no
- * later step of the same request can reach credential evaluation. The console
- * still owns the *reads* (W7 wires them); what this file guarantees is that a
- * fact which closed a gate can never be followed by an evaluation.
+ * rules, and REC-04's budget is a concurrency requirement wearing the costume of
+ * a threshold. {@see recovery_policy_evaluate()} therefore encodes the whole
+ * order in one place - form token, submission, ban bucket, budget reservation,
+ * credential - and short-circuits: a closed gate returns before the verdict is
+ * called, so no later step of the same request can reach credential evaluation.
+ * The console still owns the *reads* (W7 wires them); what this file guarantees
+ * is that a fact which closed a gate can never be followed by an evaluation.
+ *
+ * Why the budget is reserved and not merely counted
+ * -------------------------------------------------
+ * A counter read now and incremented later is not a limit. N simultaneous
+ * submissions for one nick all read a count below the threshold, all reach
+ * `password_verify()`, and the ceiling becomes a function of how many requests
+ * an attacker can open - which is precisely the damaged-core state, where this
+ * limiter is the only defence. {@see recovery_policy_fallback_reserve()} makes
+ * the verdict and the increment one `flock()`ed decision, and
+ * {@see recovery_policy_evaluate()} calls it *before* the credential and
+ * releases it after a success. The reservation is the only thing in this file
+ * that writes, and it writes because a check separated from its act is the
+ * defect it exists to remove.
+ *
+ * The shared mode cannot be fixed here: `LoginThrottle` publishes
+ * `isThrottled()` and `recordFailure()` as two calls, and closing that race is a
+ * core change this slice is forbidden to make. So the console passes a
+ * reservation for the fallback bucket only, and the asymmetry is stated rather
+ * than hidden.
  *
  * Dependency contract (RACC-01)
  * -----------------------------
@@ -63,6 +83,16 @@ const RECOVERY_POLICY_OUTCOME_DENY = 'deny';
 
 /** The form token was missing, empty or wrong (REC-01, REC-02). */
 const RECOVERY_POLICY_PHASE_TOKEN_REJECTED = 'token_rejected';
+
+/**
+ * The submission carried no nick or no password (LTI-03, REC-02).
+ *
+ * A partially filled form is a browser or a script repeating a request, not a
+ * guess, and charging it would let an empty POST lock an administrator out. The
+ * phase exists so that "we never reached the budget" is a decision this module
+ * makes, not a property of the console remembering to validate first.
+ */
+const RECOVERY_POLICY_PHASE_INPUT_REJECTED = 'input_rejected';
 
 /** The client address is banned in the bucket the primary login writes (REC-03). */
 const RECOVERY_POLICY_PHASE_BANNED = 'banned';
@@ -103,9 +133,9 @@ function recovery_policy_shared_throttle_available(): bool
  * REC-02: does this phase record a failed attempt?
  *
  * Only a submission that reached credential evaluation and failed. Everything
- * else - a rejected token, a banned address, a throttled nick, a success - is
- * explicitly `false`, and the list is exhaustive over the phase vocabulary, so
- * a new phase cannot inherit a count by accident.
+ * else - a rejected token, a partially filled form, a banned address, a
+ * throttled nick, a success - is explicitly `false`, and the list is exhaustive
+ * over the phase vocabulary, so a new phase cannot inherit a count by accident.
  */
 function recovery_policy_should_count(string $phase): bool
 {
@@ -542,6 +572,13 @@ function recovery_policy_counter_verdict(array $state, string $nick, string $ip,
  * Read-only: a consult must not create the file, because a request that was
  * refused before evaluation (REC-02) has to leave the filesystem untouched.
  *
+ * **A consult is not a limit.** Reading here and incrementing in
+ * {@see recovery_policy_fallback_record()} is two `flock()`s, and N submissions
+ * that read in between them all pass. Anything that gates a credential must use
+ * {@see recovery_policy_fallback_reserve()}, which decides and increments under
+ * one lock. This function remains for what it honestly is: an observation, and
+ * the read the console uses to render "how many attempts are left".
+ *
  * @return array{throttled: bool, attempts: int, account_attempts: int}
  */
 function recovery_policy_fallback_count(string $path, string $nick, string $ip, int $now): array
@@ -550,21 +587,98 @@ function recovery_policy_fallback_count(string $path, string $nick, string $ip, 
 }
 
 /**
+ * REC-04's budget as one indivisible decision.
+ *
+ * Under a single `flock()`: read the counter, prune it, ask
+ * {@see recovery_policy_counter_verdict()} for the verdict and - only when the
+ * verdict admits the submission - increment both dimensions before releasing the
+ * lock. Nothing can be interleaved between the question and the answer, which is
+ * what makes the ceiling a property of the file rather than of the attacker's
+ * connection pool.
+ *
+ * `throttled` answers "was **this** submission refused", not "is the budget now
+ * closed": the sixth reservation is admitted and reports six, and the seventh is
+ * the one that is refused. `attempts` / `account_attempts` are the counts after
+ * an admission and the counts as found on a refusal.
+ *
+ * A counter that cannot be opened or locked answers `reserved` and `throttled`
+ * both `false`: the submission proceeds and the console still owes a count that
+ * will also fail. That is the fail-open direction `count()` takes when it cannot
+ * read, the direction `LoginThrottle` takes when its cache is unavailable, and
+ * the direction this console must take rather than locking every operator out of
+ * a damaged install.
+ *
+ * @return array{reserved: bool, throttled: bool, attempts: int, account_attempts: int}
+ */
+function recovery_policy_fallback_reserve(string $path, string $nick, string $ip, int $now): array
+{
+    $result = recovery_policy_fallback_transact(
+        $path,
+        $now,
+        static function (array $state) use ($nick, $ip, $now): array {
+            $verdict = recovery_policy_counter_verdict($state, $nick, $ip, $now);
+            if ($verdict['throttled']) {
+                return [$state, false];
+            }
+
+            foreach (recovery_policy_counter_dimensions($nick, $ip) as $key => $window) {
+                $state[$key] = [
+                    'count' => recovery_policy_counter_entry($state, $key, $now, $window) + 1,
+                    'updated' => $now,
+                ];
+            }
+
+            return [$state, true];
+        }
+    );
+
+    if ($result === null) {
+        return ['reserved' => false, 'throttled' => false, 'attempts' => 0, 'account_attempts' => 0];
+    }
+
+    $verdict = recovery_policy_counter_verdict($result['state'], $nick, $ip, $now);
+
+    return [
+        'reserved' => $result['written'],
+        'throttled' => !$result['written'],
+        'attempts' => $verdict['attempts'],
+        'account_attempts' => $verdict['account_attempts'],
+    ];
+}
+
+/**
+ * The two dimensions REC-04 counts, and the window each one is measured over.
+ *
+ * Declared once so the reservation and the plain increment cannot disagree about
+ * which dimensions exist - an attempt that counted for the address but not for
+ * the account would let the account budget be evaded by rotating addresses,
+ * which is the case that dimension exists for.
+ *
+ * @return array<string, int> counter key => window in seconds
+ */
+function recovery_policy_counter_dimensions(string $nick, string $ip): array
+{
+    return [
+        recovery_policy_counter_key($nick, $ip, false) => RECOVERY_POLICY_THROTTLE_WINDOW,
+        recovery_policy_counter_key($nick, $ip, true) => RECOVERY_POLICY_ACCOUNT_WINDOW,
+    ];
+}
+
+/**
  * Record one failed attempt in both dimensions.
  *
  * Both, and atomically: an attempt that counted for the address but not for the
  * account would let the account budget be evaded by rotating addresses, which is
  * the case the account dimension exists for.
+ *
+ * Unconditional, unlike {@see recovery_policy_fallback_reserve()}: this is the
+ * write that follows a decision already taken. A caller that has not taken one
+ * must reserve instead.
  */
 function recovery_policy_fallback_record(string $path, string $nick, string $ip, int $now): bool
 {
     return recovery_policy_fallback_mutate($path, static function (array $state) use ($nick, $ip, $now): array {
-        $dimensions = [
-            recovery_policy_counter_key($nick, $ip, false) => RECOVERY_POLICY_THROTTLE_WINDOW,
-            recovery_policy_counter_key($nick, $ip, true) => RECOVERY_POLICY_ACCOUNT_WINDOW,
-        ];
-
-        foreach ($dimensions as $key => $window) {
+        foreach (recovery_policy_counter_dimensions($nick, $ip) as $key => $window) {
             $state[$key] = [
                 'count' => recovery_policy_counter_entry($state, $key, $now, $window) + 1,
                 'updated' => $now,
@@ -591,7 +705,7 @@ function recovery_policy_fallback_clear(string $path, string $nick, string $ip):
 }
 
 /**
- * The one writer of the counter file: `flock()`ed read-modify-write, pruned.
+ * The one place that opens the counter file, takes its lock and rewrites it.
  *
  * Pruning on every write is what keeps the file bounded without a cron job: an
  * entry past its window carries no information, and leaving it would let a busy
@@ -599,28 +713,33 @@ function recovery_policy_fallback_clear(string $path, string $nick, string $ip):
  * write is not about expiry (a clear) and prunes nothing, so an injected clock
  * never has to be invented for it.
  *
- * A failure (no directory, no permission, a lock that cannot be taken) returns
- * `false` and leaves the previous content alone. The throttle then fails open
- * for that submission - the direction the spec's failure-mode inventory records
- * for the shared throttle too, and strictly better than the shipped console,
- * which counts nothing at all.
+ * The decision belongs to `$transact`, which runs **inside** the lock: it
+ * receives the pruned state and answers `[state, writeIt]`. That shape is what
+ * lets a refusal be a refusal without a write, and it is why the reservation and
+ * the plain increment share one implementation instead of two locks that could
+ * be interleaved.
  *
- * @param callable(array<string, array{count: int, updated: int}>): array<string, array{count: int, updated: int}> $mutator
+ * A failure (no directory, no permission, a lock that cannot be taken, an
+ * encoding error) returns `null` and leaves the previous content alone.
+ *
+ * @param callable(array<string, array{count: int, updated: int}>): array{0: array<string, array{count: int, updated: int}>, 1: bool} $transact
+ *
+ * @return array{state: array<string, array{count: int, updated: int}>, written: bool}|null
  */
-function recovery_policy_fallback_mutate(string $path, callable $mutator, ?int $now): bool
+function recovery_policy_fallback_transact(string $path, ?int $now, callable $transact): ?array
 {
     if ($path === '') {
-        return false;
+        return null;
     }
 
     $handle = @fopen($path, 'c+b');
     if ($handle === false) {
-        return false;
+        return null;
     }
 
     try {
         if (!flock($handle, LOCK_EX)) {
-            return false;
+            return null;
         }
 
         $state = recovery_policy_fallback_decode(stream_get_contents($handle));
@@ -628,26 +747,51 @@ function recovery_policy_fallback_mutate(string $path, callable $mutator, ?int $
             $state = recovery_policy_fallback_prune($state, $now);
         }
 
-        $state = $mutator($state);
+        [$state, $write] = $transact($state);
+
+        if (!$write) {
+            return ['state' => $state, 'written' => false];
+        }
+
         $encoded = json_encode($state, JSON_UNESCAPED_SLASHES);
 
         if (!is_string($encoded)) {
-            return false;
+            return null;
         }
 
         rewind($handle);
         if (!ftruncate($handle, 0)) {
-            return false;
+            return null;
         }
 
         $written = fwrite($handle, $encoded . "\n");
         fflush($handle);
 
-        return $written !== false;
+        if ($written === false) {
+            return null;
+        }
+
+        return ['state' => $state, 'written' => true];
     } finally {
         flock($handle, LOCK_UN);
         fclose($handle);
     }
+}
+
+/**
+ * {@see recovery_policy_fallback_transact()} for the callers that always write.
+ *
+ * @param callable(array<string, array{count: int, updated: int}>): array<string, array{count: int, updated: int}> $mutator
+ */
+function recovery_policy_fallback_mutate(string $path, callable $mutator, ?int $now): bool
+{
+    $result = recovery_policy_fallback_transact(
+        $path,
+        $now,
+        static fn (array $state): array => [$mutator($state), true]
+    );
+
+    return $result !== null && $result['written'];
 }
 
 /**
@@ -771,61 +915,171 @@ function recovery_policy_failure_message(string $phase, ?bool $sharedThrottleAva
 }
 
 /**
+ * Whether a submission carries something to evaluate at all (LTI-03, REC-02).
+ *
+ * Two sources, and the second is why a caller cannot lose the rule by
+ * forgetting: `input_valid` lets the console add its own criteria, and an empty
+ * nick or an empty password closes the gate on its own, because an empty form is
+ * a repeat, never a guess.
+ *
+ * @param array<string, mixed> $facts
+ */
+function recovery_policy_input_is_valid(array $facts): bool
+{
+    if (($facts['input_valid'] ?? true) !== true) {
+        return false;
+    }
+
+    $nick = $facts['nick'] ?? null;
+    $plain = $facts['plain'] ?? null;
+
+    return is_string($nick) && $nick !== '' && is_string($plain) && $plain !== '';
+}
+
+/**
+ * The gates that close before any budget is consulted, in their order.
+ *
+ *   1. REC-01's token verdict - authoritative and first, so a cross-site POST
+ *      can neither evaluate a credential nor burn a budget;
+ *   2. the submission itself - an empty form counts nothing (LTI-03);
+ *   3. REC-03's ban read.
+ *
+ * `null` means "proceed". Everything before a reservation is here, so the
+ * reservation cannot happen after a gate that has already closed, and every
+ * phase this function can return is one that {@see recovery_policy_should_count()}
+ * refuses by name.
+ *
+ * @param array<string, mixed> $facts
+ */
+function recovery_policy_precheck(array $facts): ?string
+{
+    if (($facts['token_valid'] ?? false) !== true) {
+        return RECOVERY_POLICY_PHASE_TOKEN_REJECTED;
+    }
+
+    if (!recovery_policy_input_is_valid($facts)) {
+        return RECOVERY_POLICY_PHASE_INPUT_REJECTED;
+    }
+
+    if (($facts['ip_banned'] ?? false) === true) {
+        return RECOVERY_POLICY_PHASE_BANNED;
+    }
+
+    return null;
+}
+
+/**
  * The console's whole credential decision, in the order the requirements state.
  *
- * Gates, first to last:
+ * Steps, first to last, every one of them a boundary between two kinds of work:
  *
- *   1. `token_valid` - REC-01's verdict is authoritative and comes first, so a
- *      cross-site POST can neither evaluate a credential nor burn a budget;
- *   2. `ip_banned` - REC-03's read of the bucket the primary login writes;
- *   3. `throttled` - REC-04's consult of the budget;
- *   4. `$verdict` - the credential itself, called **exactly once** and only when
- *      all three gates passed.
+ *   1. **token verdict** - {@see recovery_policy_precheck()} (REC-01). A
+ *      rejected token records nothing and evaluates nothing (REC-02);
+ *   2. **submission** - the same ladder, so an empty nick or password never
+ *      reaches the budget (LTI-03);
+ *   3. **ban check** - REC-03's read of the bucket the primary login writes,
+ *      still read-only and still before any counter moves;
+ *   4. **reservation** - when the console supplies a `$reserve`, this is where
+ *      the budget is charged, atomically, *before* the credential: the decision
+ *      and the increment are one `flock()` (REC-04). A refusal answers
+ *      `throttled` and the verdict is never reached. When no `$reserve` is
+ *      supplied - the shared mode, whose core API is check-then-act - the
+ *      `throttled` fact is honoured instead, exactly as before;
+ *   5. **credential** - the verdict, called exactly once (REC-05);
+ *   6. **release** - a success calls `$release` when a reservation stands, so a
+ *      legitimate login leaves no charge behind (REC-04's success-clear).
  *
  * The facts are the console's job (W7); this function is the authority for what
- * a closed gate means. A missing `token_valid` key is a rejected token: the
- * console must pass `true` explicitly, never by omission.
+ * a closed gate means and for the order in which the gates are consulted. A
+ * missing `token_valid` key is a rejected token: the console must pass `true`
+ * explicitly, never by omission.
  *
  * `$verdict` is `fn (?array $row, string $plain): string`. W7 passes
  * {@see recovery_policy_verify_credentials()} bound with its verifier, which is
  * where REC-05's "exactly one `password_verify()`" is measured; the seam here is
  * what makes REC-02's "no evaluation at all" measurable without a database.
  *
+ * `$reserve` is `fn (string $nick, string $ip, int $now): array` answering the
+ * shape of {@see recovery_policy_fallback_reserve()}, and `$release` is
+ * `fn (string $nick, string $ip): bool` bound to
+ * {@see recovery_policy_fallback_clear()}. Both are optional and both are only
+ * ever called after every precheck gate passed.
+ *
+ * Returned flags:
+ *
+ *   - `record_failure` - the console still owes a count. `false` once the
+ *     pipeline charged it itself, so a reservation is never counted twice;
+ *   - `clear` - REC-04's success-clear of the bucket the submission was measured
+ *     against. When `reserved` is true the `$release` seam has already applied
+ *     it for the fallback bucket, so a second clear is a harmless no-op there;
+ *     the shared bucket still needs `LoginThrottle::clear()`;
+ *   - `reserved` - this submission was charged atomically by the pipeline.
+ *
  * @param array{
  *     token_valid?: bool,
+ *     input_valid?: bool,
  *     ip_banned?: bool,
  *     throttled?: bool,
+ *     nick?: string,
+ *     ip?: string,
+ *     now?: int,
  *     row?: array<string, mixed>|null,
  *     plain?: string
  * } $facts
  * @param callable(?array<string, mixed>, string): string $verdict
  * @param bool|null $sharedThrottleAvailable `null` detects it for real
+ * @param callable(string, string, int): array{reserved: bool, throttled: bool}|null $reserve
+ * @param callable(string, string): bool|null $release
  *
  * @return array{
  *     outcome: 'ok'|'deny',
  *     phase: string,
  *     bucket: 'none'|'shared'|'fallback',
  *     record_failure: bool,
- *     clear: bool
+ *     clear: bool,
+ *     reserved: bool
  * }
  */
-function recovery_policy_evaluate(array $facts, callable $verdict, ?bool $sharedThrottleAvailable = null): array
-{
+function recovery_policy_evaluate(
+    array $facts,
+    callable $verdict,
+    ?bool $sharedThrottleAvailable = null,
+    ?callable $reserve = null,
+    ?callable $release = null
+): array {
     $shared = $sharedThrottleAvailable ?? recovery_policy_shared_throttle_available();
-    $phase = RECOVERY_POLICY_PHASE_TOKEN_REJECTED;
+    $nick = is_string($facts['nick'] ?? null) ? $facts['nick'] : '';
+    $ip = is_string($facts['ip'] ?? null) ? $facts['ip'] : '';
+    $now = is_int($facts['now'] ?? null) ? $facts['now'] : time();
+    $reserved = false;
 
-    if (($facts['token_valid'] ?? false) === true) {
-        if (($facts['ip_banned'] ?? false) === true) {
-            $phase = RECOVERY_POLICY_PHASE_BANNED;
+    $phase = recovery_policy_precheck($facts) ?? '';
+
+    if ($phase === '') {
+        if ($reserve !== null) {
+            // The reservation is the budget: a stale `throttled` read must not be
+            // able to skip it, and a fresh one must not be able to double it.
+            $budget = $reserve($nick, $ip, $now);
+            $reserved = ($budget['reserved'] ?? false) === true;
+
+            if (($budget['throttled'] ?? false) === true) {
+                $phase = RECOVERY_POLICY_PHASE_THROTTLED;
+            }
         } elseif (($facts['throttled'] ?? false) === true) {
             $phase = RECOVERY_POLICY_PHASE_THROTTLED;
-        } else {
-            $row = $facts['row'] ?? null;
-            $verdictOutcome = $verdict(is_array($row) ? $row : null, (string) ($facts['plain'] ?? ''));
+        }
+    }
 
-            $phase = $verdictOutcome === RECOVERY_POLICY_OUTCOME_OK
-                ? RECOVERY_POLICY_PHASE_CREDENTIAL_OK
-                : RECOVERY_POLICY_PHASE_CREDENTIAL_FAILED;
+    if ($phase === '') {
+        $row = $facts['row'] ?? null;
+        $verdictOutcome = $verdict(is_array($row) ? $row : null, (string) ($facts['plain'] ?? ''));
+
+        $phase = $verdictOutcome === RECOVERY_POLICY_OUTCOME_OK
+            ? RECOVERY_POLICY_PHASE_CREDENTIAL_OK
+            : RECOVERY_POLICY_PHASE_CREDENTIAL_FAILED;
+
+        if ($reserved && $phase === RECOVERY_POLICY_PHASE_CREDENTIAL_OK && $release !== null) {
+            $release($nick, $ip);
         }
     }
 
@@ -835,7 +1089,8 @@ function recovery_policy_evaluate(array $facts, callable $verdict, ?bool $shared
             : RECOVERY_POLICY_OUTCOME_DENY,
         'phase' => $phase,
         'bucket' => recovery_policy_count_bucket($phase, $shared),
-        'record_failure' => recovery_policy_should_count($phase),
+        'record_failure' => recovery_policy_should_count($phase) && !$reserved,
         'clear' => $phase === RECOVERY_POLICY_PHASE_CREDENTIAL_OK,
+        'reserved' => $reserved,
     ];
 }

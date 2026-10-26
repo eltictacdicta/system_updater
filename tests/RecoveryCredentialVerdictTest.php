@@ -54,6 +54,7 @@ final class RecoveryCredentialVerdictTest extends TestCase
             'token_valid' => true,
             'ip_banned' => false,
             'throttled' => false,
+            'nick' => 'admin',
             'row' => [
                 'nick' => 'admin',
                 'password' => '$2y$10$abcdefghijklmnopqrstuv',
