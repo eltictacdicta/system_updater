@@ -221,6 +221,86 @@ final class RecoveryFallbackLimiterTest extends TestCase
         $this->assertFalse($consult['throttled']);
     }
 
+    /**
+     * One account, one budget, however the nick is spelled.
+     *
+     * `fs_users.nick` is compared under `utf8mb4_unicode_ci`, so `admin`,
+     * `Admin`, `ÁDMIN` and `ádmin` answer the same row and reach the same
+     * verifier. The counter is keyed by a digest of the submitted string, so a
+     * spelling the database treats as equal must not open a budget of its own:
+     * that would multiply REC-04's ceiling by the number of spellings an
+     * attacker cared to type, on the one surface REC-04 protects.
+     *
+     * The assertion is on the counter, not on a message. The file must hold
+     * exactly the two keys the whole budget occupies, the sixth charge must land
+     * on the shared key, and the seventh spelling must be the one refused.
+     */
+    #[Test]
+    public function everySpellingOfOneAccountSharesOneBudget(): void
+    {
+        $path = $this->counterPath();
+        $variants = ['admin', 'Admin', 'ADMIN', 'aDmin', 'Ádmin', 'ádmin', 'áDmín'];
+
+        $admitted = [];
+        foreach ($variants as $variant) {
+            $reservation = recovery_policy_fallback_reserve($path, $variant, '203.0.113.7', self::NOW);
+            if ($reservation['reserved'] === true) {
+                $admitted[] = $variant;
+            }
+        }
+
+        $this->assertSame(
+            array_slice($variants, 0, RECOVERY_POLICY_MAX_ATTEMPTS),
+            $admitted,
+            'six submissions consume the single budget; the seventh spelling is refused, whatever it is'
+        );
+
+        $state = recovery_policy_fallback_state($path);
+        $this->assertSame(
+            ['pair_' . md5('admin|203.0.113.7'), 'account_' . md5('admin')],
+            array_keys($state),
+            'one nick+address key and one account key, not one pair per spelling'
+        );
+        $this->assertSame(
+            RECOVERY_POLICY_MAX_ATTEMPTS,
+            $state['pair_' . md5('admin|203.0.113.7')]['count'],
+            'the sixth charge landed on the shared key instead of opening a bucket of its own'
+        );
+    }
+
+    /**
+     * The success-clear names the same subject the charge did.
+     *
+     * A clear keyed by the typed spelling would release a bucket nobody charged
+     * and leave the real one full, so a legitimate login would be measured
+     * against an exhausted budget on its next attempt.
+     */
+    #[Test]
+    public function aSuccessClearsTheBudgetWhateverSpellingAsksForIt(): void
+    {
+        $path = $this->counterPath();
+        $this->recordFailures($path, 'admin', '203.0.113.7', 2);
+
+        $this->assertSame(
+            2,
+            recovery_policy_fallback_count($path, 'ÁDMIN', '203.0.113.7', self::NOW)['attempts'],
+            'the accented spelling is measured against the budget the plain one consumed'
+        );
+
+        $this->assertTrue(recovery_policy_fallback_clear($path, 'ÁDMIN', '203.0.113.7'));
+
+        $this->assertSame(
+            [],
+            recovery_policy_fallback_state($path),
+            'the clear released the bucket the failures were recorded in'
+        );
+        $this->assertSame(
+            0,
+            recovery_policy_fallback_count($path, 'admin', '203.0.113.7', self::NOW)['attempts'],
+            'and the plain spelling finds it empty too'
+        );
+    }
+
     #[Test]
     public function theCounterIsBoundedRatherThanAppendedForever(): void
     {

@@ -410,16 +410,69 @@ function recovery_policy_is_ip_banned(string $ip, ?string $installRoot = null, ?
 }
 
 /**
+ * The value that names a throttle bucket: the submitted nick folded to the
+ * database's equality class.
+ *
+ * Why the counter is folded and the identity is not
+ * ------------------------------------------------
+ * `fs_users.nick` is created with `utf8mb4_unicode_ci` (the default in
+ * `fs_mysql::table_charset_collation_sql()` and in `fs_schema`'s MySQL table
+ * options), so `SELECT * FROM fs_users WHERE nick = ?` answers the same row for
+ * `admin`, `Admin`, `ÁDMIN` and `ádmin`. The counter, however, is keyed by a
+ * digest of whatever string it is handed, so every spelling the collation folds
+ * together used to open a budget of its own: REC-04's six-attempt ceiling became
+ * `6 × spellings` on the one surface REC-04 protects. Only this derivation is
+ * folded. The nick written to the session and compared against `fs_users.nick`
+ * stays the row's own bytes - folding that value would authenticate nobody.
+ *
+ * Direction: over-count, never under-count
+ * ----------------------------------------
+ * Accents are transliterated and everything outside `[a-z0-9]` is dropped, so
+ * subjects the collation may keep apart can end up in one bucket. That can
+ * shorten a budget that did not need shortening: a lockout the operator recovers
+ * from. The opposite error - two spellings of one account in two budgets -
+ * lengthens the budget, and a budget a spelling can multiply is not a ceiling.
+ * Pointing the fold at the equality the database actually uses is what keeps the
+ * two answers from disagreeing in the direction that matters.
+ *
+ * The result is ASCII lower-case whenever transliteration succeeds, so the
+ * function is idempotent: folding a subject again answers the same string. A
+ * nick with nothing transliterable keeps its multi-byte lower-case form instead
+ * of collapsing into the empty subject, so two unrelated non-Latin accounts do
+ * not share one bucket.
+ */
+function recovery_policy_counter_subject(string $nick): string
+{
+    $lower = function_exists('mb_strtolower')
+        ? mb_strtolower($nick, 'UTF-8')
+        : strtolower($nick);
+
+    $transliterated = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $lower);
+    if (!is_string($transliterated)) {
+        return $lower;
+    }
+
+    $folded = preg_replace('/[^a-z0-9]+/', '', strtolower($transliterated));
+
+    return is_string($folded) && $folded !== '' ? $folded : $lower;
+}
+
+/**
  * Counter key for a nick+address pair, and for an account.
  *
  * The derivation copies `LoginThrottle::cacheKey()` / `::accountCacheKey()`
- * (lower-cased nick, then `md5`) so the two modes count the same subjects, but
- * the keys are only ever read by this file: the shared mode never sees them and
- * the fallback mode never sees the cache.
+ * (lower-cased nick, then `md5`) so the two modes count the same subjects, with
+ * one deliberate difference: the nick is folded by
+ * {@see recovery_policy_counter_subject()} first, because the collation the row
+ * is read with treats accented spellings as the same account and a bare
+ * `strtolower()` does not. For an ASCII nick the two folds agree, so the shared
+ * bucket and this one still name the same subject. The keys are only ever read
+ * by this file: the shared mode never sees them and the fallback mode never sees
+ * the cache.
  */
 function recovery_policy_counter_key(string $nick, string $ip, bool $account): string
 {
-    $nick = strtolower($nick);
+    $nick = recovery_policy_counter_subject($nick);
 
     return $account
         ? 'account_' . md5($nick)
@@ -1071,11 +1124,16 @@ function recovery_policy_precheck(array $facts): ?string
  * where REC-05's "exactly one `password_verify()`" is measured; the seam here is
  * what makes REC-02's "no evaluation at all" measurable without a database.
  *
- * `$reserve` is `fn (string $nick, string $ip, int $now): array` answering the
+ * `$reserve` is `fn (string $subject, string $ip, int $now): array` answering the
  * shape of {@see recovery_policy_fallback_reserve()}, and `$release` is
- * `fn (string $nick, string $ip): bool` bound to
+ * `fn (string $subject, string $ip): bool` bound to
  * {@see recovery_policy_fallback_clear()}. Both are optional and both are only
- * ever called after every precheck gate passed.
+ * ever called after every precheck gate passed. Their first argument is the
+ * **folded** subject from {@see recovery_policy_counter_subject()}, not the
+ * typed nick in `$facts`: one account has one budget however its nick is
+ * spelled, and the fold is what makes that true. The facts keep the typed value
+ * because the gates and the caller's lookup are about the submission, not about
+ * the counter.
  *
  * Returned flags:
  *
@@ -1123,6 +1181,10 @@ function recovery_policy_evaluate(
     $nick = is_string($facts['nick'] ?? null) ? $facts['nick'] : '';
     $ip = is_string($facts['ip'] ?? null) ? $facts['ip'] : '';
     $now = is_int($facts['now'] ?? null) ? $facts['now'] : time();
+    // The budget is keyed by the folded subject, never by the spelling the
+    // client typed. The facts keep the typed nick for the gates; only the two
+    // counter seams below see this value.
+    $subject = recovery_policy_counter_subject($nick);
     $reserved = false;
 
     $phase = recovery_policy_precheck($facts) ?? '';
@@ -1131,7 +1193,7 @@ function recovery_policy_evaluate(
         if ($reserve !== null) {
             // The reservation is the budget: a stale `throttled` read must not be
             // able to skip it, and a fresh one must not be able to double it.
-            $budget = $reserve($nick, $ip, $now);
+            $budget = $reserve($subject, $ip, $now);
             $reserved = ($budget['reserved'] ?? false) === true;
 
             if (($budget['throttled'] ?? false) === true) {
@@ -1151,7 +1213,7 @@ function recovery_policy_evaluate(
             : RECOVERY_POLICY_PHASE_CREDENTIAL_FAILED;
 
         if ($reserved && $phase === RECOVERY_POLICY_PHASE_CREDENTIAL_OK && $release !== null) {
-            $release($nick, $ip);
+            $release($subject, $ip);
         }
     }
 

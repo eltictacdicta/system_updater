@@ -50,6 +50,10 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
         'recovery.php',
         'lib/recovery_secret.php',
         'lib/recovery_session.php',
+        'lib/recovery_handler.php',
+        'lib/recovery_policy.php',
+        'lib/recovery_legacy_hash.php',
+        'lib/recovery_login_token.php',
         'lib/session_auth.php',
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',
@@ -79,7 +83,11 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
 
         $post = $harness->request(self::CONSOLE, [
             'jar' => true,
-            'post' => ['nick' => 'admin', 'password' => 'whatever'],
+            'post' => [
+                'nick' => 'admin',
+                'password' => 'whatever',
+                'recovery_login_token' => $this->formToken($open['body']),
+            ],
         ]);
 
         $this->assertSame(200, $post['status'], 'the login POST must not need the secret again: ' . $post['body']);
@@ -88,9 +96,26 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
         $this->assertStringContainsString(
             'No se puede conectar a la base de datos',
             $post['body'],
-            'the POST reached credential evaluation: with no database the console says so inside the form'
+            'the POST reached the credential boundary: with no database the console says so inside the form'
         );
         $this->assertStringNotContainsString($secret, $post['body'], 'and the secret is not re-supplied anywhere');
+    }
+
+    /**
+     * The console's form token, as the rendered form carries it.
+     *
+     * A POST without it is refused by REC-01's verdict before anything else
+     * happens, which is the correct behaviour and the wrong evidence for this
+     * class: the case above is about RACC-05 (no second secret), so it has to
+     * submit a form the console actually issued.
+     */
+    private function formToken(string $body): string
+    {
+        if (preg_match('/name="recovery_login_token" value="([0-9a-f]{64})"/', $body, $matches) !== 1) {
+            $this->fail('the rendered login form carries no console token');
+        }
+
+        return $matches[1];
     }
 
     /**

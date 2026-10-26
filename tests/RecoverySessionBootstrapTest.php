@@ -41,7 +41,10 @@ final class RecoverySessionBootstrapTest extends ConsoleHttpTestCase
         'recovery.php',
         'lib/recovery_secret.php',
         'lib/recovery_session.php',
-        'lib/session_auth.php',
+        'lib/recovery_handler.php',
+        'lib/recovery_policy.php',
+        'lib/recovery_legacy_hash.php',
+        'lib/recovery_login_token.php',
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',
     ];
@@ -121,6 +124,46 @@ final class RecoverySessionBootstrapTest extends ConsoleHttpTestCase
             $harness->errorLogContents(),
             'a mismatch is not a security event and is not logged as one'
         );
+    }
+
+    /**
+     * REC-01 and RACC-07 together, on the served page.
+     *
+     * The login form must carry the console's own token and must not mint the
+     * plugin's: `su_csrf_token` is what `start`, `begin` and `chunk` accept, so a
+     * render that produced one would hand an unauthenticated visitor a value the
+     * process scripts honour. The form token lives in `recovery_console` and the
+     * plugin store must stay absent.
+     */
+    public function testTheLoginRenderMintsNoPluginTokenAndCarriesTheConsoleOne(): void
+    {
+        $secret = bin2hex(random_bytes(32));
+        $harness = $this->newHarness(self::FILES);
+        $harness->boot(implode("\n", $this->configLines([])));
+        $harness->persistSecret($secret);
+
+        $response = $harness->request(self::CONSOLE . '?secret=' . $secret);
+
+        $this->assertSame(200, $response['status'], 'the console answers: ' . $response['body']);
+        $this->assertMatchesRegularExpression(
+            '/name="recovery_login_token" value="[0-9a-f]{64}"/',
+            $response['body'],
+            'the form carries the console token'
+        );
+        $this->assertStringNotContainsString('su_csrf_token', $response['body'], 'and no plugin token');
+
+        $sessionFiles = $harness->sessionFiles();
+        $this->assertCount(1, $sessionFiles, 'the accepted request opened exactly one session');
+
+        $contents = (string) file_get_contents($harness->sessions . '/' . $sessionFiles[0]);
+
+        $this->assertStringContainsString('recovery_console', $contents, 'the console namespace is what was written');
+        $this->assertStringNotContainsString(
+            'system_updater',
+            $contents,
+            'no plugin token store exists on a page rendered before authentication'
+        );
+        $this->assertStringNotContainsString('_csrf', $contents, 'and the framework token store is untouched');
     }
 
     /**

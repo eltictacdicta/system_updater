@@ -22,6 +22,11 @@ require_once __DIR__ . '/lib/recovery_secret.php';
 // que el core), y la marca de autorización vive en el namespace de este script.
 require_once __DIR__ . '/lib/recovery_session.php';
 
+// Política y handler de credenciales (REC-01…05). Plugin-local a propósito: la
+// decisión, el puente de hashes legacy y el token del formulario son funciones
+// sin clase, sin autoloader y sin un solo fichero del core (RACC-01).
+require_once __DIR__ . '/lib/recovery_handler.php';
+
 // Escapes de CLI (RACC-06): `--secret` lee el valor actual y `--rotate-secret`
 // lo regenera. El guard de SAPI es lo único que separa estas ramas del mundo
 // web: un request normal —incluido uno que lleve `?--secret`— no tiene ninguna
@@ -75,32 +80,26 @@ if (!$su_secret_gate['granted']
 // lleva ninguna cabecera que la distinga de un archivo inexistente.
 header('Referrer-Policy: no-referrer');
 
-// Cargar configuración
+// Cargar configuración. Es el ÚNICO fichero que este script carga fuera de su
+// propio directorio (RACC-01): todo lo demás — secreto, sesión, política de
+// credenciales, puente de hashes legacy, token del formulario y el backup
+// manager — es plugin-local y no necesita ni una clase del core.
+//
+// No hay autoloader de Composer, y no es un olvido: cargarlo era la dependencia
+// que impedía a este script funcionar con el core dañado, y el puente de hashes
+// legacy que lo sustituye es el del propio plugin (REC-07). Tampoco se carga
+// `lib/session_auth.php`, que arrastra `base/config2.php` y el kernel: el nombre
+// de sesión lo resuelve `lib/recovery_session.php` sin ninguna clase del core
+// (RACC-08), y la identidad la escribe `lib/recovery_handler.php`.
 if (file_exists(FS_FOLDER . '/config.php')) {
     require_once FS_FOLDER . '/config.php';
 } else {
     die("Error: No se encuentra el archivo config.php.");
 }
 
-// Autoload de Composer. Sin él, class_exists() sobre las clases del core y de
-// los plugins devuelve false: la compatibilidad de hashes legacy quedaba muerta
-// y un administrador con contraseña SHA1 no podía entrar justo en el script que
-// existe para cuando no se puede entrar.
-$autoloadFile = FS_FOLDER . '/vendor/autoload.php';
-if (file_exists($autoloadFile)) {
-    require_once $autoloadFile;
-}
-
-// Sesión. El nombre lo resuelve `lib/recovery_session.php` sin ninguna clase
-// del core (RACC-08): FS_SESSION_NAME cuando existe, y si no la derivación
-// local sobre el mismo seed que consume el core. Se resuelve DESPUÉS de
-// config.php, que es donde vive FS_SESSION_NAME — salvo en la negativa, donde
-// la lectura de la marca lo hace de forma defensiva.
-$sessionAuthFile = __DIR__ . '/lib/session_auth.php';
-if (file_exists($sessionAuthFile)) {
-    require_once $sessionAuthFile;
-}
-
+// Sesión. El nombre se resuelve DESPUÉS de config.php, que es donde vive
+// FS_SESSION_NAME — salvo en la negativa, donde la lectura de la marca lo hace
+// de forma defensiva.
 recovery_session_configure(recovery_session_name(FS_FOLDER));
 
 session_start();
@@ -150,53 +149,80 @@ try {
 
 // Verificar autenticación
 $user = null;
-if ($db !== null && isset($_SESSION['user_id'])) {
-    // Verificar que el usuario sigue existiendo y es admin
-    $stmt = $db->prepare("SELECT nick, admin FROM fs_users WHERE nick = ?");
-    $stmt->bind_param("s", $_SESSION['user_id']);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    if ($row = $result->fetch_assoc()) {
-        if ($row['admin']) {
-            $user = $row;
-        } else {
-            die("Acceso denegado: Se requieren privilegios de administrador.");
+$error = null;
+
+// REC-08: una sesión ya autenticada se revalida contra la fila, exactamente como
+// antes. La marca del console (RACC-05) no participa: prueba que se llegó hasta
+// aquí, no quién es el operador. Se lee `user_nick` porque es la clave de
+// identidad que escribió el login (REC-06) y la que resuelve el guard del plugin;
+// una sesión que sólo lleve `user_id` no es una sesión autenticada.
+if ($db !== null && !$user && isset($_SESSION['user_nick']) && is_string($_SESSION['user_nick'])) {
+    $sessionNick = trim($_SESSION['user_nick']);
+
+    if ($sessionNick !== '') {
+        $stmt = $db->prepare("SELECT nick, admin FROM fs_users WHERE nick = ?");
+        $stmt->bind_param("s", $sessionNick);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        if ($row = $result->fetch_assoc()) {
+            if ($row['admin']) {
+                $user = $row;
+            } else {
+                die("Acceso denegado: Se requieren privilegios de administrador.");
+            }
         }
     }
 }
 
-// Procesar login si se envió el formulario. Sin base de datos no se evalúa
-// ninguna credencial, pero el envío queda registrado como tal: el formulario
-// se repinta con el motivo, no con el 404 de la puerta.
-if ($db === null && !$user && isset($_POST['nick']) && isset($_POST['password'])) {
+// Procesar login si se envió el formulario.
+//
+// Todo el envío pasa por `recovery_handler_authenticate()` (REC-01…05): el
+// veredicto del token es lo primero que se consulta, después la lista de IPs
+// bloqueadas, después el presupuesto de intentos y sólo entonces se lee la fila
+// y se compara la contraseña — una vez, con el puente de hashes legacy del
+// plugin, que es lo que permite entrar a un administrador con SHA1 o MD5 justo
+// en el script que existe para cuando no se puede entrar (REC-07). El handler
+// tampoco escribe identidad: la escribe este script, y sólo si el veredicto es
+// `ok`.
+//
+// El fallo con base de datos caída sigue siendo su propio mensaje: no es un
+// motivo de credencial y no distingue entre cuentas. Pero se decide DESPUÉS del
+// veredicto del token (REC-01): sin token válido no se llega ni a plantearse la
+// conexión, y el cuerpo es la negativa uniforme.
+$submitted = ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && $_POST !== [];
+$suToken = '';
+$suRefusal = null;
+
+if ($submitted) {
+    $suToken = isset($_POST[RECOVERY_LOGIN_TOKEN_FIELD]) && is_string($_POST[RECOVERY_LOGIN_TOKEN_FIELD])
+        ? $_POST[RECOVERY_LOGIN_TOKEN_FIELD]
+        : '';
+    $suRefusal = recovery_handler_token_refusal($suToken);
+}
+
+if ($submitted && $suRefusal !== null) {
+    $error = $suRefusal;
+} elseif ($submitted && $db === null) {
     $error = 'No se puede conectar a la base de datos.';
 }
 
-if ($db !== null && !$user && isset($_POST['nick']) && isset($_POST['password'])) {
-    $nick = $db->real_escape_string($_POST['nick']);
-    $password = $_POST['password'];
+if ($submitted && $db !== null && !$user && $suRefusal === null) {
+    $su_result = recovery_handler_authenticate(
+        [
+            'token' => $suToken,
+            'nick' => isset($_POST['nick']) && is_string($_POST['nick']) ? trim($_POST['nick']) : '',
+            'password' => isset($_POST['password']) && is_string($_POST['password']) ? $_POST['password'] : '',
+            'ip' => recovery_handler_client_ip($_SERVER),
+        ],
+        recovery_handler_seams($db)
+    );
 
-    $stmt = $db->prepare("SELECT nick, password, admin FROM fs_users WHERE nick = ?");
-    $stmt->bind_param("s", $nick);
-    $stmt->execute();
-    $result = $stmt->get_result();
-
-    if ($row = $result->fetch_assoc()) {
-        // Delegar hashes legacy al puente legacy_support y mantener password_verify para hashes modernos.
-        if (password_verify($password, $row['password'])
-            || (class_exists('FSFramework\\Plugins\\legacy_support\\LegacyCompatibility')
-                && \FSFramework\Plugins\legacy_support\LegacyCompatibility::verifyLegacyPassword($row['password'], $password))) {
-            if ($row['admin']) {
-                $_SESSION['user_id'] = $row['nick'];
-                $user = $row;
-            } else {
-                $error = "El usuario no es administrador.";
-            }
-        } else {
-            $error = "Contraseña incorrecta.";
-        }
+    if ($su_result['outcome'] === 'ok' && is_array($su_result['identity'])) {
+        recovery_handler_write_identity($su_result['identity']);
+        $user = $su_result['row'];
     } else {
-        $error = "Usuario no encontrado.";
+        $error = $su_result['message'];
     }
 }
 
@@ -226,12 +252,20 @@ if (!$user) {
                             <h3 class="panel-title">Modo Recuperación</h3>
                         </div>
                         <div class="panel-body">
-                            <?php if (isset($error)): ?>
+                            <?php if ($error !== null && $error !== ''): ?>
                                 <div class="alert alert-danger">
-                                    <?php echo $error; ?>
+                                    <?php echo htmlspecialchars($error, ENT_QUOTES | ENT_HTML5, 'UTF-8'); ?>
                                 </div>
                             <?php endif; ?>
                             <form method="post">
+                                <?php
+                                // REC-01: el token del formulario es de este
+                                // console, no el del plugin. `csrf_field()` del
+                                // plugin generaría un `su_csrf_token`, que es
+                                // justo lo que RACC-07 prohíbe antes de las dos
+                                // puertas.
+                                echo recovery_login_token_field();
+                                ?>
                                 <div class="form-group">
                                     <label>Usuario</label>
                                     <input type="text" name="nick" class="form-control" required autofocus>
@@ -280,7 +314,7 @@ $backups = $backupManager->list_backups_grouped();
             <ul class="nav navbar-nav navbar-right">
                 <li><a href="../../index.php">Ir al Sitio</a></li>
                 <li><a href="#"><i class="fa fa-user"></i>
-                        <?php echo $user['nick']; ?>
+                        <?php echo htmlspecialchars((string) $user['nick'], ENT_QUOTES | ENT_HTML5, 'UTF-8'); ?>
                     </a></li>
             </ul>
         </div>
@@ -317,7 +351,7 @@ $backups = $backupManager->list_backups_grouped();
                             <tr>
                                 <td>
                                     <strong>
-                                        <?php echo $group['base_name']; ?>
+                                        <?php echo htmlspecialchars((string) $group['base_name'], ENT_QUOTES | ENT_HTML5, 'UTF-8'); ?>
                                     </strong><br>
                                     <?php if ($group['complete']): ?><span class="label label-primary">Completo</span>
                                     <?php endif; ?>
