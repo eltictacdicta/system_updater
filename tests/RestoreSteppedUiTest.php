@@ -116,15 +116,14 @@ class RestoreSteppedUiTest extends TestCase
 
         $this->assertNotSame('', $catchBlock, 'premise: the restore drive has a failure branch');
         $this->assertStringContainsString('restoreConsecutiveFailures++', $catchBlock);
-        $this->assertStringContainsString(
-            'restoreConsecutiveFailures <= 5',
-            $catchBlock,
-            'a bounded retry budget must exist'
-        );
+        $budgetAt = strpos($catchBlock, 'restoreConsecutiveFailures <= 5');
+        $this->assertNotFalse($budgetAt, 'a bounded retry budget must exist');
 
-        // Everything before the terminal helper is the transient path: it must
-        // retry and return, leaving the modal on its current progress step.
-        $terminalAt = strpos($catchBlock, 'finishRestoreAsError');
+        // Everything before the budget's terminal helper is the transient path:
+        // it must retry and return, leaving the modal on its current progress
+        // step. The classification of a rejected request sits before the budget
+        // is charged, so the region is anchored on the budget itself.
+        $terminalAt = strpos($catchBlock, 'finishRestoreAsError', (int) $budgetAt);
         $this->assertNotFalse($terminalAt, 'premise: the exhausted budget terminates');
 
         $transient = substr($catchBlock, 0, (int) $terminalAt);
@@ -133,8 +132,69 @@ class RestoreSteppedUiTest extends TestCase
             $transient,
             'the retry budget must be decided before the terminal error'
         );
-        $this->assertStringContainsString("runRestoreStep('chunk')", $transient, 'the retry resumes the drive');
+        $this->assertStringContainsString(
+            'runRestoreStep(retryAction)',
+            $transient,
+            'the retry re-issues the action that failed, not a fixed one'
+        );
         $this->assertStringContainsString('return;', $transient, 'the transient branch must not fall through');
+    }
+
+    /**
+     * The retry sends the action that was in flight. A `begin` that never
+     * produced progress left no restore state on disk, so retrying it as
+     * `chunk` asks the server to advance something that does not exist.
+     */
+    public function testTheRetryReissuesTheActionInFlightUntilProgressExists(): void
+    {
+        $source = $this->viewSource();
+        $catchBlock = $this->restoreCatchBlock();
+
+        $this->assertStringContainsString(
+            'restoreArmed',
+            $source,
+            'the drive has to remember whether begin already produced progress'
+        );
+        $this->assertStringContainsString(
+            'var retryAction = restoreArmed ? ',
+            $catchBlock,
+            'the action to retry is derived from that state, not hardcoded'
+        );
+        $this->assertStringContainsString(
+            'runRestoreStep(retryAction)',
+            $catchBlock,
+            'and the transient branch issues it'
+        );
+    }
+
+    /**
+     * A 4xx is the session or CSRF guard refusing the request. It is terminal:
+     * retrying it spends the budget on an answer that is already decided, and
+     * reporting it as a cut sends the operator to look at connectivity instead
+     * of at the session that has to be re-established.
+     */
+    public function testASessionRejectionIsTerminalAndNamesTheRealCause(): void
+    {
+        $catchBlock = $this->restoreCatchBlock();
+
+        $denialAt = strpos($catchBlock, 'status >= 400 && status < 500');
+        $budgetAt = strpos($catchBlock, 'restoreConsecutiveFailures++');
+
+        $this->assertNotFalse($denialAt, 'premise: a 4xx is classified');
+        $this->assertNotFalse($budgetAt, 'premise: there is a retry budget');
+        $this->assertLessThan(
+            (int) $budgetAt,
+            (int) $denialAt,
+            'the rejection must be decided before the retry budget is charged'
+        );
+
+        $denial = substr($catchBlock, (int) $denialAt, (int) $budgetAt - (int) $denialAt);
+
+        $this->assertStringContainsString('sesión', $denial, 'the message names the real cause');
+        $this->assertStringContainsString('Vuelve a iniciar sesión', $denial);
+        $this->assertStringContainsString('No se puede confirmar', $denial);
+        $this->assertStringNotContainsString('red', $denial, 'a rejection is not a network failure');
+        $this->assertStringNotContainsString('Corte', $denial);
     }
 
     /**
