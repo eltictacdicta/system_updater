@@ -157,6 +157,324 @@ const RECOVERY_POLICY_BAN_MAX_ATTEMPTS = 5;
 const RECOVERY_POLICY_BAN_SECONDS = 600;
 
 /**
+ * Failed attempts allowed for one nick from one address inside the window.
+ * Mirrors `LoginThrottle::MAX_ATTEMPTS`, which throttles at `>=`.
+ */
+const RECOVERY_POLICY_MAX_ATTEMPTS = 6;
+
+/** Window of the nick+address budget. Mirrors `LoginThrottle::THROTTLE_WINDOW`. */
+const RECOVERY_POLICY_THROTTLE_WINDOW = 600;
+
+/**
+ * Failed attempts allowed for one account regardless of address.
+ * Mirrors `LoginThrottle::ACCOUNT_MAX_ATTEMPTS`.
+ */
+const RECOVERY_POLICY_ACCOUNT_MAX_ATTEMPTS = 20;
+
+/** Window of the account budget. Mirrors `LoginThrottle::ACCOUNT_WINDOW`. */
+const RECOVERY_POLICY_ACCOUNT_WINDOW = 900;
+
+/**
+ * Counter key for a nick+address pair, and for an account.
+ *
+ * The derivation copies `LoginThrottle::cacheKey()` / `::accountCacheKey()`
+ * (lower-cased nick, then `md5`) so the two modes count the same subjects, but
+ * the keys are only ever read by this file: the shared mode never sees them and
+ * the fallback mode never sees the cache.
+ */
+function recovery_policy_counter_key(string $nick, string $ip, bool $account): string
+{
+    $nick = strtolower($nick);
+
+    return $account
+        ? 'account_' . md5($nick)
+        : 'pair_' . md5($nick . '|' . $ip);
+}
+
+/**
+ * The local counter's file.
+ *
+ * One file per installation: the suffix is a digest of the install root, because
+ * `sys_get_temp_dir()` is shared by every installation on the host and two
+ * installations sharing a budget would let one operator's failures lock the
+ * other out. `FS_TMP_NAME` prefixes it for the same reason the framework uses it
+ * - so a suite or a second framework tree can namespace its own state.
+ *
+ * `$directory` exists for tests and for a deployment that keeps its temp state
+ * somewhere else; `null` means the system temp directory.
+ */
+function recovery_policy_fallback_path(?string $installRoot = null, ?string $directory = null): string
+{
+    $root = recovery_policy_root($installRoot);
+    $directory = ($directory !== null && $directory !== '')
+        ? rtrim($directory, '/\\')
+        : rtrim(sys_get_temp_dir(), '/');
+    $prefix = defined('FS_TMP_NAME') ? (string) FS_TMP_NAME : '';
+
+    return $directory . '/' . $prefix . 'system_updater_recovery_throttle_'
+        . substr(sha1($root), 0, 12) . '.json';
+}
+
+/**
+ * Read the counter file. Never creates it, never rewrites it.
+ *
+ * A missing, unreadable or malformed file is an empty counter, which throttles
+ * nobody: the same direction the core takes when its cache is unavailable
+ * (`LoginThrottle` is fail-open by design, and the spec's failure-mode inventory
+ * keeps that direction here rather than inventing a stricter door).
+ *
+ * @return array<string, array{count: int, updated: int}>
+ */
+function recovery_policy_fallback_state(string $path): array
+{
+    if ($path === '' || !is_file($path) || !is_readable($path)) {
+        return [];
+    }
+
+    return recovery_policy_fallback_decode((string) @file_get_contents($path));
+}
+
+/**
+ * Decode and validate the counter file's contents.
+ *
+ * Shared by the read path and the writer, so a hand-edited file can only remove
+ * counts: every entry has to be a string-keyed array of two numerics.
+ *
+ * @return array<string, array{count: int, updated: int}>
+ */
+function recovery_policy_fallback_decode(string|false $raw): array
+{
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+
+    $state = [];
+
+    foreach ($decoded as $key => $entry) {
+        if (!is_string($key) || $key === '' || !is_array($entry)) {
+            continue;
+        }
+
+        if (!isset($entry['count'], $entry['updated'])
+            || !is_numeric($entry['count'])
+            || !is_numeric($entry['updated'])
+        ) {
+            continue;
+        }
+
+        $state[$key] = ['count' => (int) $entry['count'], 'updated' => (int) $entry['updated']];
+    }
+
+    return $state;
+}
+
+/**
+ * How many attempts a single key still counts at `$now`.
+ *
+ * The window comes from the declared constant, never from the file: a tampered
+ * or stale entry cannot widen its own budget. An entry stamped in the future
+ * keeps counting (clock skew must not launder attempts).
+ *
+ * @param array<string, array{count: int, updated: int}> $state
+ */
+function recovery_policy_counter_entry(array $state, string $key, int $now, int $window): int
+{
+    $entry = $state[$key] ?? null;
+    if (!is_array($entry)) {
+        return 0;
+    }
+
+    $count = (int) ($entry['count'] ?? 0);
+    if ($count <= 0) {
+        return 0;
+    }
+
+    $updated = (int) ($entry['updated'] ?? 0);
+    if ($now - $updated >= $window) {
+        return 0;
+    }
+
+    return $count;
+}
+
+/**
+ * REC-04's verdict, purely: how many attempts remain counted, and is it over.
+ *
+ * Two dimensions, because the nick+address counter alone allows guessing one
+ * account by rotating addresses. Throttled when either dimension is at its
+ * threshold - `>=`, matching `LoginThrottle::isThrottled()`.
+ *
+ * @param array<string, array{count: int, updated: int}> $state
+ *
+ * @return array{throttled: bool, attempts: int, account_attempts: int}
+ */
+function recovery_policy_counter_verdict(array $state, string $nick, string $ip, int $now): array
+{
+    $attempts = recovery_policy_counter_entry(
+        $state,
+        recovery_policy_counter_key($nick, $ip, false),
+        $now,
+        RECOVERY_POLICY_THROTTLE_WINDOW
+    );
+    $accountAttempts = recovery_policy_counter_entry(
+        $state,
+        recovery_policy_counter_key($nick, $ip, true),
+        $now,
+        RECOVERY_POLICY_ACCOUNT_WINDOW
+    );
+
+    return [
+        'throttled' => $attempts >= RECOVERY_POLICY_MAX_ATTEMPTS
+            || $accountAttempts >= RECOVERY_POLICY_ACCOUNT_MAX_ATTEMPTS,
+        'attempts' => $attempts,
+        'account_attempts' => $accountAttempts,
+    ];
+}
+
+/**
+ * Consult the local budget for one submission.
+ *
+ * Read-only: a consult must not create the file, because a request that was
+ * refused before evaluation (REC-02) has to leave the filesystem untouched.
+ *
+ * @return array{throttled: bool, attempts: int, account_attempts: int}
+ */
+function recovery_policy_fallback_count(string $path, string $nick, string $ip, int $now): array
+{
+    return recovery_policy_counter_verdict(recovery_policy_fallback_state($path), $nick, $ip, $now);
+}
+
+/**
+ * Record one failed attempt in both dimensions.
+ *
+ * Both, and atomically: an attempt that counted for the address but not for the
+ * account would let the account budget be evaded by rotating addresses, which is
+ * the case the account dimension exists for.
+ */
+function recovery_policy_fallback_record(string $path, string $nick, string $ip, int $now): bool
+{
+    return recovery_policy_fallback_mutate($path, static function (array $state) use ($nick, $ip, $now): array {
+        $dimensions = [
+            recovery_policy_counter_key($nick, $ip, false) => RECOVERY_POLICY_THROTTLE_WINDOW,
+            recovery_policy_counter_key($nick, $ip, true) => RECOVERY_POLICY_ACCOUNT_WINDOW,
+        ];
+
+        foreach ($dimensions as $key => $window) {
+            $state[$key] = [
+                'count' => recovery_policy_counter_entry($state, $key, $now, $window) + 1,
+                'updated' => $now,
+            ];
+        }
+
+        return $state;
+    }, $now);
+}
+
+/**
+ * REC-04's "success clears the budget": drop both dimensions for this subject.
+ */
+function recovery_policy_fallback_clear(string $path, string $nick, string $ip): bool
+{
+    return recovery_policy_fallback_mutate($path, static function (array $state) use ($nick, $ip): array {
+        unset(
+            $state[recovery_policy_counter_key($nick, $ip, false)],
+            $state[recovery_policy_counter_key($nick, $ip, true)]
+        );
+
+        return $state;
+    }, null);
+}
+
+/**
+ * The one writer of the counter file: `flock()`ed read-modify-write, pruned.
+ *
+ * Pruning on every write is what keeps the file bounded without a cron job: an
+ * entry past its window carries no information, and leaving it would let a busy
+ * host grow this file until the disk answered for it. A `null` clock means the
+ * write is not about expiry (a clear) and prunes nothing, so an injected clock
+ * never has to be invented for it.
+ *
+ * A failure (no directory, no permission, a lock that cannot be taken) returns
+ * `false` and leaves the previous content alone. The throttle then fails open
+ * for that submission - the direction the spec's failure-mode inventory records
+ * for the shared throttle too, and strictly better than the shipped console,
+ * which counts nothing at all.
+ *
+ * @param callable(array<string, array{count: int, updated: int}>): array<string, array{count: int, updated: int}> $mutator
+ */
+function recovery_policy_fallback_mutate(string $path, callable $mutator, ?int $now): bool
+{
+    if ($path === '') {
+        return false;
+    }
+
+    $handle = @fopen($path, 'c+b');
+    if ($handle === false) {
+        return false;
+    }
+
+    try {
+        if (!flock($handle, LOCK_EX)) {
+            return false;
+        }
+
+        $state = recovery_policy_fallback_decode(stream_get_contents($handle));
+        if ($now !== null) {
+            $state = recovery_policy_fallback_prune($state, $now);
+        }
+
+        $state = $mutator($state);
+        $encoded = json_encode($state, JSON_UNESCAPED_SLASHES);
+
+        if (!is_string($encoded)) {
+            return false;
+        }
+
+        rewind($handle);
+        if (!ftruncate($handle, 0)) {
+            return false;
+        }
+
+        $written = fwrite($handle, $encoded . "\n");
+        fflush($handle);
+
+        return $written !== false;
+    } finally {
+        flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+}
+
+/**
+ * Drop every entry that no longer counts.
+ *
+ * @param array<string, array{count: int, updated: int}> $state
+ *
+ * @return array<string, array{count: int, updated: int}>
+ */
+function recovery_policy_fallback_prune(array $state, int $now): array
+{
+    $pruned = [];
+
+    foreach ($state as $key => $entry) {
+        $window = str_starts_with($key, 'account_')
+            ? RECOVERY_POLICY_ACCOUNT_WINDOW
+            : RECOVERY_POLICY_THROTTLE_WINDOW;
+
+        if (recovery_policy_counter_entry($state, $key, $now, $window) > 0) {
+            $pruned[$key] = $entry;
+        }
+    }
+
+    return $pruned;
+}
+
+/**
  * The installation root this library reasons about.
  *
  * `FS_FOLDER` when the installation defined it, otherwise the tree this file
