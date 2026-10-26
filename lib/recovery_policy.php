@@ -136,6 +136,190 @@ function recovery_policy_count_bucket(string $phase, bool $sharedThrottleAvailab
 }
 
 /**
+ * Ban threshold of the bucket the primary login writes.
+ *
+ * Mirrors `fs_ip_filter::MAX_ATTEMPTS`, and the comparison is `>`, not `>=`:
+ * six recorded attempts ban, five do not. The drift test reads the core's own
+ * constant when the core is present; the plugin needs its own copy because in
+ * the damaged-core state there is no class to ask (RACC-01).
+ */
+const RECOVERY_POLICY_BAN_MAX_ATTEMPTS = 5;
+
+/**
+ * Ban window, mirroring `fs_ip_filter::BAN_SECONDS`.
+ *
+ * The parser never needs it - each line carries its own expiry, and
+ * `set_attempt()` is the only writer of that bucket (REC-03 forbids a fourth
+ * one) - but a reader that keeps the threshold and forgets the window is
+ * answering half the core's policy, so both are declared and both are
+ * drift-tested.
+ */
+const RECOVERY_POLICY_BAN_SECONDS = 600;
+
+/**
+ * The installation root this library reasons about.
+ *
+ * `FS_FOLDER` when the installation defined it, otherwise the tree this file
+ * sits in (`lib/` → `plugins/` → `<root>`), verified the same way
+ * `recovery_session_root()` verifies it. An explicit root always wins, which is
+ * what lets every test work on a throwaway install root instead of the real one.
+ */
+function recovery_policy_root(?string $installRoot = null): string
+{
+    if ($installRoot !== null && $installRoot !== '') {
+        return rtrim($installRoot, '/\\');
+    }
+
+    if (defined('FS_FOLDER')) {
+        $folder = rtrim((string) FS_FOLDER, '/\\');
+        if ($folder !== '') {
+            return $folder;
+        }
+    }
+
+    return rtrim(dirname(__DIR__, 3), '/\\');
+}
+
+/**
+ * The bucket the primary login reads and writes: `tmp/<FS_TMP_NAME>ip.log`.
+ *
+ * Same directory, same prefix and same file name as `fs_ip_filter`'s
+ * constructor, because reading a different file would be exactly the parallel
+ * bucket RACC-01 forbids. `FS_TMP_NAME` comes from `config.php`, so no core file
+ * has to be loaded to build this path.
+ */
+function recovery_policy_ip_log_path(?string $installRoot = null): string
+{
+    $root = recovery_policy_root($installRoot);
+    if ($root === '') {
+        return '';
+    }
+
+    return $root . '/tmp/' . (defined('FS_TMP_NAME') ? (string) FS_TMP_NAME : '') . 'ip.log';
+}
+
+/**
+ * Read the bucket as raw lines. Never writes, never creates.
+ *
+ * An absent, unreadable or directory path is an empty list, which the parser
+ * turns into "not banned" - the same answer the core gives when its
+ * `file_exists()` check fails.
+ *
+ * @return list<string>
+ */
+function recovery_policy_read_ban_lines(string $path): array
+{
+    if ($path === '' || !is_file($path) || !is_readable($path)) {
+        return [];
+    }
+
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return [];
+    }
+
+    $lines = [];
+
+    try {
+        while (!feof($handle)) {
+            $raw = fgets($handle);
+            if ($raw === false) {
+                break;
+            }
+            $lines[] = trim($raw);
+        }
+    } finally {
+        fclose($handle);
+    }
+
+    return $lines;
+}
+
+/**
+ * `fs_ip_filter::read_line()`, line for line.
+ *
+ *   - a line is considered only when it splits into **three** fields;
+ *   - its expiry is `intval()`-cast and compared with `$now`; a non-numeric
+ *     expiry becomes `0` and is dropped, exactly as the core drops it;
+ *   - the count is cast with `(int)`, so a non-numeric count becomes `0` and
+ *     bans nobody.
+ *
+ * The one deliberate difference is the clock: the core calls `time()` per line,
+ * this takes one `$now` for the whole file. Within a single read the two only
+ * differ on a line expiring mid-loop, which is not a behaviour worth
+ * reproducing and not one an operator can observe.
+ *
+ * @param array<array-key, mixed> $lines
+ *
+ * @return list<array{ip: string, count: int, expire: int}>
+ */
+function recovery_policy_parse_ban_lines(array $lines, int $now): array
+{
+    $entries = [];
+
+    foreach ($lines as $line) {
+        if (!is_string($line)) {
+            continue;
+        }
+
+        $fields = explode(';', trim($line));
+        if (count($fields) !== 3) {
+            continue;
+        }
+
+        $expire = (int) $fields[2];
+        if ($expire <= $now) {
+            continue;
+        }
+
+        $entries[] = [
+            'ip' => $fields[0],
+            'count' => (int) $fields[1],
+            'expire' => $expire,
+        ];
+    }
+
+    return $entries;
+}
+
+/**
+ * `fs_ip_filter::is_banned()`, over lines instead of a file.
+ *
+ * The comparison keeps the core's loose `==` on the address and its strict `>`
+ * on the count. A stricter (or laxer) rule here would be a second ban policy,
+ * which is precisely the drift REC-03 accepts only under a drift test - and a
+ * drifted *rule* is not something a fixture can catch, so the rule is copied
+ * verbatim instead.
+ *
+ * @param array<array-key, mixed> $lines
+ */
+function recovery_policy_is_banned(array $lines, string $ip, int $now): bool
+{
+    foreach (recovery_policy_parse_ban_lines($lines, $now) as $entry) {
+        if ($entry['ip'] == $ip && $entry['count'] > RECOVERY_POLICY_BAN_MAX_ATTEMPTS) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * REC-03's whole gate as the console calls it: is this address banned?
+ *
+ * Reads the bucket the primary login writes and answers the core's verdict.
+ * `$now` is injectable so the expiry cases are decided, not slept through.
+ */
+function recovery_policy_is_ip_banned(string $ip, ?string $installRoot = null, ?int $now = null): bool
+{
+    return recovery_policy_is_banned(
+        recovery_policy_read_ban_lines(recovery_policy_ip_log_path($installRoot)),
+        $ip,
+        $now ?? time()
+    );
+}
+
+/**
  * The console's whole credential decision, in the order the requirements state.
  *
  * Gates, first to last:
