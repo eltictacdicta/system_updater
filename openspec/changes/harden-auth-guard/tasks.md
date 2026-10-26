@@ -1217,7 +1217,7 @@ proven, so a partial revert cannot lock out a legacy-hash administrator.
 
 ### Phase 1: The pipeline (TDD)
 
-- [ ] 1.1 **[TEST] [RED]** In order, each as an explicit assertion:
+- [x] 1.1 **[TEST] [RED]** In order, each as an explicit assertion:
   - invalid or missing login token → one generic CSRF refusal, **no** ban read, **no** throttle
     consult, **no** account lookup, **no** verification, **no** counter movement (a recorder proves
     the order, not just the absence of effects);
@@ -1226,7 +1226,7 @@ proven, so a partial revert cannot lock out a legacy-hash administrator.
   - valid token + unknown nick / wrong password / non-administrator → one identical body, one
     verification each;
   - a format-invalid stored hash → uniform failure, no identity written.
-- [ ] 1.2 Wire `recovery.php`'s POST branch to the policy primitives in that order; render the
+- [x] 1.2 Wire `recovery.php`'s POST branch to the policy primitives in that order; render the
   console's login token as a hidden field (from `lib/recovery_login_token.php`, **not**
   `system_updater_csrf_field()` — that helper auto-generates `su_csrf_token`, which is exactly what
   REC-01 and the "console mints nothing before authentication" scenario forbid). Keep the shipped
@@ -1234,42 +1234,158 @@ proven, so a partial revert cannot lock out a legacy-hash administrator.
 
 ### Phase 2: Rotation and identity (TDD)
 
-- [ ] 2.1 **[TEST] [RED]** A successful login rotates the identifier (`session_id()` differs from
+- [x] 2.1 **[TEST] [RED]** A successful login rotates the identifier (`session_id()` differs from
   the pre-login id) and the write order is `regenerate → identity`, recorded by a step recorder; the
   written session contains `user_nick`, `user_id`, `login_time`, `last_activity`; feeding that
   session array to `system_updater_guard_decision()` with an injected `true` verdict → accept with
   the right nick and **no** CSRF token required (REC-06 scenarios 2-4). Note the `user_id` half
   explicitly: `system_updater_session_is_valid()` resolves from `user_nick`, so a session carrying
   only `user_id` would silently lose access.
-- [ ] 2.2 Implement rotation before the writes; clear the shared budget on success; keep the
+- [x] 2.2 Implement rotation before the writes; clear the shared budget on success; keep the
   existing revalidation branch's administrator re-check (REC-08) and add the assertion that the
   `recovery_console` marker alone renders the login form and never the backup list.
 
 ### Phase 3: A1 dependency removal (TDD, last)
 
-- [ ] 3.1 **[TEST] [RED]** Static include graph: enumerate every `require`/`include` reachable from
+- [x] 3.1 **[TEST] [RED]** Static include graph: enumerate every `require`/`include` reachable from
   `recovery.php` plus its plugin-local files; exactly one resolved path lies outside
   `plugins/system_updater/`, and it is `FS_FOLDER/config.php`. No `vendor/autoload.php` reference
   remains. Then the behavioural half: build a temp root with `vendor/`, `base/` and `src/` **absent**
   and a sentinel `config.php` pointing at an unreachable DB host; open the console with the correct
   secret → no fatal, no `Class not found`, no autoload attempt, and the failure that appears is the
   plain DB-connection error (the expected boundary), not a class error.
-- [ ] 3.2 Remove the `vendor/autoload.php` load (`recovery.php:25-28`) and the
+- [x] 3.2 Remove the `vendor/autoload.php` load (`recovery.php:25-28`) and the
   `lib/session_auth.php` require (`:34-37`). `lib/backup_manager.php` and `lib/SqlDumpReader.php`
   stay (plugin-local, verified to contain no core `require`). Replace the removed session helpers
   with `lib/recovery_session.php` from PR 4 — if PR 4's implementation still calls
   `system_updater_configure_php_session()`, this is where that call goes.
-- [ ] **Do not** change `process_restore.php`: it stays shared with `admin_updater` and must not
+- [x] **Do not** change `process_restore.php`: it stays shared with `admin_updater` and must not
   require the secret (RACC-07 point 8).
 
 ### PR 7 verification
 
-- [ ] `--filter RecoveryHandlerTest`, `--filter RecoveryRotationTest`, `--filter RecoveryIncludeGraphTest`
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
-- [ ] `ddev exec php -l recovery.php`
-- [ ] Manual confirm the console still renders against the **real** ddev installation is **not**
+- [x] `--filter RecoveryHandlerTest` (16/102), `--filter RecoveryRotationTest` (6/23), `--filter RecoveryIncludeGraphTest` (7/52)
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **608 / 2212 /
+  2 skipped**, 0 failures (baseline **578 / 2028 / 2 skipped**)
+- [x] `ddev exec php -l recovery.php` — also `lib/recovery_handler.php` and every new test file
+- [x] Manual confirm the console still renders against the **real** ddev installation is **not**
   performed here (it would generate a real secret); the operator probe for RACC-01 is recorded in
   the PR body instead
+
+### Applied notes (W7) — working-tree only, not committed
+
+**Files**: `lib/recovery_handler.php` (new, 512 lines), `recovery.php` (rewired), five test files
+(`tests/RecoveryHandlerTest.php`, `tests/RecoveryRotationTest.php`,
+`tests/RecoveryIncludeGraphTest.php`, plus corrections in `tests/RecoveryMarkerTest.php` and
+`tests/RecoverySessionBootstrapTest.php`) and three fixtures
+(`tests/Support/ConsoleHttpHarness.php`, `tests/Support/RecoverySecretFixture.php`,
+`tests/RecoveryGateTest.php`). Nothing under `openspec/` is committed.
+
+**The ordering was obeyed, and the evidence is a subprocess.** `aLegacyHashAdministratorAuthenticatesWithNoAutoloaderAndNoCore`
+loads the console's whole graph over a tree with no `vendor/`, `base/` or `src/`, asserts
+`class_exists('FSFramework\Security\SessionManager')` is `false` (so no autoloader is reachable),
+authenticates a `sha1($plain)` row through the real handler, and asserts `get_included_files()`
+names nothing outside the plugin. It is proved non-vacuous by appending
+`require_once FS_FOLDER . '/base/config2.php';` to `lib/recovery_session.php`, which makes the probe
+fail on the missing file.
+
+**Include graph, before and after** (this is the RACC-01 statement in graph form):
+
+| | `FS_FOLDER/config.php` | variable include | plugin-local files |
+|---|---|---|---|
+| before | yes | `$autoloadFile` (`vendor/autoload.php`), `$sessionAuthFile` (`lib/session_auth.php`), `$file` (the defensive config read) | `recovery_secret`, `recovery_session`, `backup_manager`, `SqlDumpReader` |
+| after | yes | `$file` only — the `realpath()`ed config read in `recovery_session_read_config_constants()` | the same four plus `recovery_handler`, `recovery_policy`, `recovery_legacy_hash`, `recovery_login_token` |
+
+The single unresolvable include is asserted separately
+(`theOnlyVariableIncludeIsTheDefensiveConfigRead`) rather than waved through, and the expected
+internal set is an exact list rather than a count, so a file joining the graph has to be re-read for
+what it loads.
+
+**Deviations from the task text, all deliberate:**
+
+1. **The row is read inside the verdict closure, not before `recovery_policy_evaluate()`.** The
+   policy takes gate *facts*, and `row` is one of them — but passing it up front would perform the
+   account lookup before the ban read and before the reservation, which is the order the tasks
+   require. So `$facts['row']` is `null` and the verdict resolves the row on first call, after every
+   gate passed. **Consequence, stated:** with the shared throttle the lookup happens after the
+   throttle read but before the reservation, because in that mode the reservation is the core's
+   check-then-act and there is nothing to charge atomically. In the fallback mode — the one a damaged
+   core always produces — the order is exactly reserve → lookup → verify.
+2. **`user_id` keeps holding the nick.** REC-06 asks for `user_nick` and `user_id`; it does not ask
+   the numeric id. `recovery.php` has always written the nick there, and the revalidation branch
+   binds it to `fs_users.nick`. The revalidation branch now reads `user_nick`, which is the key that
+   makes a console session pass `system_updater_session_is_valid()` at all; a session carrying only
+   `user_id` no longer authenticates, and that is the correct direction (it never could).
+3. **A token-less POST is refused before the database boundary.** `recovery_handler_token_refusal()`
+   is a second, earlier ask of the real validator, so the CSRF verdict is unconditional rather than
+   "whenever a database happens to be reachable". The pipeline asks again on its own; two session
+   reads and two `hash_equals()`, no I/O.
+4. **`recovery_handler_write_identity()` landed with the wiring, not after it.** The identity write is
+   the tail of the same call. `RecoveryRotationTest` was therefore green on arrival and its
+   falsifiability was proved by mutation instead: dropping `user_nick` from the key list fails three
+   cases (the guard answers `deny`), and moving the write above `session_regenerate_id(true)` fails
+   `theIdentifierRotatesBeforeTheFirstIdentityWrite`.
+5. **The handler refuses a revoked legacy-session shape, and the suite says so.**
+   `aSessionCarryingOnlyUserIdNeverPassesTheGuard` is kept as a case because the defect it names
+   (identity under `user_id` alone) is exactly what the previous implementation wrote.
+
+**REC-08, verified rather than assumed.** The re-check keeps its original behaviour (re-read the row,
+`die('Acceso denegado: Se requieren privilegios de administrador.')` for a demoted administrator) and
+the only change is the key it reads. The "demoted administrator" half stays operator-owned: it needs
+a live `fs_users`, and this suite is DB-free (recorded gap 2). The "the marker alone does not
+authenticate" half is covered by `RecoveryMarkerTest::testTheMarkerAuthorizesNothingOutsideTheConsole`
+and by the DB-free rendering path, which paints the form and never the listing.
+
+**Security review of the changed surface** (fsframework-security-review checklist): SQL is two
+prepared statements, no concatenation; the two database-sourced values this file echoes (the session
+nick and the backup `base_name`) are now escaped, as is the failure text; the stored digest and the
+salt are stripped from the row the handler returns; no `md5`/`sha1`/`password_hash` call exists
+outside `lib/recovery_legacy_hash.php` (REC-07's verification-only use); `session_regenerate_id(true)`
+precedes the identity write; no upload, no redirect, no stack trace, no `var_dump`.
+
+**Line budget, measured.** 2,028 changed lines against the ~490 estimate (source ~670, tests ~1,358)
+and the 800-line session budget. The excess is the four test files, in the same house style as W3,
+W5 and W6; no behaviour was added to reach it. Natural split if the budget is enforced: **W7a** (the
+handler + the wiring: `lib/recovery_handler.php`, `recovery.php`, `RecoveryHandlerTest`) and **W7b**
+(the removal + its proof: `RecoveryIncludeGraphTest` and the two deleted requires), which share only
+the file the first one introduces.
+
+### PR 7 review follow-up — one budget per account, not one per spelling
+
+Review finding (MAJOR) on `lib/recovery_handler.php`: the typed `nick` reached the throttle
+machinery, so each spelling could get its own counter bucket.
+
+**Premise, checked rather than assumed.** `fs_users.xml` declares no charset/collation, so MySQL
+creates the table with `utf8mb4_unicode_ci` (`fs_mysql::table_charset_collation_sql()` and
+`fs_schema::getMysqlTableOptions()`); the lookup is therefore **case- and accent-insensitive**. The
+second half of the finding held only in part: `recovery_policy_counter_key()` already lower-cased
+before hashing, so the ASCII case variants (`admin`/`Admin`/`ADMIN`) shared one bucket, while
+accented spellings (`Ádmin`, `ádmin`, `áDmín`) each opened a new one. Measured on the real counter:
+seven reservations admitted against a six-attempt ceiling.
+
+- [x] **[TEST] [RED]** Four cases, asserted on the counter and on the seam arguments, not on a
+  message: `everySpellingOfOneAccountSharesOneBudget` (six admitted, seventh refused, exactly two
+  keys in the file, sixth charge on the shared key), `aSuccessClearsTheBudgetWhateverSpellingAsksForIt`
+  (clear names the charged subject), `theCounterSeamsReceiveOneFoldedSubjectWhileTheLookupKeepsTheTypedOne`
+  (fallback reserve/release folded, lookup typed, identity the row's bytes),
+  `theSharedThrottleAndItsAccountingReceiveOneFoldedSubject` (shared consult + record + clear, one
+  subject). RED evidence: 7/7 admitted and 8 keys; counts 0 vs 2; seam saw `ÁDMIN`.
+- [x] One definition: `recovery_policy_counter_subject()` (lower-case, accent-transliterated,
+  `[a-z0-9]`, idempotent, multi-byte lower-case fallback when nothing transliterates). Consumed by
+  `recovery_policy_counter_key()` — so reserve, record, release, clear and the policy's own consult
+  cannot drift — and once in the handler for the shared throttle and the two accounting seams.
+  `recovery_policy_evaluate()` hands the folded subject to `$reserve`/`$release`.
+- [x] **Direction: over-count.** Accented and punctuation-folded subjects may share a bucket, which
+  can shorten a budget the collation keeps apart (a recoverable lockout). Under-counting is the
+  vulnerability: a budget a spelling can multiply is not a ceiling. Stated in the function docblock.
+- [x] **Identity untouched.** The lookup keeps the typed nick; the session carries the row's own
+  bytes (`Ádmin`), pinned byte-for-byte by the new handler case. Budget constants unchanged; no
+  limit weakened.
+- [x] `recovery.php` not modified: it already passes the trimmed typed nick to the handler, which is
+  the boundary that folds.
+- [x] Verification: `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` —
+  **612 / 2232 / 2 skipped**, 0 failures (W7 baseline 608 / 2212 / 2 skipped); `php -l` on both
+  changed library files.
 
 ---
 
