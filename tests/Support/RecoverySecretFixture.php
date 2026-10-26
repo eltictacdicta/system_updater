@@ -55,6 +55,25 @@ final class RecoverySecretFixture
      */
     public const SECRET_FILENAME = 'system_updater_recovery_secret.php';
 
+    /**
+     * The console's include graph, as the CLI subprocesses see it.
+     *
+     * `recovery.php` loads the credential handler and the handler loads the
+     * policy, the legacy bridge and the form token, so a fixture that copies
+     * only `recovery.php` and the secret library exits 255 on a missing
+     * include — which would make a CLI case fail for a reason that has nothing
+     * to do with the secret it asserts.
+     */
+    public const CONSOLE_FILES = [
+        'recovery.php',
+        'lib/recovery_secret.php',
+        'lib/recovery_session.php',
+        'lib/recovery_handler.php',
+        'lib/recovery_policy.php',
+        'lib/recovery_legacy_hash.php',
+        'lib/recovery_login_token.php',
+    ];
+
     /** Parent of the install root: the outside-webroot candidate. */
     public string $base;
 
@@ -128,7 +147,7 @@ final class RecoverySecretFixture
     {
         $source = dirname(__DIR__, 2);
 
-        foreach (['recovery.php', 'lib/recovery_secret.php', 'lib/recovery_session.php'] as $relative) {
+        foreach (self::CONSOLE_FILES as $relative) {
             $target = $this->root . '/plugins/system_updater/' . $relative;
             $directory = dirname($target);
             if (!is_dir($directory) && !mkdir($directory, 0777, true) && !is_dir($directory)) {

@@ -150,6 +150,12 @@ final class RecoveryHandlerTest extends TestCase
         $verifier = $options['verifier'] ?? null;
 
         $seams = [
+            // Always stated, never detected: `recovery_policy_shared_throttle_available()`
+            // answers from ambient class state, and in this suite the Composer
+            // autoloader has already loaded `LoginThrottle` by the time some
+            // other test runs. A case that depended on it would pass alone and
+            // fail in the full suite — which is the definition of a flaky test.
+            'shared_available' => (bool) ($options['shared'] ?? false),
             'lookup' => static function (string $nick) use ($row, &$counts): ?array {
                 $counts['lookup']++;
 
@@ -185,10 +191,6 @@ final class RecoveryHandlerTest extends TestCase
 
         if ($verifier !== null) {
             $seams['verifier'] = $verifier;
-        }
-
-        if (array_key_exists('shared', $options)) {
-            $seams['shared_available'] = (bool) $options['shared'];
         }
 
         return $seams;
@@ -357,7 +359,7 @@ final class RecoveryHandlerTest extends TestCase
         string $plain
     ): void {
         $counts = [];
-        $seams = self::seams(['row' => $row], $counts);
+        $seams = self::seams(['row' => $row, 'shared' => true], $counts);
         $seams['verifier'] = self::countingVerifier($counts);
 
         $result = recovery_handler_authenticate(self::submission(['password' => $plain]), $seams);
@@ -367,10 +369,12 @@ final class RecoveryHandlerTest extends TestCase
         $this->assertSame(RECOVERY_POLICY_FAILURE_MESSAGE, $result['message']);
         $this->assertSame(1, $counts['lookup'], 'exactly one account lookup');
         $this->assertSame(1, $counts['verify'], 'exactly one password comparison');
+        $this->assertSame(1, $counts['record'], 'exactly one mechanism moves, and it moves once');
+        $this->assertSame(0, $counts['reserve'], 'the shared mode never charges the fallback counter');
         $this->assertSame(
-            ['token', 'ban', 'reserve', 'lookup', 'verify'],
+            ['token', 'ban', 'throttle', 'lookup', 'verify', 'record'],
             $result['steps'],
-            'the pipeline reaches the credential through the ban read and the reservation, once'
+            'the pipeline reaches the credential once, after both gates, and counts the failure once'
         );
         $this->assertNull($result['identity']);
     }
@@ -455,31 +459,46 @@ final class RecoveryHandlerTest extends TestCase
     }
 
     /**
-     * The rendered failure body, asserted on the script that renders it.
+     * The rendered failure body, asserted on the scripts that produce it.
      *
      * This is a source assertion and it is deliberate: the three strings the
      * console shipped are the oracle REC-05 closes, and their absence is only
      * observable by reading the file. The behavioural half — one message for
      * every cause — is the rest of this class.
+     *
+     * The message is built by the handler (`recovery_policy_failure_message()`)
+     * and rendered by the console, so both halves are asserted: a console that
+     * builds its own strings would still pass a handler-only check.
      */
     #[Test]
     public function theConsoleRendersOneFailureBody(): void
     {
-        $code = $this->codeWithoutComments(
+        $console = $this->codeWithoutComments(
             (string) file_get_contents(dirname(__DIR__) . '/recovery.php')
         );
 
         foreach (['no encontrado', 'no es administrador', 'Contraseña incorrecta'] as $distinct) {
             $this->assertStringNotContainsStringIgnoringCase(
                 $distinct,
-                $code,
+                $console,
                 'a distinct credential failure string turns the console into an oracle'
             );
         }
 
-        $this->assertStringContainsString('recovery_policy_failure_message', $code);
-        $this->assertStringContainsString('recovery_login_token_field', $code, 'the login form carries the console token');
-        $this->assertStringContainsString('recovery_login_token_validate', $code);
+        $this->assertStringContainsString(
+            'recovery_handler_authenticate',
+            $console,
+            'the console renders the one body the handler returns'
+        );
+        $this->assertStringContainsString('recovery_login_token_field', $console, 'the login form carries the console token');
+
+        $handler = $this->codeWithoutComments(
+            (string) file_get_contents(dirname(__DIR__) . '/lib/recovery_handler.php')
+        );
+
+        $this->assertStringContainsString('recovery_policy_failure_message', $handler);
+        $this->assertStringContainsString('recovery_login_token_validate', $handler);
+        $this->assertStringContainsString('recovery_legacy_hash_verify', $handler, 'REC-07 is the default verifier');
     }
 
     private function codeWithoutComments(string $source): string

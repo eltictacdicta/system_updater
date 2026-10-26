@@ -41,7 +41,10 @@ final class RecoverySessionBootstrapTest extends ConsoleHttpTestCase
         'recovery.php',
         'lib/recovery_secret.php',
         'lib/recovery_session.php',
-        'lib/session_auth.php',
+        'lib/recovery_handler.php',
+        'lib/recovery_policy.php',
+        'lib/recovery_legacy_hash.php',
+        'lib/recovery_login_token.php',
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',
     ];
