@@ -5,13 +5,19 @@
   created in the core `openspec/`
 - **Phase**: tasks
 - **Inputs**: `proposal.md` (amended 2026-10-25 — provenance note, Scope table, risk register),
-  the five deltas under `specs/` (**25 requirements / 93 scenarios**):
+  the six deltas under `specs/` (**26 requirements / 102 scenarios**):
   `plugin-auth-guard` AUTH-01…06, `plugin-recovery-access` RACC-01…08,
   `plugin-recovery-login` REC-01…08, `plugin-csrf-token` CSRF-01,
-  `plugin-backup-access` BA-01…02; `openspec/config.yaml` (`strict_tdd: true`)
+  `plugin-backup-access` BA-01…02, `plugin-updates` PU-16 (added 2026-10-26 by product-owner
+  decision after the other five were written); `openspec/config.yaml` (`strict_tdd: true`)
 - **Delivery strategy**: `auto-chain`
 - **Review budget**: **800 changed lines** per slice (session `review_budget_lines`)
-- **Total estimate**: **~3,600 changed lines / ~26 files** → must be sliced. Eight slices.
+- **Total estimate**: **~3,950 changed lines / ~28 files** → must be sliced. Nine slices, of which
+  eight form the declared chain and W9 is detached (see "Review Workload Forecast — W9").
+- **Added scope (2026-10-26)**: `PU-16` — a core update must stop writing the core's planning tree
+  into the installation. It shares no file, no test seam and no ordering constraint with W1…W8:
+  W9 touches `lib/core_updater.php`, not `recovery.php` or the guard, and it **may ship before any
+  other slice**.
 - **Core repository**: **out of scope**. No file under `base/`, `src/`, `controller/`, `model/`,
   `themes/` or the core `openspec/` is modified.
 
@@ -19,39 +25,62 @@
 
 | Field | Value |
 |-------|-------|
-| Estimated changed lines | ~3,600 (source/JS ~1,310, tests ~2,300) |
-| 400-line budget risk | **High** — five of eight slices exceed the repository's 400-line default; **Low** against the 800-line session budget |
-| Chained PRs recommended | **Yes** |
-| Suggested split | 8 sequential slices, one per workstream (largest ~615 lines) |
-| Delivery strategy | auto-chain |
-| Chain strategy | Sequential to `main`, declared merge order, no tracker branch |
+| Estimated changed lines | ~3,950 (source/JS ~1,420, tests ~2,550) |
+| 400-line budget risk | **High** — five of nine slices exceed the repository's 400-line default; **Low** against the 800-line session budget |
+| Chained PRs recommended | **Yes** for W1…W8; **No** for W9, which is detached |
+| Suggested split | 9 slices: 8 sequential (W1…W8) plus W9, independent and mergeable at any point |
+| Delivery strategy | auto-chain (W1…W8); W9 may ship first, in parallel, or last |
+| Chain strategy | Sequential to `main`, declared merge order, no tracker branch; W9 joins the same order at any position |
 | Session review budget | 800 changed lines per slice |
 | Largest single slice | ~615 lines (PR 4) — 77% of the 800-line budget |
 | Smallest single slice | ~270 lines (PR 6) |
+| W9 (detached slice) | ~360 lines — 45% of the 800-line budget, 0 dependencies, **may ship before PR 1** |
 
 Decision needed before apply: **Yes — three items (D1 blocking; D2 and D3 have a stated default)**
-Chained PRs recommended: **Yes**
+Chained PRs recommended: **Yes for W1…W8; W9 is detached**
 Chain strategy: **Sequential to `main`**
-400-line budget risk: **High as shipped per slice (~3,600 total); Low per slice against the 800-line budget**
+400-line budget risk: **High as shipped per slice (~3,600 in the chain + ~360 in W9); Low per slice against the 800-line budget**
 
-**Forecast in plain terms.** This change is **~3,600 changed lines across ~26 files** — about
+**Forecast in plain terms.** The chain is **~3,600 changed lines across ~26 files** — about
 9× the repository's 400-line review default and 4.5× the 800-line session budget if shipped as
 one unit. It cannot ship as a single PR, and unlike the companion core change
 (`2026-10-25-harden-auth-boundaries`, ~1,180 lines / 6 slices / largest ~230) it cannot fit in
 slices *under* 400 either: the tests dominate because the plugin suite has **no database**, so
 almost every requirement is asserted through a purpose-built seam (pure decision functions, a
 counting verifier, a temp install root with a sentinel `config.php`, a `php -S` subprocess with a
-cookie jar). Eight slices of 270–615 lines each land under the 800-line session budget and each is
-independently revertible. Every slice except PR 2, PR 3 and PR 6 exceeds the repository's 400-line
-default *because of its test file*, which is the same pattern the core slices exhibited; the
-forecast below does not pretend otherwise.
+cookie jar). Eight chained slices of 270–615 lines each land under the 800-line session budget and
+each is independently revertible. Every slice except PR 2, PR 3 and PR 6 exceeds the repository's
+400-line default *because of its test file*, which is the same pattern the core slices exhibited;
+the forecast below does not pretend otherwise. W9 (`PU-16`, added 2026-10-26) is counted separately
+below: it is ~360 lines, has no dependency on any other slice, and may ship before PR 1.
+
+### Review Workload Forecast — W9 (detached slice, added 2026-10-26)
+
+| Field | Value |
+|-------|-------|
+| Requirement | `PU-16` (delta `specs/plugin-updates/spec.md`) |
+| Estimated changed lines | **~360** (source ~110, tests ~250) |
+| Files touched | `lib/core_updater.php`, `tests/CoreUpdaterPruneTest.php` (new) — **2 files** |
+| 400-line budget risk | **Low** — ~360 lines, no test harness to build, no subprocess seam |
+| 800-line session budget | **Low** — 45% of the budget |
+| Dependencies | **None.** Independent of W1…W8 in both directions |
+| Ordering constraints | **None.** Touches `lib/core_updater.php`, which no other slice edits |
+| May ship before the rest? | **Yes.** It can be the first PR merged, run in parallel with any other slice, or merged last; it rebases cleanly because it shares no file with W1…W8 |
+| Why it is not folded into another slice | It has nothing in common with the recovery console. Folding it into W4 or W7 would mix two unrelated security surfaces in one review |
+
+**W9 in plain terms.** ~360 lines, one decision and its drift test. The source change is two call
+sites around one helper; the review weight is the test, which has to build a staging tree, run a
+real `ZipArchive` extraction and read the core's `nginx-sample.conf` without becoming vacuous when
+that file is absent. It is the one slice in this change a reviewer can read end-to-end in a single
+sitting.
 
 **D1 (blocking).** PR 1, PR 4, PR 5 and PR 8 sit between 500 and 620 lines. Auto-chain accepts
 them under the 800-line budget; the repository's 400-line default does not. Decide before apply:
-ship the eight slices as declared (recommended — each is one coherent security property plus its
-harness), or split PR 1 / PR 4 / PR 5 / PR 8 into ~12 slices of 250–300 lines at the cost of
+ship the eight chained slices as declared (recommended — each is one coherent security property plus
+its harness), or split PR 1 / PR 4 / PR 5 / PR 8 into ~12 slices of 250–300 lines at the cost of
 splitting a single decision across two PRs (PR 1's reader fix and its administrator verdict are
-the same failure; PR 4's gate and its marker are the same request chain).
+the same failure; PR 4's gate and its marker are the same request chain). W9 is not part of this
+decision: at ~360 lines it fits the 400-line default.
 
 **D2 (default stated).** Which session the console opens. RACC-05 says the authorization marker
 must be scoped to "the session that the console itself opened" and must not use a framework
@@ -83,11 +112,16 @@ body across **absent / empty / wrong**, no console marker, no `Set-Cookie`, no s
 | 6 | W6 — console legacy verifier + login-form token | REC-07, REC-01 (token primitive) | ~270 | **REC-07 is load-bearing for PR 7's autoload removal** |
 | 7 | W7 — console credential handler + A1 dependency removal | REC-01, REC-05, REC-06, REC-08 (wiring), RACC-01 | ~490 | Depends on PR 1, PR 4, PR 5, PR 6. **Internal order: wire REC-07 → then delete `vendor/autoload.php` and `lib/session_auth.php` from the console's graph.** The removal must NOT precede the local verifier |
 | 8 | W8 — two-gate mint + stepped restore drive | RACC-07, AUTH-05 (equality half), CSRF-01 (equality half) | ~490 | Depends on PR 4 and PR 7; flips PR 2's subset contract to equality |
+| 9 | W9 — core update stops writing the planning tree | PU-16 | ~300 | **No dependency on W1…W8.** Touches `lib/core_updater.php`, not the console. May merge first, in parallel, or last |
 
 ### Chain Dependency Diagram
 
 ```
                             main
+                             │
+                             │   PR 9  W9 core update prune ──► main   (detached: no arrow in,
+                             │        (PU-16)                            no arrow out; may
+                             │                                           merge at any point)
                              │
   PR 1  W1 guard identity ───┼──► PR 2  W2 refusal surface + minting subset
        (AUTH-01/02/03/06)    │         (AUTH-04, BA-01, BA-02, AUTH-05 subset)
@@ -114,12 +148,16 @@ body across **absent / empty / wrong**, no console marker, no `Set-Cookie`, no s
                                          main
 ```
 
-Merge order: **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8**. PR 3, PR 5 and PR 6 are code-independent of PR 1
+Merge order: **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8**, with **PR 9 insertable at any position**. PR 3,
+PR 5 and PR 6 are code-independent of PR 1
 and PR 2 and may be *authored* in parallel; they must still merge in the declared order because
 PR 7's tests reference their symbols. PR 7 will not compile without PR 1 (the guard decision),
 PR 4 (the marker), PR 5 (the policy) and PR 6 (the verifier and the login token), so it is authored
-last of that group. PR 8 must be authored after PR 7. No tracker branch is used: every PR merges to
-`main` and the next one rebases on it.
+last of that group. PR 8 must be authored after PR 7. **PR 9 shares no file with any other slice**:
+it edits `lib/core_updater.php` and adds `tests/CoreUpdaterPruneTest.php`, so it can be the first PR
+merged (recommended if the planning tree is the more urgent exposure), merged in parallel, or merged
+last; it rebases cleanly in every position. No tracker branch is used: every PR merges to `main`
+and the next one rebases on it.
 
 ## Global Constraints
 
@@ -208,11 +246,21 @@ ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml
 - Removing or relocating the recovery endpoint, deployment-side controls, CSP, HSTS,
   `system_updater_session_is_valid()`'s missing-`SessionPolicy` fail-open, and the unescaped nick
   at `recovery.php:194` — all named non-goals in `proposal.md`.
+- **Deleting the planning tree from an installation that already received it.** `PU-16` confines the
+  prune to the staging directory and forbids it from running against `$this->rootPath`; a
+  pre-existing `openspec/` in the root is an operator action, and `cleanupRootDirectories()` is not
+  extended with the eight names (see the W9 section).
+- **Deploying or editing `nginx-sample.conf`.** W9's test *reads* it (read-only, degraded gracefully
+  when absent) to prove the two lists match. No core file is modified, which keeps the
+  "core repository all of it" boundary intact.
+- **Pruning plugin ZIP installs** (`plugin_downloader::extractZipSafe()` at `:1441`,
+  `updater_manager::extractZipSafe()` at `:839`): they extract into `plugins/`, so a plugin's own
+  `openspec/` is exactly what must survive.
 
 ## Handed to this phase by the spec phase
 
-The spec phase closed with three items that belong to ordering and test shape, not to
-requirements. They are binding here:
+The spec phase closed with **four** items that belong to ordering and test shape, not to
+requirements. They are binding here (item 4 was added on 2026-10-26 with `PU-16`):
 
 1. **The token-minting contract test is written in the two-gate form, never the single-point
    form.** No such test exists today, and the proposal's risk 5 still describes the superseded
@@ -246,6 +294,15 @@ requirements. They are binding here:
    secret or an unauthenticated request records **no** `token_minted`, and additionally asserts the
    session store afterwards (`system_updater.csrf_tokens` absent, `recovery_console` marker intact).
    An order asserted only by reading the code is not acceptable.
+4. **The two-list anti-drift test has an always-runnable half.** `PU-16` requires the plugin's
+   allowlist and the core sample's planning deny block to be proven equal, and requires the test to
+   degrade gracefully where the core repository is absent (this plugin ships standalone too). The
+   shape is therefore fixed: the eight-name assertion runs **unconditionally**; the comparison
+   against `dirname(__DIR__, 3) . '/nginx-sample.conf'` runs when that file exists and otherwise
+   `markTestSkipped`s with a message naming the path it looked for. A bare `return`, an
+   `if (!file_exists) { $this->assertTrue(true); }`, or any skip without a reason is the vacuous
+   pass the requirement forbids. The block to compare against is the planning block
+   (`nginx-sample.conf:50-61`), never every deny in the file.
 
 ## Requirement traceability
 
@@ -276,6 +333,7 @@ requirements. They are binding here:
 | CSRF-01 | PR 2 + PR 8 | U2.5, U8.6 |
 | BA-01 | PR 1 + PR 2 | U1.5, U2.1, U2.3 |
 | BA-02 | PR 2 | U2.4 |
+| PU-16 | PR 9 | U9.1…U9.6 |
 
 ---
 
@@ -1129,6 +1187,131 @@ returns to a listing-only page with the shipped `action=start` button, i.e. exac
   the 12 `plugins/OidcProvider` failures are pre-existing and unrelated
 - [ ] PR body states that the console's restore path is now the stepped protocol and that a
   console-minted token is a CSRF credential for `start`/`begin`/`chunk` only
+
+---
+
+## PR 9 — W9: A core update stops writing the planning tree (PU-16)
+
+**Est. changed lines**: ~360 (source ~110, tests ~250)
+**Depends on**: **nothing.** Independent of W1…W8 in both directions: it edits
+`lib/core_updater.php`, which no other slice touches, and adds one new test file. It **may ship
+before PR 1**, in parallel with any other slice, or last.
+**Rollback boundary**: revert the allowlist constant, the prune helper and the two call sites. The
+updater returns to copying the whole branch tree, i.e. today's behaviour, with no persisted state,
+no schema and no operator action to undo.
+
+**Why this is its own slice.** The requirement has nothing in common with the recovery console: no
+`recovery.php`, no session, no token, no CSRF, no HTTP harness. Folding it into W4 or W7 would put
+two unrelated surfaces in one review and would make the prune revertible only together with the
+console's gate.
+
+**The code path being changed** (verified in this working tree, 2026-10-26):
+
+| Reference | Today |
+|---|---|
+| `lib/core_updater.php:102` | `$extractPath = $this->rootPath . '/tmp/core_update'` — the staging directory, inside the installation |
+| `lib/core_updater.php:222` | `prepareCoreSource()` returns the git clone (`:241`) or the ZIP extraction directory (`:251`) |
+| `lib/core_updater.php:354-360` | the ZIP source is the whole branch archive of `master`/`main`, so the planning tree is always inside it |
+| `lib/core_updater.php:563`, `:589` | `extractZipSafe()` → `$zip->extractTo($destination)`; **this is where the prune belongs** |
+| `lib/core_updater.php:428` | `findFirstDirectory()` returns the archive's own top-level directory (`fs-framework-master/`) — the effective source root, and therefore the base the prune must use |
+| `lib/core_updater.php:146` | `copyDirectorySelective()` writes the tree into the installation root |
+| `lib/core_updater.php:667` | `coreRootCopyExcludes()` does not exclude any of the eight |
+| `lib/core_updater.php:158-160` | the staging directory is deleted only *after* the copy |
+
+### Work Units
+
+| Unit | Goal | Est. lines | Seam | Rollback boundary |
+|------|------|-----------|------|-------------------|
+| U9.1 | **[TEST] [RED]** `tests/CoreUpdaterPruneTest.php` — the temp staging tree: all eight removed, runtime entries untouched, second run a no-op | ~75 | Temp tree + `ReflectionMethod` (the `CoreUpdaterTest` pattern) | Revert the new file |
+| U9.2 | The single allowlist declaration + `pruneNonRuntimeDirectories(string $baseDir): array` with containment, symlink and idempotence rules | ~60 | — | Remove the constant and the helper |
+| U9.3 | **[TEST] [RED]** refusal outside the base, a symlink not traversed, a missing name not an error, an unremovable name reported and non-fatal | ~55 | Temp tree + observed `chmod` precondition | Revert test additions |
+| U9.4 | Wire both call sites: after a successful `extractTo()` in `extractZipSafe()`, and on the clone directory before `copyDirectorySelective()`; surface the outcome in `update_core()`'s result and its progress message | ~50 | — | Revert the two calls and the result keys |
+| U9.5 | **[TEST] [RED]** end-to-end through `extractZipSafe()` with synthetic `ZipArchive` fixtures in **both** shapes (`<repo>-<branch>/` top-level directory, and the core tree at the archive root); and the failure half — a refused archive prunes nothing | ~70 | `ZipArchive` built in the test (verified available: PHP 8.3.33) | Revert test additions |
+| U9.6 | **[TEST]** the anti-drift test against `<core>/nginx-sample.conf`, with the always-runnable eight-name assertion and a **visible** skip when the core sample is absent | ~50 | `file_get_contents` + regex over `location ^~ /<name>/`; no write | Revert the new methods |
+
+**Unit → command.** U9.1/U9.3/U9.5/U9.6 `--filter CoreUpdaterPruneTest`; U9.2/U9.4 also
+`ddev exec php -l plugins/system_updater/lib/core_updater.php`.
+
+### Phase 1: The allowlist and the helper (TDD)
+
+- [ ] 1.1 **[TEST] [RED]** Build a temp staging tree containing the eight names plus `vendor/`,
+  `themes/`, `view/`, `plugins/` (with `plugins/system_updater/openspec/specs/pu.md`), `src/`,
+  `base/`, `model/`, `controller/`, `images/`, `imgs/`, `tmp/`, `backups/`, `config.php`,
+  `.htaccess`, and one file inside each. Assert after the prune: none of the eight exists; every
+  other entry exists and its contents are byte-identical; `plugins/system_updater/openspec/specs/pu.md`
+  is still there. RED today: nothing prunes, all eight survive.
+- [ ] 1.2 Declare the allowlist **once** (a class constant or a private static method returning the
+  eight literal names, the house shape of `coreRootCopyExcludes()`), and implement
+  `pruneNonRuntimeDirectories(string $baseDir): array` returning `['removed' => [...],
+  'failed' => [name => reason]]`. Rules, all from `PU-16`: closed list; single path segment only
+  (reject anything containing `/`, `\` or `..`); resolve and reject a candidate outside `$baseDir`;
+  never traverse a symlink; a missing candidate is a silent no-op; a failed removal is recorded and
+  does not throw and does not change the caller's return value. Note in the docblock that
+  `coreRootCopyExcludes()` exclusion is **not** the mechanism and MUST NOT become the only one.
+- [ ] 1.3 **[TEST] [RED]** The negative cases: a symlink inside the base pointing outside →
+  refused and reported, the target's contents unchanged; a candidate whose resolved path escapes the
+  base → refused; a run on a tree already pruned → `removed` and `failed` both empty; an unwritable
+  directory (precondition **observed**, `markTestSkipped` with a recorded reason on a privileged
+  host — the `RecoverySecretTest` precedent) → named in `failed`, the other names still attempted,
+  no exception. Assert `$this->rootPath` is never the base: a pre-existing `openspec/` in the
+  installation root is untouched by the whole update (source assertion that no call site passes
+  `$this->rootPath`/`FS_FOLDER`).
+
+### Phase 2: Both source branches (TDD)
+
+- [ ] 2.1 **[TEST] [RED]** Synthetic ZIPs holding the eight names plus runtime entries, extracted
+  through the production `extractZipSafe()` (via `ReflectionMethod`), in **both** shapes:
+  (a) the branch-archive shape, where everything sits one level down under
+  `<repo>-<branch>/` — the shape every real update has, because GitHub archives are named after the
+  branch (`core_updater.php:357-360`), and the shape that makes a naive prune of the outer
+  destination find nothing and pass vacuously; (b) the uploaded-ZIP shape, where the core tree is the
+  archive root. Assert in both: afterwards none of the eight exists in the directory
+  `findFirstDirectory()` returns (the one the copy reads) and runtime entries do. Then the failure
+  half: an archive carrying a `../` entry is refused and **no** directory was removed from the
+  destination (the prune did not run on a failed extraction). RED today on the positive halves.
+- [ ] 2.2 Wire it: in `extractZipSafe()` immediately after `$result = $zip->extractTo($destination)`
+  returns `true` and before the method returns (never before, never when `$result` is falsy), and in
+  `prepareCoreSource()` on the clone directory before it is returned, so the branch the updater
+  prefers when `git` is available is covered by the same list and the same helper. **Resolve the
+  effective source root** (the `findFirstDirectory()` result) and prune there; pruning only the
+  outer `$destination` would leave the tree one level down with an all-green test. Record the
+  helper's report into the instance state `update_core()` already returns, so a surviving directory
+  is visible in the result (`pruned_directories`, `prune_failures`) and in one progress message.
+  The prune outcome MUST NOT change `success`, and MUST NOT add an entry to `$this->errors`.
+
+### Phase 3: The anti-drift test (TDD, last)
+
+- [ ] 3.1 **[TEST]** `CoreUpdaterPruneTest::theAllowlistMatchesTheCoreSampleDenyBlock()`:
+  - **always runs**: the plugin's declared allowlist equals the eight literal names stated by
+    `PU-16` (so a silent removal or addition is RED without the core repository present);
+  - **drift half**: read `dirname(__DIR__, 3) . '/nginx-sample.conf'` (the file sits at
+    `<core>/nginx-sample.conf`; `__DIR__` is one level deeper than the plugin root), extract the
+    top-level directory names denied in the "Planning, documentation and analysis trees" block, and
+    assert set equality with the allowlist. **Do not** absorb `/vendor/`, `/tmp/`, `/backups/`,
+    `/.git/` or the file-level denies: those are runtime and operator paths the allowlist must never
+    contain, and treating them as members would widen it silently;
+  - **absent file**: `markTestSkipped` with a message that names the resolved path and states that
+    the two-list comparison did not run. Never a bare `return`; never a green suite with an
+    unremarked skip. The always-runs assertion above MUST still execute first.
+  - The test reads the file and writes nothing.
+
+### PR 9 verification
+
+- [ ] `--filter CoreUpdaterPruneTest` — record tests/assertions and whether any case skipped
+- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
+  against the baseline measured immediately before U9.1
+- [ ] `ddev exec php -l plugins/system_updater/lib/core_updater.php plugins/system_updater/tests/CoreUpdaterPruneTest.php`
+- [ ] `git status --porcelain` shows only `lib/core_updater.php` and the new test file (plus
+  `openspec/`, which is working-tree only); **no** file under the core repository is modified
+- [ ] PR body states that `nginx-sample.conf` was read and not edited, and names the skip condition
+
+**Recorded consequences of this slice** (they belong in the PR body, not only here): `docs/` and
+`extras/` leave an installation on the first update after this ships (because
+`cleanupRootDirectories()` already deletes them and the pruned source can no longer restore them);
+the other six persist on installations that already received them, because the prune is confined to
+the staging directory; and a developer who runs the updater inside a git checkout loses the
+directories from the working tree (`git checkout -- .` restores them). None of the eight is a
+runtime dependency, which is the whole basis of the decision.
 
 ---
 
