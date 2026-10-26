@@ -18,13 +18,18 @@ declare(strict_types=1);
  * Decide here, act in the console
  * -------------------------------
  * This file answers questions. It never reads the request, never opens the
- * database, never writes the ban bucket and never touches a session. The
- * console collects the facts (was the form token valid? is this address
- * banned? is this nick throttled? which row, if any?) and asks
+ * database, never writes the ban bucket and never touches a session. The console
+ * collects the facts (was the form token valid, was the submission complete, is
+ * this address banned, which row, if any?) and asks
  * {@see recovery_policy_evaluate()} what to do. That split is what makes every
  * requirement in this slice falsifiable in a suite that has no database: each
  * answer is a function over injected facts, and "the credential was evaluated"
  * is a call counter on an injected verdict instead of a timing measurement.
+ *
+ * There is exactly one exception, and it is deliberate: the budget. The console
+ * hands the pipeline a reservation seam and the pipeline charges it, because the
+ * charge has to happen in the same step as the decision that allowed it. Keeping
+ * those two apart is the race this file now closes; see below.
  *
  * The order is the requirement
  * ----------------------------
@@ -605,7 +610,8 @@ function recovery_policy_fallback_count(string $path, string $nick, string $ip, 
  * `throttled` answers "was **this** submission refused", not "is the budget now
  * closed": the sixth reservation is admitted and reports six, and the seventh is
  * the one that is refused. `attempts` / `account_attempts` are the counts after
- * an admission and the counts as found on a refusal.
+ * an admission, the counts as found on a refusal, and zero when the counter
+ * itself is unusable.
  *
  * A counter that cannot be opened or locked answers `reserved` and `throttled`
  * both `false`: the submission proceeds and the console still owes a count that
@@ -618,12 +624,15 @@ function recovery_policy_fallback_count(string $path, string $nick, string $ip, 
  */
 function recovery_policy_fallback_reserve(string $path, string $nick, string $ip, int $now): array
 {
+    $refused = false;
+
     $result = recovery_policy_fallback_transact(
         $path,
         $now,
-        static function (array $state) use ($nick, $ip, $now): array {
-            $verdict = recovery_policy_counter_verdict($state, $nick, $ip, $now);
-            if ($verdict['throttled']) {
+        static function (array $state) use ($nick, $ip, $now, &$refused): array {
+            if (recovery_policy_counter_verdict($state, $nick, $ip, $now)['throttled']) {
+                $refused = true;
+
                 return [$state, false];
             }
 
@@ -646,7 +655,7 @@ function recovery_policy_fallback_reserve(string $path, string $nick, string $ip
 
     return [
         'reserved' => $result['written'],
-        'throttled' => !$result['written'],
+        'throttled' => $refused,
         'attempts' => $verdict['attempts'],
         'account_attempts' => $verdict['account_attempts'],
     ];
