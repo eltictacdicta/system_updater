@@ -374,6 +374,245 @@ final class CoreUpdaterPruneTest extends TestCase
     }
 
     /**
+     * PU-16, "the prune belongs to extractZipSafe()": a branch archive — the
+     * shape every real update has — is pruned one level down, in the directory
+     * the copy actually reads.
+     *
+     * This is the case a naive prune of the outer destination passes without
+     * doing anything: the eight live in `fs-framework-master/`, so a prune that
+     * only looks at the extraction root finds none of them, removes nothing and
+     * reports success.
+     */
+    public function testABranchArchiveIsPrunedInTheDirectoryTheCopyReads(): void
+    {
+        $zip = $this->buildZip('branch', $this->branchArchiveEntries());
+        $destination = $this->tempDir . '/extract';
+
+        $this->assertTrue($this->extractZipSafe($zip, $destination), 'the fixture archive must extract');
+        $this->assertArchiveCarriesPlanningTree($zip, 'fs-framework-master/');
+
+        $source = $destination . '/fs-framework-master';
+        $this->assertDirectoryExists($source, 'a branch archive extracts into its own top-level directory');
+        $this->assertSame(
+            ['fs-framework-master'],
+            array_values(array_diff((array) scandir($destination), ['.', '..'])),
+            'the prune base must not be the outer destination in this shape'
+        );
+
+        foreach (self::PLANNING_DIRECTORIES as $name) {
+            $this->assertDirectoryDoesNotExist($source . '/' . $name, $name . '/ must be gone from the copied tree');
+        }
+
+        $this->assertFileExists($source . '/VERSION');
+        $this->assertFileExists($source . '/index.php');
+        $this->assertFileExists($source . '/base/fs_model.php');
+        $this->assertFileExists($source . '/vendor/autoload.php');
+        $this->assertFileExists($source . '/themes/AdminLTE/view/base.html.twig');
+        $this->assertFileExists($source . '/plugins/system_updater/openspec/specs/pu.md');
+    }
+
+    /**
+     * PU-16, the second ZIP shape: an archive whose root already is the core
+     * tree has no wrapping directory, so the extraction root is the source root
+     * and is pruned in place.
+     */
+    public function testAnArchiveWhoseRootIsTheCoreTreeIsPrunedAtTheRoot(): void
+    {
+        $zip = $this->buildZip('root', $this->rootArchiveEntries());
+        $destination = $this->tempDir . '/extract_root';
+
+        $this->assertTrue($this->extractZipSafe($zip, $destination));
+        $this->assertArchiveCarriesPlanningTree($zip, '');
+
+        $this->assertGreaterThan(
+            1,
+            count(array_diff((array) scandir($destination), ['.', '..'])),
+            'this shape has no single wrapping directory, so the root itself is the source'
+        );
+
+        foreach (self::PLANNING_DIRECTORIES as $name) {
+            $this->assertDirectoryDoesNotExist($destination . '/' . $name, $name . '/ must be gone from the extracted root');
+        }
+
+        $this->assertFileExists($destination . '/VERSION');
+        $this->assertFileExists($destination . '/base/fs_model.php');
+        $this->assertFileExists($destination . '/vendor/autoload.php');
+        $this->assertFileExists($destination . '/plugins/system_updater/openspec/specs/pu.md');
+    }
+
+    /**
+     * PU-16, "A failed extraction is never pruned": a refused archive leaves the
+     * partial tree exactly as it was, and the reported failure stays the
+     * extraction failure.
+     */
+    public function testARefusedArchivePrunesNothing(): void
+    {
+        $zip = $this->buildZip('refused', [
+            '../evil.txt' => 'escape',
+            'openspec/keep.md' => 'planning',
+        ]);
+
+        $destination = $this->tempDir . '/extract_refused';
+        mkdir($destination . '/openspec', 0755, true);
+        file_put_contents($destination . '/openspec/sentinel.md', 'pre-existing');
+
+        $updater = $this->newUpdater();
+        $this->assertFalse(
+            $this->extractZipSafe($zip, $destination, $updater),
+            'an archive carrying a traversal entry must be refused'
+        );
+
+        $this->assertFileExists(
+            $destination . '/openspec/sentinel.md',
+            'the prune must not run on a refused extraction'
+        );
+        $this->assertFileDoesNotExist($this->tempDir . '/evil.txt');
+        $this->assertNotSame([], $updater->get_errors(), 'the extraction failure must be reported');
+    }
+
+    /**
+     * PU-16, end to end through the real update path with an uploaded ZIP (the
+     * only source branch that touches no network): the installation receives the
+     * runtime tree and none of the eight, the prune outcome is visible in the
+     * result, and it changes neither `success` nor the error list.
+     *
+     * The pre-existing `openspec/` in the installation root is the sentinel for
+     * "the prune never runs against the installation": it must survive.
+     */
+    public function testACoreUpdateLeavesNoPlanningDirectoryInTheInstallation(): void
+    {
+        $root = $this->tempDir . '/install';
+        mkdir($root . '/openspec', 0755, true);
+        file_put_contents($root . '/openspec/operator.md', 'pre-existing operator tree');
+        mkdir($root . '/plugins/system_updater/openspec/specs', 0755, true);
+        file_put_contents($root . '/plugins/system_updater/openspec/specs/pu.md', '# PU-16');
+
+        $zip = $this->buildZip('core', $this->branchArchiveEntries());
+        $updater = new \core_updater($root);
+
+        $result = $updater->update_core(false, null, $zip);
+
+        $this->assertTrue($result['success'], 'the prune must not change the update outcome');
+        $this->assertSame([], $updater->get_errors(), 'the prune must not add an error');
+        $this->assertSame(
+            $this->sorted(self::PLANNING_DIRECTORIES),
+            $this->sorted($result['pruned_directories']),
+            'the update result must name what the prune removed'
+        );
+        $this->assertSame([], $result['prune_failures']);
+
+        foreach (array_diff(self::PLANNING_DIRECTORIES, ['openspec']) as $name) {
+            $this->assertDirectoryDoesNotExist($root . '/' . $name, 'the installation must not receive ' . $name . '/');
+        }
+
+        $this->assertFileExists($root . '/openspec/operator.md', 'the installation root is never a prune base');
+        $this->assertFileExists($root . '/plugins/system_updater/openspec/specs/pu.md');
+        $this->assertFileExists($root . '/VERSION');
+        $this->assertFileExists($root . '/index.php');
+        $this->assertFileExists($root . '/base/fs_model.php');
+    }
+
+    // ------------------------------------------------------- extraction helpers
+
+    /**
+     * @param array<string, string> $entries
+     */
+    private function buildZip(string $name, array $entries): string
+    {
+        if (!class_exists('ZipArchive')) {
+            $this->markTestSkipped('ZipArchive is not available in this PHP build, so the extraction half cannot run');
+        }
+
+        $path = $this->tempDir . '/' . $name . '.zip';
+        $zip = new \ZipArchive();
+        $this->assertTrue($zip->open($path, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) === true);
+
+        foreach ($entries as $entry => $content) {
+            $zip->addFromString($entry, $content);
+        }
+
+        $zip->close();
+
+        return $path;
+    }
+
+    /**
+     * The branch-archive shape: one top-level directory, the eight inside it,
+     * and the runtime entries an update must deliver.
+     *
+     * @return array<string, string>
+     */
+    private function branchArchiveEntries(): array
+    {
+        return $this->prefixedEntries('fs-framework-master/');
+    }
+
+    /**
+     * The uploaded-ZIP shape: the core tree is the archive root.
+     *
+     * @return array<string, string>
+     */
+    private function rootArchiveEntries(): array
+    {
+        return $this->prefixedEntries('');
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function prefixedEntries(string $prefix): array
+    {
+        $entries = [];
+
+        foreach (self::PLANNING_DIRECTORIES as $name) {
+            $entries[$prefix . $name . '/keep.md'] = 'planning content for ' . $name;
+        }
+
+        $entries[$prefix . 'VERSION'] = '0.13.0';
+        $entries[$prefix . 'index.php'] = '<?php // entry';
+        $entries[$prefix . 'base/fs_model.php'] = '<?php // model';
+        $entries[$prefix . 'vendor/autoload.php'] = '<?php // autoload';
+        $entries[$prefix . 'themes/AdminLTE/view/base.html.twig'] = '{{ base }}';
+        $entries[$prefix . 'view/css/app.css'] = 'body{}';
+        $entries[$prefix . 'plugins/system_updater/openspec/specs/pu.md'] = '# PU-16';
+
+        return $entries;
+    }
+
+    /**
+     * Anti-vacuity control: the fixture archive really carries the eight before
+     * extraction, so "they are gone afterwards" means the prune removed them and
+     * not that the fixture never had them.
+     */
+    private function assertArchiveCarriesPlanningTree(string $zipPath, string $prefix): void
+    {
+        $zip = new \ZipArchive();
+        $this->assertTrue($zip->open($zipPath) === true);
+
+        foreach (self::PLANNING_DIRECTORIES as $name) {
+            $this->assertNotFalse(
+                $zip->locateName($prefix . $name . '/keep.md'),
+                'the fixture archive must carry ' . $name . '/'
+            );
+        }
+
+        $zip->close();
+    }
+
+    private function extractZipSafe(string $zipPath, string $destination, ?\core_updater $updater = null): bool
+    {
+        if (!is_dir($destination)) {
+            mkdir($destination, 0755, true);
+        }
+
+        $instance = $updater ?? $this->newUpdater();
+        $method = new \ReflectionMethod($instance, 'extractZipSafe');
+        $method->setAccessible(true);
+
+        return (bool) $method->invoke($instance, $zipPath, $destination);
+    }
+
+    /**
      * PU-16, "the installation root never is": the prune is confined to what
      * `prepareCoreSource()` populated. Pinned structurally because a single
      * call site passing `$this->rootPath` would delete an operator's tree.
