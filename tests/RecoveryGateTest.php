@@ -182,7 +182,63 @@ final class RecoveryGateTest extends ConsoleHttpTestCase
         $this->assertSame(404, $response['status'], 'a damaged config.php must still answer the 404: ' . $response['body']);
         $this->assertStringNotContainsString('Parse error', $response['body']);
         $this->assertStringNotContainsString('syntax error', $response['body']);
-        $this->assertFalse($harness->configWasLoaded(), 'the gate runs before config.php, so nothing executed it');
+        $this->assertFalse($harness->configWasLoaded(), 'a parse error never gets as far as its first statement');
+        $this->assertStringNotContainsString(
+            'Parse error',
+            $harness->errorLogContents(),
+            'and it is not warned about in the server log either'
+        );
+    }
+
+    /**
+     * RACC-01's "a missing `config.php` is the only hard stop": HTTP 500 and a
+     * plain-text body naming the file **and the directory it was expected in**.
+     *
+     * The verify phase measured `200 OK` with a body that named only the file
+     * (W-1), which is also an operational defect: a hard stop that answers 200 is
+     * invisible to uptime checks and access logs. This is the one case where a
+     * distinct response is correct — the operator has to be able to see what is
+     * missing — so the case also asserts it cannot be mistaken for the gate's
+     * 404.
+     */
+    public function testAMissingConfigIsAFiveHundredThatNamesTheDirectory(): void
+    {
+        $secret = $this->newSecret();
+        $harness = $this->newHarness(self::CONSOLE_FILES);
+        $harness->boot($this->gateConfigBody());
+        $harness->persistSecret($secret);
+
+        unlink($harness->root . '/config.php');
+        $this->assertFileDoesNotExist($harness->root . '/config.php', 'premise: the only hard stop is missing');
+
+        $response = $harness->request(self::CONSOLE . '?secret=' . $secret);
+
+        $this->assertSame(500, $response['status'], 'a missing config.php is a server-side hard stop: ' . $response['body']);
+        $this->assertStringContainsString('config.php', $response['body'], 'the body names the missing file');
+        $this->assertStringContainsString(
+            $harness->root,
+            $response['body'],
+            'and the directory it was expected in, which is what an operator needs to fix it'
+        );
+        $this->assertNotSame(404, $response['status'], 'the hard stop is not the gate refusal');
+        $this->assertStringNotContainsString('Not Found', $response['body'], 'and its body is not the refusal body');
+        $this->assertSame(
+            ['Content-Type: text/plain; charset=utf-8'],
+            $harness->headersMatching($response, 'content-type'),
+            'the body is plain text, as the requirement states'
+        );
+        $this->assertSame([], $harness->headersMatching($response, 'set-cookie'), 'and it starts no session');
+
+        foreach (['Fatal error', 'Stack trace', 'Uncaught', $secret, 'FS_DB_PASS'] as $leak) {
+            $this->assertStringNotContainsString($leak, $response['body'], 'the hard stop discloses nothing');
+            $this->assertStringNotContainsString($leak, $response['headers'], 'not even in a header');
+        }
+
+        // The same missing file, requested without the secret, is still the plain
+        // 404: the two responses are decided by the gate first, so nothing about
+        // the hard stop is reachable without the secret.
+        $anonymous = $harness->request(self::CONSOLE);
+        $this->assertSame(404, $anonymous['status'], 'without the secret the console still does not exist');
     }
 
     /**

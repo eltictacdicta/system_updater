@@ -112,11 +112,25 @@ header('Referrer-Policy: no-referrer');
 // `lib/session_auth.php`, que arrastra `base/config2.php` y el kernel: el nombre
 // de sesión lo resuelve `lib/recovery_session.php` sin ninguna clase del core
 // (RACC-08), y la identidad la escribe `lib/recovery_handler.php`.
-if (file_exists(FS_FOLDER . '/config.php')) {
-    require_once FS_FOLDER . '/config.php';
-} else {
-    die("Error: No se encuentra el archivo config.php.");
+//
+// RACC-01: que falte config.php es la ÚNICA parada dura del console, y su
+// respuesta es deliberadamente distinta de la negativa: HTTP 500 y un cuerpo de
+// texto plano que nombra el fichero y el directorio donde se esperaba. El
+// operador tiene que poder ver qué falta — para eso existe esta respuesta — y un
+// 200 en una parada dura es invisible para un uptime check y para el log de
+// accesos. No se puede confundir con el 404 de RACC-04: ese se decide antes, en
+// la puerta, y sin el secreto esta rama no se alcanza.
+//
+// La ruta se escribe literal en el `require_once` a propósito: el grafo de
+// includes de RACC-01 se enumera estáticamente, y una ruta en variable lo
+// dejaría sin resolver justo en el único fichero externo permitido.
+if (!is_file(FS_FOLDER . '/config.php')) {
+    header('Content-Type: text/plain; charset=utf-8');
+    http_response_code(500);
+    die('Error: no se encuentra el archivo config.php en el directorio ' . FS_FOLDER . ".\n");
 }
+
+require_once FS_FOLDER . '/config.php';
 
 // Sesión. El nombre se resuelve DESPUÉS de config.php, que es donde vive
 // FS_SESSION_NAME — salvo en la negativa, donde la lectura de la marca lo hace
