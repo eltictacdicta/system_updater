@@ -620,7 +620,10 @@ rollback plan states.
   encode the resolution, not one horn of the contradiction.
 - [x] 1.4 Resolution + CLI. `recovery_secret_resolve(): string` implements the documented order.
   CLI: `php <root>/plugins/system_updater/recovery.php --secret` prints the current value and opens
-  no DB connection (assert the sentinel `config.php` was not executed); `--rotate-secret` prints and
+  no DB connection (assert the sentinel `config.php` was not executed — **superseded by N-1**: the
+  escape now resolves the pin first, so the sentinel *is* expected to be executed; it still opens no
+  DB connection and loads no core code. See "N-1 and S-7" at the end of this file);
+  `--rotate-secret` prints and
   persists a **new** value and a later request carrying the old value is refused by PR 4's gate.
   First generation writes the value **exactly once** to `error_log` under a fixed, documented
   prefix — assert by running the CLI with `error_log` redirected to a temp file and counting
@@ -1793,7 +1796,8 @@ written RED first against the defect the verify phase measured; each commit is g
 - [x] Each commit green on its own: `549d5b9` → 645/2411/2; `94eaca9` → 646/2431/2; `7bd9126` →
   650/2515/2.
 - [x] No `openspec/` file is committed on this branch: `tasks.md` edits and `verify-report.md` stay
-  in the working tree for the delta-amendment phase.
+  in the working tree for the delta-amendment phase. (One deliberate exception later, on the N-1/S-7
+  branch: `specs/plugin-recovery-access/spec.md`, the `S-7` clause. Recorded in that section.)
 - [ ] **Not done here (separate phases)**: amend `RACC-01`'s "a wrong secret never reaches
   `config.php`" scenario, `RACC-03`'s "the gate answers before `config.php` is loaded" scenario and
   `RACC-06`'s escape-3 wording to the decided order; re-run the verify phase; then archive.
@@ -1808,3 +1812,37 @@ value written before this branch. It has no installed base — the per-installat
 introduced by this same unreleased change — and, if a branch build did write one, the documented
 RACC-06 sinks recover the new value (`php recovery.php --secret`, `--rotate-secret`, or the single
 generation line in the PHP error log).
+
+### N-1 and S-7 — the re-verification's new findings (2026-10-26)
+
+N-1 was recorded in the re-verification as closable by a delta sentence. The maintainer rejected
+that framing: a CLI that prints a credential the gate refuses is a code defect, so the code was
+fixed. S-7 is the documentation half and is the one `openspec/` file committed deliberately
+(`specs/plugin-recovery-access/spec.md`, `RACC-02`'s path-spelling clause).
+
+- [x] `--secret` resolves the operator pin first, with the gate's own read
+  (`recovery_secret_cli_pin()` → error-suppressed `@include`, output-buffered, `Throwable`-caught,
+  idempotent), so the value it prints is the value the gate accepts. `RACC-03`'s "identical in every
+  consumer" now holds for the CLI too.
+- [x] In a pinned installation the read escape prints **the pin**, not a warning above the persisted
+  value: the first line has to remain a usable secret (the documented shell-composable contract), and
+  the persisted value under a warning is composable-but-wrong — the same trap, one indirection
+  deeper. The refused value is never printed in that state, so the answer cannot be confused with it;
+  a `# note:` line names the source. Justification is in the `recovery_secret_cli_run()` docblock.
+- [x] `--rotate-secret` keeps its override behaviour and its existing note verbatim, and adds that a
+  pin in force means the gate still does not accept the value it just printed.
+- [x] A damaged or absent `config.php` falls back silently: "no pin", the persisted branch answers,
+  and no parse error, warning or log entry reaches stdout, stderr or the server log.
+- [x] A non-pinned installation is unchanged, line for line (asserted: the advisory line is
+  conditional, so composed commands do not gain a stray `#` line).
+- [x] The CLI still exits non-zero and prints no secret on an unwritable location, and now also on an
+  unverifiable install root (which has no `config.php` to consult either).
+- [x] `RACC-02`'s folding sentence now states the real condition: trailing slash and redundant `..`
+  fold; a symlink folds only when it sits in the parent of the real installation. Reached through
+  another parent it keeps the same digest under a different parent and resolves a second candidate
+  directory. Pinned by
+  `RecoverySecretTest::testAPathSpellingFoldsOnlyWhenItsParentFolds`, and the same overclaim in
+  `recovery_secret_install_directory()`'s docblock is corrected with it.
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` →
+  **656 tests / 2573 assertions / 2 skipped, 0 failures** (baseline for this phase was
+  650 / 2515 / 2).
