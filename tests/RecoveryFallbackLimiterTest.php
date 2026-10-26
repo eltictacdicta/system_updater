@@ -236,15 +236,114 @@ final class RecoveryFallbackLimiterTest extends TestCase
         $this->assertSame(1, recovery_policy_fallback_count($path, 'otro', '198.51.100.9', $later)['attempts']);
     }
 
+    /**
+     * The counter lives in the installation, not in a directory every local user
+     * can write to.
+     *
+     * `sys_get_temp_dir()` is world-writable and the file name is predictable
+     * from the install root, so on a shared host another account can pre-create
+     * the counter `0666` and then delete it (disabling the limiter), inflate it
+     * (locking the administrator out) or plant a symlink for the next write to
+     * follow. `FS_FOLDER/tmp/` already belongs to the installation, already
+     * exists, and already holds `ip.log`; nothing in the core is needed to use
+     * it. The per-install digest stays, because two installations under one
+     * document root must not share a budget.
+     */
     #[Test]
-    public function theCounterFileBelongsToTheInstallationNotTheWholeHost(): void
+    public function theCounterFileLivesInsideTheInstallation(): void
     {
-        $first = recovery_policy_fallback_path('/tmp/install-a');
-        $second = recovery_policy_fallback_path('/tmp/install-b');
+        $root = $this->tempDir();
+        $path = recovery_policy_fallback_path($root);
 
-        $this->assertNotSame($first, $second, 'two installations sharing /tmp must not share a budget');
-        $this->assertStringStartsWith(rtrim(sys_get_temp_dir(), '/') . '/', $first);
-        $this->assertStringContainsString(FS_TMP_NAME, $first, 'the suite namespaces its own tmp prefix');
+        $this->assertSame($root . '/tmp', dirname($path), 'the installation own tmp directory, not the host one');
+        $this->assertStringContainsString(FS_TMP_NAME, $path, 'the suite namespaces its own tmp prefix');
+        $this->assertStringStartsWith(
+            'system_updater_recovery_throttle_',
+            basename($path),
+            'one predictable file name per installation, inside a directory the installation controls'
+        );
+
+        $this->assertNotSame(
+            recovery_policy_fallback_path('/tmp/install-a'),
+            recovery_policy_fallback_path('/tmp/install-b'),
+            'two installations must not share a budget'
+        );
+    }
+
+    /**
+     * A planted link must not become the counter.
+     *
+     * Following it would let whoever created it choose where the next write
+     * lands, and reading through it would let them feed the limiter forged
+     * counts. The answer is the same one an unreadable file gets: no state, and
+     * a fail-open refusal to write.
+     */
+    #[Test]
+    public function aSymlinkedCounterFileIsRefused(): void
+    {
+        $dir = $this->tempDir();
+        $path = $dir . '/counter.json';
+        $target = $dir . '/target.json';
+        file_put_contents($target, json_encode([
+            'pair_' . md5('admin|203.0.113.7') => ['count' => 99, 'updated' => self::NOW],
+        ]));
+        symlink($target, $path);
+
+        $this->assertSame([], recovery_policy_fallback_state($path), 'a link is not the counter');
+        $this->assertFalse(recovery_policy_fallback_record($path, 'admin', '203.0.113.7', self::NOW));
+
+        $reservation = recovery_policy_fallback_reserve($path, 'admin', '203.0.113.7', self::NOW);
+        $this->assertFalse($reservation['reserved'], 'nothing was charged through the link');
+        $this->assertFalse($reservation['throttled'], 'an unusable counter fails open, it does not lock the door');
+
+        $this->assertSame(
+            json_encode([
+                'pair_' . md5('admin|203.0.113.7') => ['count' => 99, 'updated' => self::NOW],
+            ]),
+            file_get_contents($target),
+            'the link target is never written'
+        );
+    }
+
+    /**
+     * The counter holds one installation's attempt counts, so nobody else needs
+     * to read it. A file created by the console - or pre-created by someone else
+     * with loose bits - must end up owner-only after the first write.
+     */
+    #[Test]
+    public function theCounterFileIsOwnerOnly(): void
+    {
+        $dir = $this->tempDir();
+        $path = $dir . '/fresh.json';
+
+        $this->assertTrue(recovery_policy_fallback_record($path, 'admin', '203.0.113.7', self::NOW));
+        clearstatcache(true, $path);
+        $this->assertSame(0, fileperms($path) & 0077, 'a new counter is created owner-only');
+    }
+
+    #[Test]
+    public function aWorldWritableCounterFileIsTightenedOnWrite(): void
+    {
+        $dir = $this->tempDir();
+        $path = $dir . '/planted.json';
+        file_put_contents($path, '{}');
+        chmod($path, 0666);
+
+        $this->assertTrue(recovery_policy_fallback_record($path, 'admin', '203.0.113.7', self::NOW));
+        clearstatcache(true, $path);
+        $this->assertSame(0, fileperms($path) & 0077, 'a pre-created 0666 counter is narrowed, not trusted');
+    }
+
+    #[Test]
+    public function anUnusableCounterDirectoryFailsOpen(): void
+    {
+        $path = $this->tempDir() . '/missing/nested/counter.json';
+
+        $this->assertFalse(recovery_policy_fallback_record($path, 'admin', '203.0.113.7', self::NOW));
+
+        $reservation = recovery_policy_fallback_reserve($path, 'admin', '203.0.113.7', self::NOW);
+        $this->assertFalse($reservation['reserved']);
+        $this->assertFalse($reservation['throttled'], 'a counter that cannot be written must not lock the operator out');
     }
 
     #[Test]
