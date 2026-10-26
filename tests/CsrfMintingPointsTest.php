@@ -22,16 +22,17 @@ use PHPUnit\Framework\TestCase;
  *      constant-time (RACC-04) plus an administrator session in the console
  *      (REC-06/RACC-07).
  *
- * This file holds the **subset** half, which is the half that is true now:
- * every file that invokes a minting helper resolves to an entry point in that
- * authorized set, and no `process_*` script and no `download_backup.php` is in
- * it. `recovery.php` does not mint yet; that is allowed by the subset and is
- * W8's job.
+ * The file holds the contract in **two methods, and it needs both**. The
+ * subset half says "no more than these two": every file that invokes a minting
+ * helper resolves to an entry point in the authorized set, and no `process_*`
+ * script and no `download_backup.php` is in it. The equality half says "and
+ * both of them": the set is exactly `{admin_updater, recovery.php}`.
  *
- * The **equality** half — the set is *exactly* `{admin_updater, recovery.php}`
- * — is U8.6 and is deliberately absent here: a test asserting equality today
- * would be red until the console mints, and would say nothing useful in the
- * meantime.
+ * Neither implies the other. The subset alone was true while the console minted
+ * nothing — a console that cannot restore, which is the state `RACC-07`
+ * reverses. The equality alone would pass if both points moved to two
+ * unauthorized entry points, because it only compares against the same pair by
+ * set, so the subset's per-file resolution is what keeps the list honest.
  *
  * Two things this file must never become:
  *
@@ -50,6 +51,15 @@ final class CsrfMintingPointsTest extends TestCase
      * "all of these today".
      */
     private const AUTHORIZED_ENTRY_POINTS = ['admin_updater', 'recovery.php'];
+
+    /**
+     * The module through which the console reaches the minting helpers.
+     *
+     * Named in the equality half as a *premise*, so a contract that silently
+     * loses the console's mint reports "the second gate stopped minting"
+     * instead of a diff between two short lists.
+     */
+    private const CONSOLE_MINT_MODULE = 'lib/recovery_csrf.php';
 
     private const MINTING_HELPERS = [
         'system_updater_csrf_generate',
@@ -151,6 +161,68 @@ final class CsrfMintingPointsTest extends TestCase
     }
 
     /**
+     * The equality property: the set of HTTP entry points able to reach a
+     * minting helper is **exactly** the two gates AUTH-05 authorizes.
+     *
+     * The subset method above says "no more than these two". This one says "and
+     * both of them, and no third" — which is the whole contract, because a token
+     * whose provenance set is allowed to shrink is a console that cannot restore
+     * (`RACC-07`) and one whose set is allowed to grow is a token whose
+     * provenance is no longer two gates.
+     *
+     * Both halves are asserted, and neither is a restatement of the other:
+     *
+     *   - the two premises — the admin page's route into the helpers and the
+     *     console's — are asserted by name, so losing either one is red here
+     *     with its own message rather than as a two-element list diff;
+     *   - the equality itself is `assertSame` against the authorized pair, so a
+     *     third minting entry point is red as well.
+     *
+     * `assertSame` is deliberately not `assertCount(2, …)`: the latter would
+     * pass for any two entry points, including two unauthorized ones.
+     */
+    #[Test]
+    public function mintingReachesExactlyTwoGatedEntryPoints(): void
+    {
+        $root = (string) realpath(dirname(__DIR__));
+        $productionFiles = $this->productionFiles($root);
+
+        $minters = $this->mintingFiles($root, $productionFiles);
+
+        $this->assertContains(
+            'lib/twig_compat.php',
+            $minters,
+            'premise: the #[AdminOnly] page reaches the helpers through twig_compat'
+        );
+        $this->assertContains(
+            self::CONSOLE_MINT_MODULE,
+            $minters,
+            'premise: the console mints after its two gates (RACC-07), so its mint module must reach the helpers'
+        );
+
+        $includeMap = $this->includeMap($root, $productionFiles);
+        $entryPoints = [];
+
+        foreach ($minters as $relative) {
+            foreach ($this->entryPointsFor($root . '/' . $relative, $root, [], $includeMap) as $entryPoint) {
+                $entryPoints[$entryPoint] = true;
+            }
+        }
+
+        $entryPoints = array_keys($entryPoints);
+        sort($entryPoints);
+
+        $expected = self::AUTHORIZED_ENTRY_POINTS;
+        sort($expected);
+
+        $this->assertSame(
+            $expected,
+            $entryPoints,
+            'minting entry points must be exactly the two gated ones; found ' . implode(', ', $entryPoints)
+        );
+    }
+
+    /**
      * Production PHP files of the plugin, as paths relative to the plugin root.
      *
      * Test, documentation and generated trees are excluded: they are not part of
@@ -190,6 +262,12 @@ final class CsrfMintingPointsTest extends TestCase
     /**
      * Files that invoke a minting helper, excluding the module that defines them.
      *
+     * Comments are stripped first, for the same reason the console's own tests
+     * strip them: a docblock that *names* a helper — to explain that this module
+     * is the one the console reaches it through, say — is not a call site, and
+     * counting it would turn the enumeration into a spellcheck of the prose.
+     * Only code that can actually call the function counts.
+     *
      * @param array<int, string> $productionFiles
      * @return array<int, string>
      */
@@ -203,13 +281,36 @@ final class CsrfMintingPointsTest extends TestCase
                 continue;
             }
 
-            $source = (string) file_get_contents($root . '/' . $relative);
+            $source = $this->codeWithoutComments((string) file_get_contents($root . '/' . $relative));
             if (preg_match($pattern, $source) === 1) {
                 $minters[] = $relative;
             }
         }
 
         return $minters;
+    }
+
+    /**
+     * Source without comments or docblocks.
+     *
+     * `token_get_all()` is used rather than a regex so a `//` inside a string
+     * literal is not mistaken for a comment — this scan decides which files can
+     * mint a credential, and a rule that can be argued with by quoting is not a
+     * rule.
+     */
+    private function codeWithoutComments(string $source): string
+    {
+        $code = '';
+
+        foreach (token_get_all($source) as $token) {
+            if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+
+            $code .= is_array($token) ? $token[1] : $token;
+        }
+
+        return $code;
     }
 
     /**

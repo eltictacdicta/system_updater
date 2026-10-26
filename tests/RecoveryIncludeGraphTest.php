@@ -63,6 +63,10 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
         'lib/recovery_login_token.php',
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',
+        'lib/session_name.php',
+        'lib/csrf_token.php',
+        'lib/recovery_csrf.php',
+        'lib/recovery_view.php',
     ];
 
     /**
@@ -75,12 +79,16 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
     private const EXPECTED_INTERNAL = [
         self::PLUGIN . '/lib/SqlDumpReader.php',
         self::PLUGIN . '/lib/backup_manager.php',
+        self::PLUGIN . '/lib/csrf_token.php',
+        self::PLUGIN . '/lib/recovery_csrf.php',
         self::PLUGIN . '/lib/recovery_handler.php',
         self::PLUGIN . '/lib/recovery_legacy_hash.php',
         self::PLUGIN . '/lib/recovery_login_token.php',
         self::PLUGIN . '/lib/recovery_policy.php',
         self::PLUGIN . '/lib/recovery_secret.php',
         self::PLUGIN . '/lib/recovery_session.php',
+        self::PLUGIN . '/lib/recovery_view.php',
+        self::PLUGIN . '/lib/session_name.php',
     ];
 
     /**

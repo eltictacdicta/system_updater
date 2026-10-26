@@ -52,7 +52,13 @@ class BackupManagerRestoreTest extends TestCase
 
     public function testRecoveryTemplateSupportsDatabaseOnlyRestore(): void
     {
-        $file = FS_FOLDER . '/plugins/system_updater/recovery.php';
+        // The console's authenticated markup moved to lib/recovery_view.php in
+        // W8: RACC-07 has to assert the rendered table and the restore driver
+        // without a database, so the render became a formatter that is handed
+        // its inputs. The property is unchanged — the console offers a
+        // database-only restore for every group that can supply one — and
+        // RecoveryRestoreDriveTest asserts it on the generated output.
+        $file = FS_FOLDER . '/plugins/system_updater/lib/recovery_view.php';
         $content = file_get_contents($file);
 
         $this->assertStringContainsString("data-type=\"database\"", $content);

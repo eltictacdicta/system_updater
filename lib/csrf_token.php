@@ -18,8 +18,12 @@ if (!defined('SYSTEM_UPDATER_CSRF_TTL')) {
     define('SYSTEM_UPDATER_CSRF_TTL', 4 * 3600); // 4 hours
 }
 
-// Asegurar que las funciones de sesión estén disponibles
-require_once __DIR__ . '/session_auth.php';
+// El nombre de la sesión del plugin, sin arrastrar el bootstrap del framework:
+// `session_auth.php` carga `base/config2.php` y el autoloader, y este módulo es
+// el que el console de recuperación necesita para acuñar el token (RACC-07) sin
+// ninguna dependencia del core (RACC-01). El nombre lo resuelve exactamente la
+// misma función que resuelven los process scripts.
+require_once __DIR__ . '/session_name.php';
 
 /**
  * Ensure the plugin's dedicated session is active.
