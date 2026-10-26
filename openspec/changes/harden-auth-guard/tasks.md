@@ -907,19 +907,19 @@ console is unchanged.
 
 ### Phase 1: Counting (TDD)
 
-- [ ] 1.1 **[TEST] [RED]** A submission whose login token was rejected records **zero** attempts:
+- [x] 1.1 **[TEST] [RED]** A submission whose login token was rejected records **zero** attempts:
   assert the shared throttle counter, the fallback counter and the `ip.log` content are all
   unchanged, and the verifier was never called. Then the positive half: a valid token plus a wrong
   password records **exactly one** failure, in **exactly one** counter set (never both).
   RED today because there is no policy module at all, and RED-against-today also demonstrates the
   real defect: the shipped handler has no counter of any kind.
-- [ ] 1.2 Implement `recovery_policy_should_count(string $phase): bool` and make the pipeline record
+- [x] 1.2 Implement `recovery_policy_should_count(string $phase): bool` and make the pipeline record
   exactly one failure in exactly one mode (shared when `LoginThrottle` is loadable, fallback
   otherwise).
 
 ### Phase 2: The ban read (TDD)
 
-- [ ] 2.1 **[TEST] [RED]** Table-driven parser cases over literal lines, mirroring
+- [x] 2.1 **[TEST] [RED]** Table-driven parser cases over literal lines, mirroring
   `fs_ip_filter::read_line()`/`is_banned()`: `203.0.113.7;6;<future>` → banned;
   `203.0.113.7;5;<future>` → not banned (the core uses `>` not `>=`);
   `203.0.113.7;9;<past>` → not banned; a two-field line → ignored; an empty line → ignored; a
@@ -927,26 +927,26 @@ console is unchanged.
   banned. Where `fs_ip_filter` is loadable in the test process, add a **parity assertion**: for the
   same input file, `fs_ip_filter::is_banned()` and the plugin parser agree (this is the drift guard
   REC-03 asks for). One case writes a real fixture into a temp `tmp/<FS_TMP_NAME>ip.log`.
-- [ ] 2.2 Implement the parser over `FS_FOLDER/tmp/<FS_TMP_NAME>ip.log`, read-only. Forbid writes:
+- [x] 2.2 Implement the parser over `FS_FOLDER/tmp/<FS_TMP_NAME>ip.log`, read-only. Forbid writes:
   assert the file's `md5_file` and `mtime` are unchanged after any sequence of calls (REC-03 "the
   endpoint never writes this file").
 
 ### Phase 3: The fallback limiter (TDD)
 
-- [ ] 3.1 **[TEST] [RED]** Six failures for one nick from one IP inside the window → the seventh is
+- [x] 3.1 **[TEST] [RED]** Six failures for one nick from one IP inside the window → the seventh is
   refused before evaluation; 20 failures for one account across IPs → refused; a success clears the
   counter used for recording; an elapsed window re-opens the budget (inject the clock; do not sleep).
   Declared constants must equal `LoginThrottle::MAX_ATTEMPTS` (6), `::THROTTLE_WINDOW` (600),
   `::ACCOUNT_MAX_ATTEMPTS` (20), `::ACCOUNT_WINDOW` (900) — assert by reading the core constants
   when the class is loadable, and `markTestSkipped` with a recorded reason when it is not (REC-04's
   drift test).
-- [ ] 3.2 Implement the plugin-local counter under `sys_get_temp_dir()`/`FS_TMP_NAME`, with
+- [x] 3.2 Implement the plugin-local counter under `sys_get_temp_dir()`/`FS_TMP_NAME`, with
   `flock()` (the `system_updater_save_progress()` pattern), no more permissive than the core in
   either dimension, and a message that states the console is running its local limiter.
 
 ### Phase 4: The verdict and the failure body (TDD)
 
-- [ ] 4.1 **[TEST] [RED]** Three submissions — unknown nick, existing nick with a wrong password,
+- [x] 4.1 **[TEST] [RED]** Three submissions — unknown nick, existing nick with a wrong password,
   existing non-administrator with the correct password — produce the **same** outcome token and the
   **same** body, and each performs **exactly one** `password_verify()` (counting verifier). The
   unknown-nick path uses a **declared constant** bcrypt hash: assert `password_get_info()` reports
@@ -954,17 +954,131 @@ console is unchanged.
   assert the verdict calls the verifier exactly once for all three inputs. Timing: do **not**
   assert wall-clock ratios in the suite (flaky); assert the mechanism that produces comparable
   timing, and leave the sampled comparison to the operator note.
-- [ ] 4.2 Implement `recovery_policy_verify_credentials()` returning one of `ok` / `deny` only, with
+- [x] 4.2 Implement `recovery_policy_verify_credentials()` returning one of `ok` / `deny` only, with
   the dummy-hash branch and the single verification. The failure message constant lives here so
   PR 7 renders it in one place.
 
 ### PR 5 verification
 
-- [ ] `--filter RecoveryBanListTest`, `--filter RecoveryFallbackLimiterTest`, `--filter RecoveryCredentialVerdictTest`
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts, and
-  record whether the drift check skipped
-- [ ] `ddev exec php -l plugins/system_updater/lib/recovery_policy.php`
-- [ ] `git diff --stat` shows **no** change to `recovery.php` in this PR (the split is the point)
+- [x] `--filter RecoveryBanListTest` (17 / 30), `--filter RecoveryFallbackLimiterTest` (13 / 72),
+  `--filter RecoveryCredentialVerdictTest` (45 / 129)
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **515 / 1769 /
+  2 skipped**, 0 failures, 0 errors (baseline **440 / 1538 / 2 skipped**; both skips pre-existing:
+  `SelfUpdateSessionBindingTest::bindingIsEmptyWithoutASessionId` and
+  `SessionAuthTest::testResolveCookiePathUsesRootForDocumentRootInstall`). **The drift checks did
+  not skip**: `LoginThrottle` and `base/fs_ip_filter.php` are both present, and the ban parity case
+  ran the real `fs_ip_filter` in a child process against the same fixture file
+- [x] `ddev exec php -l plugins/system_updater/lib/recovery_policy.php`
+- [x] `git diff --stat` shows **no** change to `recovery.php` in this PR (the split is the point)
+
+### Applied note (W5) — working-tree only, not committed
+
+**Files**: `lib/recovery_policy.php` (new, 841 lines), `tests/RecoveryBanListTest.php`,
+`tests/RecoveryFallbackLimiterTest.php`, `tests/RecoveryCredentialVerdictTest.php`,
+`tests/Support/PolicyProbe.php`. **No other file changed; `recovery.php` is untouched.**
+
+**Budget overrun, stated plainly.** 2,089 changed lines against the ~565 estimate for this slice,
+and against the 800-line session budget. The forecast under-counted because it assumed four small
+test files; in practice REC-02/03/04/05 are four independent gates with four independent failure
+modes, and the docblocks carry the reasoning the drift risks require (`REC-03`'s "second parser of
+an internal format", `REC-04`'s "not a second budget in any single install state"). Reviewable in
+the eight commits as delivered; if the budget is enforced, the natural split is **W5a** (REC-02 +
+REC-03: `should_count`/`count_bucket`/`evaluate` + the ban read) and **W5b** (REC-04 + REC-05: the
+limiter and the verdict), which share no symbol.
+
+**Deviations from the task text, all deliberate:**
+
+1. **`recovery_policy_verify_credentials()` takes the whole row, not `(hash, plain)`.** REC-05's
+   three cases include "authenticated but not administrator", so the administrator flag has to be
+   read *after* the single verification. Splitting it into a hash comparison plus a separate admin
+   check would let a caller check the flag first and reintroduce the oracle.
+2. **No spy on `password_hash()`.** A language function cannot be intercepted in the global
+   namespace, so the assertion is a source one: the module contains no `password_hash(` call and
+   the dummy is a declared `const`. `password_get_info()` proves it is a real bcrypt hash (cost 10),
+   and `password_verify()` proves no candidate matches it.
+3. **`recovery_policy_evaluate()` takes the gate *facts*, not the request.** The console still owns
+   the three reads (token, ban file, throttle) and the row lookup; what the function guarantees is
+   that a fact which closed a gate can never be followed by an evaluation. The order of the reads is
+   therefore asserted in W7, and the order of the *decisions* is asserted here.
+4. **The uniform body has one documented exception**: a throttled refusal while the local limiter is
+   in force carries `RECOVERY_POLICY_LOCAL_LIMITER_NOTE` (REC-04's third scenario requires it). In
+   the default state every refusal — token, submission, banned, throttled, credential — renders the
+   same string.
+5. **The fallback counter is one JSON file per installation**, keyed by a digest of the install root.
+   *(Corrected by the review round below: it lives in `<root>/tmp/`, not in `sys_get_temp_dir()`.)*
+
+**Left for W7 (the wiring), so this is not mistaken for done:** `recovery.php` still calls
+`password_verify()`/`LegacyCompatibility` directly, still has three distinct failure strings, still
+counts nothing, and never consults `ip.log` or `LoginThrottle`. W7 must (a) mint and validate the
+form token and pass `token_valid`, (b) resolve the row and pass `nick`, `ip`, `input_valid`,
+`row`, `plain` and `now`, (c) call `recovery_policy_is_ip_banned()`, (d) pass
+`recovery_policy_verify_credentials()` bound with W6's verifier as the verdict and
+`recovery_policy_fallback_reserve()` / `_clear()` as the reservation seams in the fallback bucket
+(the shared bucket keeps `LoginThrottle`'s two calls), (e) record only when `record_failure` is
+true — never after the pipeline already reserved —, (f) render
+`recovery_policy_failure_message()` in the one failure body, and (g) do the REC-06 session
+rotation — **none** of which is in this slice.
+
+### Review round (W5) — working-tree only, not committed
+
+Two CodeRabbit findings, fixed as four commits on the same branch (the eight are untouched):
+`test(system_updater): pin the atomic fallback reservation… (RED)`,
+`fix(system_updater): reserve the fallback budget atomically before evaluation`,
+`test(system_updater): pin the fallback counter inside the install (RED)`,
+`fix(system_updater): keep the fallback counter inside the installation`, plus one
+`refactor` that reconciles the contract prose with the reservation.
+
+**Finding 1 — the check/record race (MAJOR).** `count()` read and `record()` incremented under two
+`flock()`s, so N concurrent submissions all read a count below the threshold, all reached
+`password_verify()`, and the ceiling became a function of concurrency. Both the per-pair and the
+per-account dimension had the defect, in the mode where this limiter is the only defence.
+`recovery_policy_fallback_reserve()` now reads, prunes, decides and increments under **one** lock;
+a refusal writes nothing. Both writers share `recovery_policy_fallback_transact()`, so there is one
+opener and one lock discipline. The resulting order, encoded in `recovery_policy_precheck()` +
+`recovery_policy_evaluate()` and pinned case by case:
+
+1. token verdict → `token_rejected`, no reserve, no evaluation;
+2. submission (empty nick or empty password, or `input_valid => false`) → `input_rejected`, no reserve;
+3. ban read (read-only) → `banned`, no reserve;
+4. **atomic reserve** — refusal → `throttled`, verdict never reached;
+5. credential verdict, exactly once;
+6. release on success (`$release` → `recovery_policy_fallback_clear()`), leave reserved on failure.
+
+REC-02 still holds: nothing is reserved before the token verdict, and a refusal never touches the
+file (asserted by `md5_file`). The empty-submission rule holds twice over — by the `input_valid`
+fact and by derivation from an empty nick/password, so a console that forgets the fact cannot
+charge an empty form. `record_failure` is false whenever the pipeline already charged, so one
+submission is never counted twice.
+
+**How far the concurrency proof goes, honestly.** `theBudgetCannotBeExceededByConcurrentReservations`
+starts ten separate PHP processes that each reserve once against one counter file; exactly six are
+admitted, four are refused, and each admitted child reports a distinct count (1..6), which is what
+proves the increments were serialised by the lock rather than merely close in time. It is an
+invariant test, not a race detector: a run where the kernel happens to serialise the children
+perfectly passes too — what it forbids is any interleaving that exceeds the budget. The
+deterministic half is `anInterleavedDoubleCannotTakeTheLastSlotTwice`, which models the exact
+sequence the review described (two requests when one slot is left). No thread-based or
+timing-based detector is claimed.
+
+**Finding 2 — the counter file in a shared temp dir (MINOR).** The path depended only on
+`sys_get_temp_dir()`, `FS_TMP_NAME` and `sha1($root)`, and the file was opened `c+b` then
+truncated, so a local user could pre-create it `0666` and delete the counts, inflate them, or plant
+a symlink. The default directory is now `<root>/tmp/` (the installation's own, already holding
+`ip.log`, needing nothing from the core); the per-install digest and the `FS_TMP_NAME` prefix stay.
+`recovery_policy_fallback_open()` refuses a link before opening and compares `fstat()` with
+`lstat()` afterwards, which is the `O_NOFOLLOW` property PHP exposes no flag for; a looser mode is
+narrowed to `0600`, and the reader refuses a link as well. The previous assertion that the counter
+lived under `sys_get_temp_dir()` was the defect stated as a contract and is replaced.
+
+**Verification**: `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` —
+**529 / 1899 / 2 skipped**, 0 failures, 0 errors (baseline 515 / 1769 / 2 skipped; both skips
+pre-existing). `ddev exec php -l plugins/system_updater/lib/recovery_policy.php` clean.
+`recovery.php` is still untouched.
+
+**Still open, and not fixed here:** the shared mode keeps `LoginThrottle::isThrottled()` +
+`::recordFailure()` as two calls, so its ceiling remains check-then-act. Closing that is a core
+change (a `reserve()` on the throttle) and out of scope for this slice; the asymmetry is stated in
+the module's docblock rather than hidden.
 
 ---
 
