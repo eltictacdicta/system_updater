@@ -87,6 +87,34 @@ const RECOVERY_HANDLER_STEP_RECORD = 'record';
 const RECOVERY_HANDLER_STEP_CLEAR = 'clear';
 
 /**
+ * The one refusal a submission can receive before the database is reached.
+ *
+ * The console asks this before it decides whether it can look anybody up at all
+ * (REC-01). Without it, a token-less POST against an installation whose database
+ * is unreachable answered "no se puede conectar a la base de datos" — an
+ * environment fact — instead of the CSRF refusal, so the first gate depended on
+ * which boundary happened to be reachable rather than on the token.
+ *
+ * It asks the same real validator the pipeline asks. The call is repeated there
+ * on purpose: this function exists so the console can close the request
+ * *before* it spends a database connection, and the pipeline still asks first on
+ * its own because its order must never be a caller's decision. Validation is a
+ * session read and a `hash_equals()`, so the second ask costs nothing and can
+ * change nothing.
+ *
+ * Answers `null` when the submission may proceed, and the uniform failure body
+ * when it may not — the same body, for a missing token and a wrong one.
+ */
+function recovery_handler_token_refusal(string $token): ?string
+{
+    if (recovery_login_token_validate($token)) {
+        return null;
+    }
+
+    return recovery_policy_failure_message(RECOVERY_POLICY_PHASE_TOKEN_REJECTED);
+}
+
+/**
  * The client address the ban gate and the budget are keyed by.
  *
  * `REMOTE_ADDR` and nothing else. The core's `fs_ip_filter` and `LoginThrottle`

@@ -193,19 +193,30 @@ if ($db !== null && !$user && isset($_SESSION['user_nick']) && is_string($_SESSI
 // `ok`.
 //
 // El fallo con base de datos caída sigue siendo su propio mensaje: no es un
-// motivo de credencial y no distingue entre cuentas.
+// motivo de credencial y no distingue entre cuentas. Pero se decide DESPUÉS del
+// veredicto del token (REC-01): sin token válido no se llega ni a plantearse la
+// conexión, y el cuerpo es la negativa uniforme.
 $submitted = ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && $_POST !== [];
+$suToken = '';
+$suRefusal = null;
 
-if ($submitted && $db === null) {
+if ($submitted) {
+    $suToken = isset($_POST[RECOVERY_LOGIN_TOKEN_FIELD]) && is_string($_POST[RECOVERY_LOGIN_TOKEN_FIELD])
+        ? $_POST[RECOVERY_LOGIN_TOKEN_FIELD]
+        : '';
+    $suRefusal = recovery_handler_token_refusal($suToken);
+}
+
+if ($submitted && $suRefusal !== null) {
+    $error = $suRefusal;
+} elseif ($submitted && $db === null) {
     $error = 'No se puede conectar a la base de datos.';
 }
 
-if ($submitted && $db !== null && !$user) {
+if ($submitted && $db !== null && !$user && $suRefusal === null) {
     $su_result = recovery_handler_authenticate(
         [
-            'token' => isset($_POST[RECOVERY_LOGIN_TOKEN_FIELD]) && is_string($_POST[RECOVERY_LOGIN_TOKEN_FIELD])
-                ? $_POST[RECOVERY_LOGIN_TOKEN_FIELD]
-                : '',
+            'token' => $suToken,
             'nick' => isset($_POST['nick']) && is_string($_POST['nick']) ? trim($_POST['nick']) : '',
             'password' => isset($_POST['password']) && is_string($_POST['password']) ? $_POST['password'] : '',
             'ip' => recovery_handler_client_ip($_SERVER),
