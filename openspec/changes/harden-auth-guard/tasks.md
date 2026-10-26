@@ -1413,7 +1413,7 @@ returns to a listing-only page with the shipped `action=start` button, i.e. exac
 
 ### Phase 1: The mint (TDD)
 
-- [ ] 1.1 **[TEST] [RED] Step recorder.** The console's request pipeline accepts an optional recorder
+- [x] 1.1 **[TEST] [RED] Step recorder.** The console's request pipeline accepts an optional recorder
   callable (default: a no-op) and appends a step at each gate. Assert:
   - correct secret + authenticated administrator ⇒ the recorded sequence contains
     `secret_compared`, `admin_authenticated`, `token_minted` **in that order** (assert the relative
@@ -1426,7 +1426,7 @@ returns to a listing-only page with the shipped `action=start` button, i.e. exac
   - after a successful mint the console session still holds its identity keys and the
     `recovery_console` marker (RACC-07 point 5: opening the plugin session must not corrupt the
     console's own session).
-- [ ] 1.2 Implement: mint with `system_updater_csrf_generate()` **after** both gates, preserving and
+- [x] 1.2 Implement: mint with `system_updater_csrf_generate()` **after** both gates, preserving and
   restoring the console session around the plugin-session switch; store the minted value for the
   rendered page's controls (the value is emitted only on an authenticated render, never into a 404,
   never into a log line). The marker is not the token and the token is not the marker: assert both
@@ -1434,23 +1434,29 @@ returns to a listing-only page with the shipped `action=start` button, i.e. exac
 
 ### Phase 2: The restore drive (TDD)
 
-- [ ] 2.1 **[TEST] [RED]** Rendered output: every restore control's issued URL carries
+- [x] 2.1 **[TEST] [RED]** Rendered output: every restore control's issued URL carries
   `su_csrf_token=`; the flow issues `action=begin` then at least one `action=chunk`; `action=start`
   appears nowhere in the console; `restoreEventSource`/`new EventSource` appear nowhere; no control
   is rendered whose behaviour is known to be refused. RED today on all four.
-- [ ] 2.2 Port the driver: `startRestore` → `runRestoreStep('begin')` → on each response parse the
+- [x] 2.2 Port the driver: `startRestore` → `runRestoreStep('begin')` → on each response parse the
   SSE framing and either finish (`done` + `errors_count`/`warnings_count`) or issue
   `runRestoreStep('chunk')`; `busy` waits 2 s; transport failure retries with backoff up to a bound
   and reports the checkpoint; the token is carried on **every** request. Keep the modal and its
   existing element ids so the visual contract does not change. The console must not send restore
   parameters without the secret: a request with restore parameters and no valid secret already
   receives PR 4's 404 and mints nothing (pin it here as a regression).
-- [ ] 2.3 Assert the "no dead control" and "listing still works" halves on rendered output with an
+- [x] 2.3 Assert the "no dead control" and "listing still works" halves on rendered output with an
   injected backup list (a fake `list_backups_grouped()` result; no DB, no real files).
+- [x] 2.4 Review fix (post-W8): the drive retries the action **in flight** — `begin` until a response
+  carries progress, `chunk` after — instead of always re-issuing `chunk`, and a 4xx is terminal with
+  a message that names the session instead of being charged to the retry budget as a network cut.
+  Same fix in both drivers (`lib/recovery_view.php` and `view/admin_updater.html.twig`). Asserted by
+  executing the emitted console script in node (`--filter RestoreDriveRetryTest`) and, for the
+  template, on its failure branch (`--filter RestoreSteppedUiTest`).
 
 ### Phase 3: The contract flips to equality (TDD)
 
-- [ ] 3.1 **[TEST] [RED]** Add `mintingReachesExactlyTwoGatedEntryPoints()`: the enumerated set of
+- [x] 3.1 **[TEST] [RED]** Add `mintingReachesExactlyTwoGatedEntryPoints()`: the enumerated set of
   HTTP entry points able to reach the three minting helpers is **exactly**
   `{admin_updater, recovery.php}`, no `process_*`, no third point. RED before U8.2 (the console does
   not mint yet), GREEN after. Keep `noUnauthorizedEntryPointCanMint()` from PR 2 unchanged: the
@@ -1459,13 +1465,47 @@ returns to a listing-only page with the shipped `action=start` button, i.e. exac
 
 ### PR 8 verification
 
-- [ ] `--filter RecoveryMintOrderTest`, `--filter RecoveryRestoreDriveTest`, `--filter CsrfMintingPointsTest`
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
-- [ ] `ddev exec php -l recovery.php`
-- [ ] Root-suite sanity: `ddev exec php vendor/bin/phpunit --testsuite Plugins` — record the count;
-  the 12 `plugins/OidcProvider` failures are pre-existing and unrelated
-- [ ] PR body states that the console's restore path is now the stepped protocol and that a
+- [x] `--filter RecoveryMintOrderTest` — 13 tests, 57 assertions; `--filter RecoveryRestoreDriveTest` —
+  6 tests, 38 assertions; `--filter CsrfMintingPointsTest` — 2 tests, 16 assertions
+- [x] `--filter RestoreDriveRetryTest` — 7 tests, 32 assertions; `--filter RestoreSteppedUiTest` —
+  14 tests, 48 assertions
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **641 / 2382 /
+  2 skipped**, 0 failures (baseline **612 / 2232 / 2 skipped**); each of the four W8 commits is green
+  on its own: **622 / 2289**, **628 / 2329**, **629 / 2332**, **632 / 2339**; the review fix adds
+  **639 / 2371** and **641 / 2382**
+- [x] `ddev exec php -l recovery.php`, `-l lib/recovery_csrf.php`, `-l lib/recovery_view.php`,
+  `-l lib/session_name.php`, `-l lib/csrf_token.php` — no syntax errors. The emitted restore driver
+  was additionally parsed with `node --check` in both shapes (token and no token), since it is now
+  generated rather than hand-written inline
+- [x] Root-suite sanity: `ddev exec php vendor/bin/phpunit --testsuite Plugins` — **3429 tests, 14763
+  assertions, 12 failures, 26 skipped**; all 12 failures are `plugins/OidcProvider` and pre-existing
+- [x] PR body states that the console's restore path is now the stepped protocol and that a
   console-minted token is a CSRF credential for `start`/`begin`/`chunk` only
+
+**Applied deviations, recorded.** (a) U8.1's recorder lives on the mint function
+(`recovery_csrf_mint_token()`) rather than on the whole script: `recovery.php` is a script with no
+injection point, and the three recorded steps are exactly the gate walk the mint performs, so the
+order is still a runtime fact. The script-level halves are covered separately — the login render
+leaves no store in any session file, and a restore request without the secret is the plain 404 — both
+asserted over `php -S`. (b) RACC-07 point 5's "opening the plugin session" needed
+`lib/csrf_token.php` in the console's graph, which required moving the plugin session-name
+derivation to `lib/session_name.php` so `lib/session_auth.php` stays out of it (PR 7's property). The
+console's graph gains three plugin-local files and still no core class; `RecoveryIncludeGraphTest`'s
+exact list was extended accordingly. (c) `BackupManagerRestoreTest::testRecoveryTemplateSupportsDatabaseOnlyRestore`
+now reads `lib/recovery_view.php`, where the markup moved; `RecoveryRestoreDriveTest` asserts the
+same property on the generated output. (d) The review fix (two commits after W8's four) records that
+the restore drive's retry policy was wrong in both copies of the driver: the retry always re-issued
+`chunk`, even when the failed request was the `begin` that arms the state on disk, and every non-2xx
+response was charged to the retry budget as a suspected network cut — including 401/403 from the
+session and CSRF guards. The drive now tracks `restoreArmed` (progress seen ⇒ state on disk) and
+re-issues the action in flight, a 4xx is terminal with a message that names the session, and only a
+transport error or a 5xx is retried. `RestoreSteppedUiTest`'s retry pin moved from a hardcoded
+`chunk` to `runRestoreStep(retryAction)` — the property it always meant — and its 4xx-ordering case is
+anchored on the budget branch, because the rejection is now classified before the budget is charged.
+The behaviour is executed, not read: `RestoreDriveRetryTest` runs the console's emitted script in node
+against a stubbed browser (`tests/Support/node/restore-drive-harness.js`) and asserts on the request
+log, with `node --check` as the parse gate for both render shapes. The suite gains `node` as an
+optional dependency and skips those cases when it is absent.
 
 ---
 
