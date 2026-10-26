@@ -17,6 +17,7 @@ namespace Tests\SystemUpdater;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\SystemUpdater\Support\ConsoleHttpHarness;
 use Tests\SystemUpdater\Support\ConsoleHttpTestCase;
+use Tests\SystemUpdater\Support\PolicyProbe;
 
 /**
  * RACC-01: `config.php` is the console's only core dependency.
@@ -249,8 +250,107 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
     }
 
     /**
-     * Every PHP source the console can load, as path => comment-free code.
+     * RACC-01's outcome, not its mechanism: with no autoloader and no core tree,
+     * a SHA-1 administrator still authenticates.
      *
+     * This is the case the ordering in `tasks.md` protects. Removing
+     * `vendor/autoload.php` before the plugin-local verifier existed would have
+     * locked out every administrator whose hash is still SHA-1 or MD5 — the exact
+     * operator the console exists for. So the assertion is not "the file is not
+     * required": it is that the credential path answers `ok` in a process that
+     * has never loaded Composer, over a tree that contains no `base/`, no `src/`
+     * and no `vendor/`.
+     *
+     * A subprocess is the only honest seam. This suite's bootstrap requires the
+     * autoloader, so in-process `class_exists('...')` would answer `true` for
+     * every core class regardless of what the console needs.
+     */
+    #[Test]
+    public function aLegacyHashAdministratorAuthenticatesWithNoAutoloaderAndNoCore(): void
+    {
+        $root = rtrim(sys_get_temp_dir(), '/') . '/su_no_core_' . bin2hex(random_bytes(6));
+        $library = $root . '/plugins/system_updater/lib';
+        $sessions = $root . '/sessions';
+        mkdir($library, 0700, true);
+        mkdir($sessions, 0700, true);
+
+        foreach (['recovery_handler.php', 'recovery_policy.php', 'recovery_legacy_hash.php', 'recovery_login_token.php'] as $file) {
+            copy(dirname(__DIR__) . '/lib/' . $file, $library . '/' . $file);
+        }
+
+        foreach (['recovery_secret.php', 'recovery_session.php', 'backup_manager.php', 'SqlDumpReader.php'] as $file) {
+            copy(dirname(__DIR__) . '/lib/' . $file, $library . '/' . $file);
+        }
+
+        try {
+            $this->assertDirectoryDoesNotExist($root . '/vendor');
+            $this->assertDirectoryDoesNotExist($root . '/base');
+            $this->assertDirectoryDoesNotExist($root . '/src');
+
+            $plain = 'correct-horse-battery-staple';
+
+            // The console's own include order, minus `config.php` — the boundary
+            // a probe cannot cross without a database. Everything else is the
+            // graph `recovery.php` loads, so a core dependency anywhere in it
+            // fails this case and not only a dependency of the handler.
+            $probe = PolicyProbe::run(
+                [
+                    $library . '/recovery_secret.php',
+                    $library . '/recovery_session.php',
+                    $library . '/recovery_handler.php',
+                    $library . '/backup_manager.php',
+                ],
+                ['FS_FOLDER' => $root],
+                implode("\n", [
+                    'ini_set("session.save_path", ' . var_export($sessions, true) . ');',
+                    'ini_set("session.use_cookies", "0");',
+                    'session_id(str_repeat("a", 32));',
+                    'session_start();',
+                    '$_SESSION = [];',
+                    '$token = recovery_login_token_mint();',
+                    '$result = recovery_handler_authenticate(',
+                    '    ["token" => $token, "nick" => "admin", "password" => ' . var_export($plain, true) . ',',
+                    '     "ip" => "203.0.113.7", "now" => time()],',
+                    '    [',
+                    '        "shared_available" => false,',
+                    '        "verifier" => static fn (string $stored, string $given, ?string $salt): bool => sha1($given) === $stored,',
+                    '        "lookup" => static fn (string $nick): ?array => ["nick" => "admin",',
+                    '            "password" => sha1(' . var_export($plain, true) . '), "admin" => 1],',
+                    '        "is_banned" => static fn (string $ip, int $now): bool => false,',
+                    '        "reserve" => static fn (string $n, string $i, int $t): array',
+                    '            => ["reserved" => true, "throttled" => false],',
+                    '        "release" => static fn (string $n, string $i): bool => true,',
+                    '        "record" => static fn (string $b, string $n, string $i, int $t) => null,',
+                    '        "clear" => static fn (string $b, string $n, string $i, int $t) => null,',
+                    '    ]',
+                    ');',
+                    '$core = array_values(array_filter(',
+                    '    get_included_files(),',
+                    '    static fn (string $file): bool => $file !== __FILE__',
+                    '        && !str_starts_with($file, ' . var_export($library, true) . ')',
+                    '));',
+                    'echo json_encode([',
+                    '    "outcome" => $result["outcome"],',
+                    '    "nick" => $result["identity"]["user_nick"] ?? null,',
+                    '    "autoloadable_core" => class_exists("FSFramework\\\\Security\\\\SessionManager"),',
+                    '    "outside_plugin" => $core,',
+                    ']);',
+                ])
+            );
+
+            $report = PolicyProbe::decodeJson($probe['output']);
+            $this->assertIsArray($report, 'the probe printed a verdict, not a warning: ' . $probe['output']);
+            $this->assertSame('ok', $report['outcome'], 'a SHA-1 administrator authenticates with no autoloader');
+            $this->assertSame('admin', $report['nick']);
+            $this->assertFalse($report['autoloadable_core'], 'premise: this process has no Composer autoloader and no core tree');
+            $this->assertSame([], $report['outside_plugin'], 'the credential path loaded nothing outside its own tree');
+        } finally {
+            ConsoleHttpHarness::removeTree($root);
+        }
+    }
+
+    /**
+     * Every PHP source the console can load, as path => comment-free code.
      * @return array<string, string>
      */
     private function graphSources(): array

@@ -80,32 +80,26 @@ if (!$su_secret_gate['granted']
 // lleva ninguna cabecera que la distinga de un archivo inexistente.
 header('Referrer-Policy: no-referrer');
 
-// Cargar configuración
+// Cargar configuración. Es el ÚNICO fichero que este script carga fuera de su
+// propio directorio (RACC-01): todo lo demás — secreto, sesión, política de
+// credenciales, puente de hashes legacy, token del formulario y el backup
+// manager — es plugin-local y no necesita ni una clase del core.
+//
+// No hay autoloader de Composer, y no es un olvido: cargarlo era la dependencia
+// que impedía a este script funcionar con el core dañado, y el puente de hashes
+// legacy que lo sustituye es el del propio plugin (REC-07). Tampoco se carga
+// `lib/session_auth.php`, que arrastra `base/config2.php` y el kernel: el nombre
+// de sesión lo resuelve `lib/recovery_session.php` sin ninguna clase del core
+// (RACC-08), y la identidad la escribe `lib/recovery_handler.php`.
 if (file_exists(FS_FOLDER . '/config.php')) {
     require_once FS_FOLDER . '/config.php';
 } else {
     die("Error: No se encuentra el archivo config.php.");
 }
 
-// Autoload de Composer. Sin él, class_exists() sobre las clases del core y de
-// los plugins devuelve false: la compatibilidad de hashes legacy quedaba muerta
-// y un administrador con contraseña SHA1 no podía entrar justo en el script que
-// existe para cuando no se puede entrar.
-$autoloadFile = FS_FOLDER . '/vendor/autoload.php';
-if (file_exists($autoloadFile)) {
-    require_once $autoloadFile;
-}
-
-// Sesión. El nombre lo resuelve `lib/recovery_session.php` sin ninguna clase
-// del core (RACC-08): FS_SESSION_NAME cuando existe, y si no la derivación
-// local sobre el mismo seed que consume el core. Se resuelve DESPUÉS de
-// config.php, que es donde vive FS_SESSION_NAME — salvo en la negativa, donde
-// la lectura de la marca lo hace de forma defensiva.
-$sessionAuthFile = __DIR__ . '/lib/session_auth.php';
-if (file_exists($sessionAuthFile)) {
-    require_once $sessionAuthFile;
-}
-
+// Sesión. El nombre se resuelve DESPUÉS de config.php, que es donde vive
+// FS_SESSION_NAME — salvo en la negativa, donde la lectura de la marca lo hace
+// de forma defensiva.
 recovery_session_configure(recovery_session_name(FS_FOLDER));
 
 session_start();
