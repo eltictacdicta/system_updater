@@ -562,6 +562,102 @@ final class RecoveryHandlerTest extends TestCase
         $this->assertSame('admin', $result['row']['nick']);
     }
 
+    /**
+     * The throttle's subject is folded; the identity is not.
+     *
+     * The database answers one row for every spelling the collation folds
+     * together, so the budget has to be asked about one subject or it is asked
+     * about as many subjects as the attacker has spellings. The identity is the
+     * opposite contract: the session carries the row's own bytes, because the
+     * guard re-reads `fs_users.nick` with it (REC-06, REC-08). Folding the value
+     * that is written would authenticate nobody.
+     */
+    #[Test]
+    public function theCounterSeamsReceiveOneFoldedSubjectWhileTheLookupKeepsTheTypedOne(): void
+    {
+        $row = self::row(['nick' => 'Ádmin']);
+        $seen = ['lookup' => [], 'reserve' => [], 'release' => [], 'record' => [], 'clear' => []];
+
+        $seams = [
+            'shared_available' => false,
+            'lookup' => static function (string $nick) use ($row, &$seen): ?array {
+                $seen['lookup'][] = $nick;
+
+                return $row;
+            },
+            'is_banned' => static fn (string $ip, int $now): bool => false,
+            'reserve' => static function (string $nick, string $ip, int $now) use (&$seen): array {
+                $seen['reserve'][] = $nick;
+
+                return ['reserved' => true, 'throttled' => false];
+            },
+            'release' => static function (string $nick, string $ip) use (&$seen): bool {
+                $seen['release'][] = $nick;
+
+                return true;
+            },
+            'record' => static function (string $bucket, string $nick, string $ip, int $now) use (&$seen): void {
+                $seen['record'][] = $nick;
+            },
+            'clear' => static function (string $bucket, string $nick, string $ip, int $now) use (&$seen): void {
+                $seen['clear'][] = $nick;
+            },
+        ];
+
+        $result = recovery_handler_authenticate(self::submission(['nick' => 'ÁDMIN']), $seams);
+
+        $this->assertSame('ok', $result['outcome'], 'premise: the row the lookup answers authenticates');
+        $this->assertSame(['ÁDMIN'], $seen['lookup'], 'the row is looked up with the spelling the client typed');
+        $this->assertSame(['admin'], $seen['reserve'], 'the reservation is charged to the folded subject');
+        $this->assertSame(['admin'], $seen['release'], 'and the success-clear releases that same subject');
+        $this->assertSame('Ádmin', $result['identity']['user_nick'] ?? null, 'the session carries the row own bytes');
+        $this->assertSame('Ádmin', $result['identity']['user_id'] ?? null);
+    }
+
+    /**
+     * The shared throttle and its two accounting writes see one subject as well.
+     *
+     * Shared mode leaves the counter to `LoginThrottle`, whose key derivation is
+     * the core's, but the *argument* is the console's: passing the typed
+     * spelling would ask the core about a different bucket per spelling in the
+     * accented cases the collation folds and the core's `strtolower()` does not.
+     */
+    #[Test]
+    public function theSharedThrottleAndItsAccountingReceiveOneFoldedSubject(): void
+    {
+        $seen = ['throttle' => [], 'record' => [], 'clear' => []];
+
+        $seams = [
+            'shared_available' => true,
+            'lookup' => static fn (string $nick): ?array => self::row(),
+            'is_banned' => static fn (string $ip, int $now): bool => false,
+            'shared_throttled' => static function (string $nick, string $ip) use (&$seen): bool {
+                $seen['throttle'][] = $nick;
+
+                return false;
+            },
+            'record' => static function (string $bucket, string $nick, string $ip, int $now) use (&$seen): void {
+                $seen['record'][] = $nick;
+            },
+            'clear' => static function (string $bucket, string $nick, string $ip, int $now) use (&$seen): void {
+                $seen['clear'][] = $nick;
+            },
+        ];
+
+        $failed = recovery_handler_authenticate(
+            self::submission(['nick' => 'ÁDMIN', 'password' => 'wrong']),
+            $seams
+        );
+        $this->assertSame(RECOVERY_POLICY_PHASE_CREDENTIAL_FAILED, $failed['phase']);
+
+        $succeeded = recovery_handler_authenticate(self::submission(['nick' => 'ÁDMIN']), $seams);
+        $this->assertSame('ok', $succeeded['outcome'], 'premise: the second submission authenticates');
+
+        $this->assertSame(['admin', 'admin'], $seen['throttle'], 'both consults ask about one subject');
+        $this->assertSame(['admin'], $seen['record'], 'the failure is charged to that subject');
+        $this->assertSame(['admin'], $seen['clear'], 'and the success clears it');
+    }
+
     private function codeWithoutComments(string $source): string
     {
         $code = '';
