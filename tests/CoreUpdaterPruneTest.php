@@ -407,6 +407,67 @@ final class CoreUpdaterPruneTest extends TestCase
     }
 
     /**
+     * PU-16, "A path that resolves outside the staging directory is refused":
+     * the refusal must be a decision about the resolved *path*, not about the
+     * separator the host's `realpath()` happens to answer with.
+     *
+     * `realpath()` returns `\`-separated paths on Windows and `/`-separated
+     * paths everywhere else, so a containment test assembled from one
+     * hard-coded separator mis-judges every legitimate child on the other
+     * host. The Windows shape cannot be produced on this host — the filesystem
+     * hands back POSIX paths whatever we feed it — so the same helper is driven
+     * with both separator shapes as inputs, and both must reach the same
+     * verdict for the same directory relationship.
+     */
+    public function testTheContainmentCheckGivesTheSameVerdictForBothSeparatorShapes(): void
+    {
+        $updater = $this->newUpdater();
+        $method = new \ReflectionMethod($updater, 'isPathInsideBase');
+        $method->setAccessible(true);
+
+        $cases = [
+            // inside: the two shapes of the identical relationship
+            'posix child' => ['/srv/staging', '/srv/staging/openspec', true],
+            'windows child' => ['C:\\stage', 'C:\\stage\\openspec', true],
+            'windows child, mixed separators' => ['C:\\stage', 'C:\\stage/openspec', true],
+            'posix child, base with trailing separator' => ['/srv/staging/', '/srv/staging/docs', true],
+            'windows child, base with trailing separator' => ['C:\\stage\\', 'C:\\stage\\docs', true],
+
+            // outside: refused in both shapes
+            'posix sibling sharing the base as a prefix' => ['/srv/stage', '/srv/stage-extra/docs', false],
+            'windows sibling sharing the base as a prefix' => ['C:\\stage', 'C:\\stage-extra\\docs', false],
+            'posix parent' => ['/srv/staging', '/srv', false],
+            'windows parent' => ['C:\\stage', 'C:\\', false],
+            'windows sibling on another drive' => ['C:\\stage', 'D:\\stage\\openspec', false],
+            'posix sibling with a longer name' => ['/srv/staging', '/srv/staging2/docs', false],
+            'windows sibling with a longer name' => ['C:\\stage', 'C:\\stage2\\docs', false],
+
+            // degenerate inputs are refused, never accepted by accident
+            'empty base' => ['', '/srv/staging/docs', false],
+            'empty candidate' => ['/srv/staging', '', false],
+        ];
+
+        foreach ($cases as $label => [$base, $candidate, $expected]) {
+            $this->assertSame(
+                $expected,
+                (bool) $method->invoke($updater, $base, $candidate),
+                'containment verdict for ' . $label . ': base=' . $base . ' candidate=' . $candidate
+            );
+        }
+
+        // Anti-vacuity: the helper must be the decision the prune makes. A
+        // helper that exists while the call site keeps its own separator-bound
+        // prefix test would leave this suite green and the bug in place.
+        $source = (string) file_get_contents(dirname(__DIR__) . '/lib/core_updater.php');
+
+        $this->assertSame(
+            1,
+            preg_match_all('/!\$this->isPathInsideBase\(/', $source),
+            'pruneNonRuntimeDirectories() must decide containment through the separator-agnostic helper'
+        );
+    }
+
+    /**
      * PU-16, "the prune belongs to extractZipSafe()": a branch archive — the
      * shape every real update has — is pruned one level down, in the directory
      * the copy actually reads.
