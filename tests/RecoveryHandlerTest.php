@@ -460,7 +460,6 @@ final class RecoveryHandlerTest extends TestCase
 
     /**
      * The rendered failure body, asserted on the scripts that produce it.
-     *
      * This is a source assertion and it is deliberate: the three strings the
      * console shipped are the oracle REC-05 closes, and their absence is only
      * observable by reading the file. The behavioural half — one message for
@@ -499,6 +498,53 @@ final class RecoveryHandlerTest extends TestCase
         $this->assertStringContainsString('recovery_policy_failure_message', $handler);
         $this->assertStringContainsString('recovery_login_token_validate', $handler);
         $this->assertStringContainsString('recovery_legacy_hash_verify', $handler, 'REC-07 is the default verifier');
+    }
+
+    /**
+     * REC-01 is unconditional, including where the console cannot authenticate
+     * anybody at all.
+     *
+     * A submission whose token is missing must be refused by the CSRF verdict,
+     * not by whatever the environment happens to be able to answer. The console
+     * reaches this decision *before* the database branch, so with the database
+     * down a cross-site POST still gets the uniform refusal and one with a valid
+     * token gets the honest "no database" message: two different states, decided
+     * by the token, and neither of them a guess about anyone's credentials.
+     */
+    #[Test]
+    public function aRejectedTokenIsRefusedBeforeTheDatabaseBoundary(): void
+    {
+        recovery_login_token_mint();
+
+        $this->assertSame(
+            RECOVERY_POLICY_FAILURE_MESSAGE,
+            recovery_handler_token_refusal(''),
+            'a missing token is refused with the uniform body'
+        );
+        $this->assertSame(
+            RECOVERY_POLICY_FAILURE_MESSAGE,
+            recovery_handler_token_refusal(str_repeat('c', 64)),
+            'a wrong token is refused with the same uniform body'
+        );
+        $this->assertNull(
+            recovery_handler_token_refusal((string) recovery_login_token_read()),
+            'the token the form minted may proceed to the next boundary'
+        );
+
+        $console = $this->codeWithoutComments(
+            (string) file_get_contents(dirname(__DIR__) . '/recovery.php')
+        );
+
+        $refusal = strpos($console, 'recovery_handler_token_refusal');
+        $boundary = strpos($console, 'No se puede conectar a la base de datos.');
+
+        $this->assertNotFalse($refusal, 'the console consults the token verdict before it decides anything else');
+        $this->assertNotFalse($boundary);
+        $this->assertLessThan(
+            $boundary,
+            $refusal,
+            'the token verdict is asked before the database boundary, not after it'
+        );
     }
 
     private function codeWithoutComments(string $source): string
