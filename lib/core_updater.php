@@ -28,6 +28,20 @@ class core_updater
     private $messages = [];
 
     /**
+     * Names the prune actually removed from the current staging source.
+     *
+     * @var array<int, string>
+     */
+    private $prunedDirectories = [];
+
+    /**
+     * Non-runtime directories that survived the prune, name => reason.
+     *
+     * @var array<string, string>
+     */
+    private $pruneFailures = [];
+
+    /**
      * @param string|null $rootPath
      */
     public function __construct($rootPath = null)
@@ -69,6 +83,8 @@ class core_updater
     {
         $this->errors = [];
         $this->messages = [];
+        $this->prunedDirectories = [];
+        $this->pruneFailures = [];
 
         $reportProgress = function ($step, $message, $percent) use ($progressCallback) {
             if ($progressCallback && is_callable($progressCallback)) {
@@ -127,6 +143,11 @@ class core_updater
                 'success' => false,
                 'errors' => $this->errors,
             ];
+        }
+
+        $pruneMessage = $this->pruneOutcomeMessage();
+        if ($pruneMessage !== '') {
+            $reportProgress('prune', $pruneMessage, 58);
         }
 
         $reportProgress('copy_prepare', 'Limpiando archivos antiguos del núcleo...', 60);
@@ -197,6 +218,8 @@ class core_updater
             'bundled_plugins_added' => $pluginsSync['added'],
             'bundled_plugins_errors' => $pluginsSync['errors'],
             'backup_created' => (bool) $createBackup,
+            'pruned_directories' => $this->prunedDirectories,
+            'prune_failures' => $this->pruneFailures,
         ];
     }
 
@@ -243,6 +266,13 @@ class core_updater
             foreach (self::CORE_REPOSITORY_BRANCHES as $branch) {
                 if ($this->cloneGitRepository(self::CORE_REPOSITORY_URL, $branch, $clonePath)) {
                     $usedGitClone = true;
+
+                    // PU-16: a clone of the branch carries the same eight
+                    // directories. Pruning only the ZIP path would leave the
+                    // property false on the branch the updater prefers whenever
+                    // git is available.
+                    $this->recordPruneReport($this->pruneStagingSource($clonePath));
+
                     return $clonePath;
                 }
             }
@@ -588,6 +618,14 @@ class core_updater
 
         $result = $zip->extractTo($destination);
         $zip->close();
+
+        // PU-16: only a successful extraction is pruned. A refused or partial
+        // tree is already reported and cleaned up as a unit; deleting from it
+        // would turn one failure into a second, unreported one.
+        if ($result === true) {
+            $this->recordPruneReport($this->pruneStagingSource($destination));
+        }
+
         return $result;
     }
 
@@ -828,6 +866,59 @@ class core_updater
         }
 
         return $this->pruneNonRuntimeDirectories($root);
+    }
+
+    /**
+     * Accumulate a prune report for the current update.
+     *
+     * Never touches `$this->errors`: a directory that survives the prune is a
+     * visible note in the result, not a failed update. Name-keyed so the same
+     * failure recorded by two source branches is reported once.
+     *
+     * @param array{removed: array<int, string>, failed: array<string, string>} $report
+     *
+     * @return void
+     */
+    private function recordPruneReport($report)
+    {
+        foreach ($report['removed'] as $name) {
+            if (!in_array($name, $this->prunedDirectories, true)) {
+                $this->prunedDirectories[] = $name;
+            }
+        }
+
+        foreach ($report['failed'] as $name => $reason) {
+            if (!array_key_exists($name, $this->pruneFailures)) {
+                $this->pruneFailures[$name] = $reason;
+            }
+        }
+    }
+
+    /**
+     * One progress line describing what the prune did, or '' when it had
+     * nothing to report (an already-pruned source stays silent).
+     *
+     * @return string
+     */
+    private function pruneOutcomeMessage()
+    {
+        $parts = [];
+
+        if (!empty($this->prunedDirectories)) {
+            $parts[] = 'Directorios no runtime eliminados del paquete: '
+                . implode(', ', $this->prunedDirectories) . '.';
+        }
+
+        if (!empty($this->pruneFailures)) {
+            $survivors = [];
+            foreach ($this->pruneFailures as $name => $reason) {
+                $survivors[] = $name . ' (' . $reason . ')';
+            }
+
+            $parts[] = 'No se pudieron eliminar: ' . implode(', ', $survivors) . '.';
+        }
+
+        return implode(' ', $parts);
     }
 
     /**
