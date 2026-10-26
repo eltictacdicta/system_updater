@@ -211,6 +211,7 @@ final class RecoveryCredentialVerdictTest extends TestCase
     {
         return [
             'token rejected' => ['token_rejected', false],
+            'input rejected' => ['input_rejected', false],
             'banned' => ['banned', false],
             'throttled' => ['throttled', false],
             'credential failed' => ['credential_failed', true],
@@ -388,6 +389,7 @@ final class RecoveryCredentialVerdictTest extends TestCase
     {
         return [
             'token rejected' => [RECOVERY_POLICY_PHASE_TOKEN_REJECTED],
+            'input rejected' => [RECOVERY_POLICY_PHASE_INPUT_REJECTED],
             'banned' => [RECOVERY_POLICY_PHASE_BANNED],
             'throttled' => [RECOVERY_POLICY_PHASE_THROTTLED],
             'credential failed' => [RECOVERY_POLICY_PHASE_CREDENTIAL_FAILED],
