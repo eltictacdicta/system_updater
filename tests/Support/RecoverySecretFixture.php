@@ -293,8 +293,16 @@ final class RecoverySecretFixture
      * Run a snippet with the plugin-local secret library preloaded, in a fresh
      * process. Used wherever a constant definition would otherwise leak into
      * the PHPUnit process (a pin, or a class-loading assertion).
+     *
+     * `$iniSettings` exists for the cases that have to observe the *logging*
+     * behaviour of a damaged `config.php`: with `display_errors` on (the suite's
+     * default, `STDOUT`) a PHP warning is printed instead of being logged, so
+     * "does it leak into the error log" is only observable with the setting a
+     * production host uses.
+     *
+     * @param array<string, string> $iniSettings
      */
-    public function runSnippet(string $phpCode): array
+    public function runSnippet(string $phpCode, array $iniSettings = []): array
     {
         $runner = $this->root . '/runner.php';
         file_put_contents(
@@ -304,11 +312,14 @@ final class RecoverySecretFixture
             . $phpCode
         );
 
-        return $this->runProcess(
-            escapeshellarg(PHP_BINARY)
-            . ' -d error_log=' . escapeshellarg($this->logFile)
-            . ' ' . escapeshellarg($runner)
-        );
+        $command = escapeshellarg(PHP_BINARY)
+            . ' -d error_log=' . escapeshellarg($this->logFile);
+
+        foreach ($iniSettings as $name => $value) {
+            $command .= ' -d ' . $name . '=' . escapeshellarg($value);
+        }
+
+        return $this->runProcess($command . ' ' . escapeshellarg($runner));
     }
 
     /** Execute a single PHP file, the way a PHP-enabled web server would. */

@@ -71,18 +71,25 @@ declare(strict_types=1);
  *
  * Resolution order (RACC-03), and the one thing that must not be misread
  * ---------------------------------------------------------------------
- * {@see recovery_secret_resolve()} answers "what is the secret's value": the
- * operator pin when the constant is already defined, otherwise the persisted
- * value. It never loads `config.php`, so branch 2 is reachable with a damaged
- * or absent `config.php` and loads no class.
+ * There is **one** order, and both the value accessor and the gate use it:
+ * the operator pin when `config.php` defines `SU_RECOVERY_SECRET`, otherwise the
+ * persisted value.
  *
- * The console's gate does not ask that question. It asks "does this candidate
- * match", and the order there is the opposite one, for a documented reason:
- * compare against the persisted value first (core-free, always available), and
- * only when no persisted value exists load `config.php` through
- * {@see recovery_secret_operator_pin()} and compare against the pin. That is
- * what keeps a wrong secret away from `config.php` in every state that has a
- * persisted secret to protect.
+ * {@see recovery_secret_resolve()} answers "what is the secret's value" and
+ * never loads `config.php`, so branch 2 is reachable with a damaged or absent
+ * `config.php` and loads no class.
+ *
+ * The gate asks a different question — "does this candidate match" — but the
+ * same order, because the product owner settled it after the verify phase
+ * (`verify-report.md` C-2): an operator who can edit `config.php` but has lost
+ * the secret value must be able to get back in while the secret *file* still
+ * exists, so the pin has to win in the normal operating state and not only in
+ * the lost-file one. The cost is explicit and accepted: the gate loads
+ * `config.php` on every evaluation to look for the pin. It does so safely —
+ * error-suppressed, output-buffered, `Throwable`-caught and idempotent (see
+ * {@see recovery_secret_operator_pin()}), so a damaged file yields "no pin" with
+ * no body, no warning and no parse error, and the answer falls back to the
+ * persisted value.
  */
 
 /**
@@ -145,17 +152,29 @@ function recovery_secret_log_prefix(): string
 /**
  * Read the operator pin (`SU_RECOVERY_SECRET`) out of a `config.php`.
  *
- * This is the *lost-secret* fallback and nothing else: it is the only place in
- * the whole console's graph that loads `config.php` before the gate has
- * accepted a candidate, and the caller must reach it only when no persisted
- * value exists. Two properties keep that safe:
+ * This is the *first* branch of the gate's order (product-owner decision behind
+ * C-2, `verify-report.md`): a pin defined in `config.php` outranks the persisted
+ * value, always. That makes this the only place in the console's graph that
+ * loads `config.php` before a candidate has been accepted, and it is now reached
+ * on **every** gate evaluation — the accepted cost of the decision, not an
+ * oversight.
+ *
+ * Four properties keep that cost bounded:
  *
  * - the include is error-suppressed, output-buffered and wrapped in a
  *   `Throwable` catch, so a `config.php` that does not parse yields "no pin"
- *   instead of a fatal page or a leaked parse error;
- * - it returns `null` rather than a value when the constant is absent or
- *   empty, so "the operator pinned the empty string" cannot become a
- *   one-character secret.
+ *   instead of a fatal page or a leaked parse error. A `ParseError` from an
+ *   included file is a `Throwable` and prints nothing, and `@` is what keeps a
+ *   plain warning from the file out of the response *and* out of the error log,
+ *   so the refusal cannot change because the file is damaged;
+ * - it is idempotent. It never includes a file that already ran in this request,
+ *   and never one whose pin is already visible: `config.php` is free to declare
+ *   more than constants, and a second include would redeclare it. That makes it
+ *   safe to call unconditionally, which is what the gate does;
+ * - it returns `null` rather than a value when the constant is absent or empty,
+ *   so "the operator pinned the empty string" cannot become a one-character
+ *   secret;
+ * - it reads nothing from the request and writes nothing anywhere.
  *
  * The pin is deliberately not length-checked: RACC-06 lets an operator set a
  * value of their choosing. The library's own recommendation (64 hex, i.e.
@@ -165,13 +184,18 @@ function recovery_secret_log_prefix(): string
  */
 function recovery_secret_operator_pin(string $configFile): ?string
 {
-    if (is_file($configFile) && is_readable($configFile)) {
+    if (
+        !defined('SU_RECOVERY_SECRET')
+        && !recovery_secret_config_already_included($configFile)
+        && is_file($configFile)
+        && is_readable($configFile)
+    ) {
         $level = ob_get_level();
         ob_start();
 
         try {
             (static function (string $file): void {
-                include $file;
+                @include $file;
             })($configFile);
         } catch (\Throwable $error) {
             // A damaged config.php must yield "no pin", never a fatal page.
@@ -192,6 +216,36 @@ function recovery_secret_operator_pin(string $configFile): ?string
     }
 
     return trim($pin);
+}
+
+/**
+ * Whether `$configFile` has already been executed in this request.
+ *
+ * The gate consults the operator pin before `config.php` is loaded by the
+ * console itself, so the file it includes here is the same one a later
+ * `require_once` names. PHP's `*_once` table would silently skip that second
+ * load — which is harmless — but the reverse is what this checks: a pin reader
+ * that re-included a file the request already ran would redeclare whatever the
+ * file declares, and `config.php` is free to declare more than constants.
+ *
+ * `realpath()` on both sides is what makes the comparison about the file and not
+ * about the spelling of its path.
+ */
+function recovery_secret_config_already_included(string $configFile): bool
+{
+    $target = realpath($configFile);
+    if ($target === false) {
+        return false;
+    }
+
+    foreach (get_included_files() as $included) {
+        $resolved = realpath($included);
+        if ($resolved !== false && $resolved === $target) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /**
@@ -706,13 +760,15 @@ function recovery_secret_ensure(?string $installRoot = null): ?string
  * The value the gate answers against, given the pin this request can already
  * see.
  *
- * One definition of the *order* — the persisted value first, the operator pin
- * only when nothing is persisted — so the gate and the marker's fingerprint
- * check cannot disagree about which credential is current. They differ only in
- * how they learn the pin: the gate may load `config.php` when nothing is
- * persisted (and there is therefore nothing to protect, see
- * {@see recovery_secret_gate()}), while a marker read only trusts what the
- * request has already defined.
+ * One definition of the *order* — the operator pin first, the persisted value
+ * only when no pin is defined (RACC-03, product-owner decision behind C-2) — so
+ * the gate and the marker's fingerprint check cannot disagree about which
+ * credential is current.
+ *
+ * This function never loads `config.php`. That is what keeps it usable on the
+ * marker path and in the CLI, both of which have already loaded the file if they
+ * were going to; the gate is the only caller that needs the file and does not
+ * have it, and it loads it (see {@see recovery_secret_gate()}).
  *
  * `null` means "no credential this request can verify", which both callers turn
  * into a refusal rather than into a match.
@@ -721,14 +777,14 @@ function recovery_secret_ensure(?string $installRoot = null): ?string
  */
 function recovery_secret_gate_value(?string $installRoot = null): ?array
 {
-    $persisted = recovery_secret_read($installRoot);
-    if ($persisted !== null) {
-        return ['value' => $persisted, 'source' => 'persisted'];
-    }
-
     $pin = defined('SU_RECOVERY_SECRET') ? constant('SU_RECOVERY_SECRET') : null;
     if (is_string($pin) && trim($pin) !== '') {
         return ['value' => trim($pin), 'source' => 'operator_pin'];
+    }
+
+    $persisted = recovery_secret_read($installRoot);
+    if ($persisted !== null) {
+        return ['value' => $persisted, 'source' => 'persisted'];
     }
 
     return null;
@@ -737,14 +793,22 @@ function recovery_secret_gate_value(?string $installRoot = null): ?array
 /**
  * RACC-04's gate: does this request carry the installation's secret?
  *
- * This is the question the console asks **before** `config.php` is loaded, and
- * it is not the same question as {@see recovery_secret_resolve()}. That one
- * answers "what is the value" and puts the operator pin first; this one answers
- * "does the candidate match" and puts the persisted value first, because the
- * persisted value is core-free and always reachable. Keeping those two orders
- * apart is what lets a wrong secret be refused in every state that has a
- * persisted secret to protect, including when `config.php` is damaged
- * (RACC-01's "a wrong secret never reaches config.php").
+ * The credential order is RACC-03's order, made binding by the product owner
+ * after the verify phase (`verify-report.md` C-2):
+ *
+ *   1. `SU_RECOVERY_SECRET` from `config.php`, when defined — the operator pin;
+ *   2. the persisted per-installation value of RACC-02;
+ *   3. on first use only, generate and persist one (RACC-02).
+ *
+ * The consequence is deliberate and was accepted together with the decision:
+ * `config.php` is loaded on **every** gate evaluation, refusals included,
+ * because "is a pin defined?" cannot be answered without executing the file that
+ * would define it. RACC-01's "a wrong secret never reaches `config.php`"
+ * scenario is therefore narrowed by the decision rather than by the code — the
+ * file is reached, but it is reached safely: the include is error-suppressed,
+ * output-buffered and `Throwable`-caught ({@see recovery_secret_operator_pin()}),
+ * so a damaged `config.php` produces no body, no warning and no parse error, and
+ * the answer falls back to the persisted value.
  *
  * The order itself lives in {@see recovery_secret_gate_value()} so the marker's
  * fingerprint check consumes the very same answer instead of re-deriving it.
@@ -760,41 +824,36 @@ function recovery_secret_gate_value(?string $installRoot = null): ?array
  * emitted, logged or otherwise exposed, because the branch a request took is
  * exactly the kind of difference RACC-04 forbids an observer from seeing.
  *
- * The lost-secret state is the one documented exception to "no `config.php` on
- * the failing path" (`tasks.md`, "Delta conflict resolved at apply time"): with
- * no persisted value there is nothing left to protect, the include is
- * error-suppressed and `Throwable`-caught, and no body or header changes. That
- * state also generates the secret on first use (RACC-02), which is the only way
- * a fresh installation ever becomes reachable.
- *
- * The include happens only when the pin is not already visible: a request that
- * already loaded `config.php` (the marker read does) would otherwise include it
- * a second time, and `config.php` is free to declare more than constants.
+ * The first-use state generates the secret (RACC-02), which is the only way a
+ * fresh installation ever becomes reachable; a failed generation answers
+ * `unavailable` and refuses.
  *
  * @return array{granted: bool, source: 'persisted'|'operator_pin'|'unavailable'}
  */
 function recovery_secret_gate(string $candidate, ?string $installRoot = null, ?string $configFile = null): array
 {
-    $grant = recovery_secret_gate_value($installRoot);
+    $root = recovery_secret_install_root($installRoot);
+    $pinFile = $configFile ?? ($root === '' ? null : $root . '/config.php');
+
+    // Branch 1, always consulted first: the pin wins (RACC-03, C-2). This is the
+    // one config.php load the console performs before a candidate is accepted.
+    $pin = $pinFile === null ? null : recovery_secret_operator_pin($pinFile);
+
+    $grant = $pin === null
+        ? recovery_secret_gate_value($installRoot)
+        : ['value' => $pin, 'source' => 'operator_pin'];
 
     if ($grant === null) {
-        $root = recovery_secret_install_root($installRoot);
-        $pinFile = $configFile ?? ($root === '' ? null : $root . '/config.php');
-        $pin = $pinFile === null ? null : recovery_secret_operator_pin($pinFile);
-
-        if ($pin !== null) {
-            $grant = ['value' => $pin, 'source' => 'operator_pin'];
-        } else {
-            // First use: nothing has been persisted yet, so nothing can be
-            // known about the candidate. Generate, persist and disclose once in
-            // the log (RACC-06), then answer the refusal like any other request.
-            $persisted = recovery_secret_ensure($installRoot);
-            if ($persisted === null) {
-                return ['granted' => false, 'source' => 'unavailable'];
-            }
-
-            $grant = ['value' => $persisted, 'source' => 'persisted'];
+        // First use: nothing has been persisted and no pin is defined, so
+        // nothing can be known about the candidate. Generate, persist and
+        // disclose once in the log (RACC-06), then answer the refusal like any
+        // other request.
+        $persisted = recovery_secret_ensure($installRoot);
+        if ($persisted === null) {
+            return ['granted' => false, 'source' => 'unavailable'];
         }
+
+        $grant = ['value' => $persisted, 'source' => 'persisted'];
     }
 
     return [

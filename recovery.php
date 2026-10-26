@@ -56,10 +56,18 @@ if (PHP_SAPI === 'cli') {
     }
 }
 
-// Puerta del secreto (RACC-04). Se ejecuta ANTES de cargar config.php, a
-// propósito: el secreto se resuelve sin el core, así que una instalación con
-// config.php dañado sigue contestando la misma negativa limpia en vez de
-// escupir un error de PHP. Sin secreto correcto este endpoint no existe.
+// Puerta del secreto (RACC-04). El orden de credenciales es el de RACC-03,
+// fijado por decisión del product owner tras la fase de verificación (C-2): el
+// pin del operador (`SU_RECOVERY_SECRET`) gana siempre, y sólo cuando no está
+// definido se compara el valor persistido de la instalación.
+//
+// La consecuencia es deliberada y se aceptó junto con la decisión: el pin vive
+// en config.php, así que la puerta carga ese fichero en CADA evaluación,
+// incluidas las negativas. Se hace de forma segura
+// (`recovery_secret_operator_pin()`): include con supresión de errores, buffer
+// de salida, `Throwable` capturado e idempotente, de modo que un config.php
+// dañado produce «no hay pin» sin cuerpo, sin aviso y sin error de sintaxis, y
+// la respuesta cae al valor persistido.
 //
 // Un único camino para los tres fallos — parámetro ausente, vacío y erróneo —
 // porque `recovery_secret_gate()` compara con `hash_equals()` y no tiene rama
@@ -124,6 +132,11 @@ header('Referrer-Policy: no-referrer');
 // La ruta se escribe literal en el `require_once` a propósito: el grafo de
 // includes de RACC-01 se enumera estáticamente, y una ruta en variable lo
 // dejaría sin resolver justo en el único fichero externo permitido.
+//
+// Cuando la puerta ya lo incluyó en esta petición —que es el caso normal desde
+// C-2, porque el pin vive aquí— este `require_once` es un no-op: PHP no ejecuta
+// dos veces el mismo fichero. El lector de la marca (`lib/recovery_session.php`)
+// aplica la misma regla, así que solo hay una ejecución por petición.
 if (!is_file(FS_FOLDER . '/config.php')) {
     header('Content-Type: text/plain; charset=utf-8');
     http_response_code(500);
@@ -144,10 +157,10 @@ session_start();
 // aquí el secreto ya no hace falta: la sesión lo lleva.
 //
 // La marca guarda además la huella del valor que la autorizó, y se compara con
-// el valor contra el que la puerta respondería ahora (el persistido, o el pin
-// del operador cuando no hay persistido). Rotar el secreto retira así las
-// marcas que emitió el valor antiguo: quien obtuvo el secreto filtrado y ya
-// había abierto una sesión pierde el acceso (RACC-06).
+// el valor contra el que la puerta respondería ahora — el pin del operador
+// cuando está definido, si no el valor persistido (C-2: el pin gana). Rotar el
+// secreto retira así las marcas que emitió el valor antiguo: quien obtuvo el
+// secreto filtrado y ya había abierto una sesión pierde el acceso (RACC-06).
 if ($su_secret_gate['granted']) {
     $su_grant = recovery_secret_gate_value(FS_FOLDER);
     recovery_console_mark_authorized($su_grant === null ? null : $su_grant['value']);

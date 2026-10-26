@@ -908,30 +908,28 @@ PHP);
     // ---------------------------------------------------------------------
 
     /**
-     * The comparison order, which is deliberately the **opposite** of the
-     * resolution order.
+     * RACC-03 "the operator pin wins", made the gate's order by product-owner
+     * decision: the pin outranks a different persisted value, in the gate, not
+     * only in `recovery_secret_resolve()`.
      *
-     * `recovery_secret_resolve()` asks "what is the secret's value" and answers
-     * the operator pin first (RACC-03). The gate asks "does this candidate
-     * match", and there the persisted value goes first because it is core-free
-     * and always reachable — which is the only reason a wrong secret can be
-     * refused without loading `config.php` (RACC-01's "a wrong secret never
-     * reaches config.php").
-     *
-     * Pinned both ways: the persisted value *grants* while a different pin is
-     * defined in `config.php`, and the sentinel proves the file was never
-     * executed to decide that.
+     * `config.php` is therefore consulted on every gate evaluation — that is the
+     * accepted cost of the decision, and it is why the sentinel is asserted. The
+     * two properties that must survive it are pinned here: the persisted value
+     * is neither the credential that grants nor a file that gets rewritten, and
+     * a wrong candidate is still refused.
      */
-    public function testTheGateComparesAgainstThePersistedValueBeforeAnyConfigLoad(): void
+    public function testTheOperatorPinWinsOverADifferentPersistedValue(): void
     {
         $fixture = $this->newFixture();
         $fixture->installConsole();
 
-        $secret = recovery_secret_generate();
-        $this->assertTrue(recovery_secret_store($secret, $fixture->siblingSecretPath()));
+        $persisted = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($persisted, $fixture->siblingSecretPath()));
+        $path = $fixture->siblingSecretPath();
+        $contents = (string) file_get_contents($path);
+        touch($path, 1000000000);
 
-        // A pin that would win the *value* order (RACC-03) and must lose the
-        // *comparison* order (RACC-04's resolution of the delta conflict).
+        // Deliberately not 64 hex: an operator may pin any value they choose.
         $pin = 'operator-pin-' . bin2hex(random_bytes(8));
         $fixture->writeSentinelConfig(
             'define(' . var_export('SU_RECOVERY_SECRET', true) . ', ' . var_export($pin, true) . ");\n"
@@ -939,8 +937,8 @@ PHP);
 
         $result = $fixture->runSnippet(
             'echo json_encode(['
-            . "'persisted' => recovery_secret_gate(" . var_export($secret, true) . ", __DIR__, __DIR__ . '/config.php'),"
-            . "'pinned' => recovery_secret_gate(" . var_export($pin, true) . ", __DIR__, __DIR__ . '/config.php'),"
+            . "'pin' => recovery_secret_gate(" . var_export($pin, true) . ", __DIR__, __DIR__ . '/config.php'),"
+            . "'persisted' => recovery_secret_gate(" . var_export($persisted, true) . ", __DIR__, __DIR__ . '/config.php'),"
             . "'wrong' => recovery_secret_gate('f" . str_repeat('0', 63) . "', __DIR__, __DIR__ . '/config.php'),"
             . "'empty' => recovery_secret_gate('', __DIR__, __DIR__ . '/config.php'),"
             . ']);'
@@ -950,26 +948,31 @@ PHP);
         $decoded = json_decode(trim($result['stdout']), true);
         $this->assertIsArray($decoded, 'the snippet answered: ' . $result['stdout'] . $result['stderr']);
 
-        $this->assertTrue($decoded['persisted']['granted'], 'the persisted value grants');
-        $this->assertSame('persisted', $decoded['persisted']['source']);
-        $this->assertFalse($decoded['pinned']['granted'], 'a pin value does not grant while a persisted value exists');
+        $this->assertTrue($decoded['pin']['granted'], 'the operator pin is what the gate answers against');
+        $this->assertSame('operator_pin', $decoded['pin']['source']);
+        $this->assertFalse(
+            $decoded['persisted']['granted'],
+            'the persisted value must lose to a different pin, not win over it'
+        );
+        $this->assertSame('operator_pin', $decoded['persisted']['source'], 'and the branch that decided is the pin');
         $this->assertFalse($decoded['wrong']['granted']);
         $this->assertFalse($decoded['empty']['granted']);
-        $this->assertSame('persisted', $decoded['wrong']['source'], 'the wrong case never falls through to the pin');
-        $this->assertSame('persisted', $decoded['empty']['source'], 'the empty case takes the same branch');
+        $this->assertSame('operator_pin', $decoded['wrong']['source'], 'the refusal takes the pin branch too');
 
-        $this->assertFalse(
+        $this->assertTrue(
             $fixture->configWasLoaded(),
-            'the persisted branch must refuse a wrong secret without loading config.php'
+            'the pin lives in config.php, so the gate must consult the file to find it'
         );
+        $this->assertSame($contents, (string) file_get_contents($path), 'the persisted value is not rewritten');
+        $this->assertSame(1000000000, $fixture->mtimeOf($path), 'the persisted value is not even touched');
     }
 
     /**
-     * The lost-secret state (RACC-06 escape 3): with no persisted value, the
-     * pin is compared — and the pin is not persisted behind the operator's back,
-     * because it is not the installation's secret to keep.
+     * The escape of RACC-06 must not become a credential the console stores: the
+     * pin is compared, never persisted, and it keeps working while the file it
+     * lives in stays valid.
      */
-    public function testTheOperatorPinGrantsOnlyWhenNoPersistedValueExists(): void
+    public function testTheOperatorPinIsNeverPersistedBehindTheOperatorsBack(): void
     {
         $fixture = $this->newFixture();
         $fixture->installConsole();
@@ -993,11 +996,94 @@ PHP);
         $this->assertTrue($decoded['correct']['granted'], 'the operator pin is the lost-secret escape');
         $this->assertSame('operator_pin', $decoded['correct']['source']);
         $this->assertFalse($decoded['wrong']['granted']);
+        $this->assertSame('operator_pin', $decoded['wrong']['source']);
 
         $this->assertTrue($fixture->configWasLoaded(), 'premise: the pin branch is the documented config load');
         $this->assertFileDoesNotExist(
             $fixture->siblingSecretPath(),
             'the pin is not the installation secret, so it is never persisted'
+        );
+    }
+
+    /**
+     * The other half of "the pin wins" is what has to happen when the file that
+     * carries it is broken: fall back to the persisted value, silently.
+     *
+     * RACC-01 already requires that a damaged `config.php` never paints the
+     * response, and the pin decision does not relax it: the include is
+     * error-suppressed, output-buffered and `Throwable`-caught, so a parse error
+     * yields "no pin" — no body, no warning, no error_log line — and the
+     * installation's own persisted secret still opens the console.
+     */
+    public function testADamagedConfigFallsBackToThePersistedValueSilently(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+        $fixture->writeConfig("<?php\nfunction broken( { }\n");
+
+        $persisted = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($persisted, $fixture->siblingSecretPath()));
+
+        $result = $fixture->runSnippet(
+            'echo json_encode(['
+            . "'persisted' => recovery_secret_gate(" . var_export($persisted, true) . ", __DIR__, __DIR__ . '/config.php'),"
+            . "'pinish' => recovery_secret_gate('operator-pin-' . bin2hex('x'), __DIR__, __DIR__ . '/config.php'),"
+            . ']);'
+        );
+
+        $this->assertSame(0, $result['code'], 'a damaged config must not abort the gate: ' . $result['stderr']);
+        $decoded = json_decode(trim($result['stdout']), true);
+        $this->assertIsArray($decoded, 'the snippet answered: ' . $result['stdout'] . $result['stderr']);
+
+        $this->assertTrue($decoded['persisted']['granted'], 'with no readable pin the persisted value still grants');
+        $this->assertSame('persisted', $decoded['persisted']['source']);
+        $this->assertFalse($decoded['pinish']['granted'], 'and nothing is invented from the broken file');
+
+        foreach (['Parse error', 'syntax error', 'Warning', 'Fatal error'] as $noise) {
+            $this->assertStringNotContainsString($noise, $result['stdout'], 'a damaged config must not be echoed');
+            $this->assertStringNotContainsString($noise, $result['stderr'], 'nor warned about');
+        }
+        $this->assertStringStartsWith('{', trim($result['stdout']), 'nothing precedes the gate answer');
+        $this->assertStringEndsWith('}', trim($result['stdout']), 'and nothing follows it');
+    }
+
+    /**
+     * "Must not warn" is part of the C-2 decision, and it is stricter than "must
+     * not echo": a warning from `config.php` is invisible in the response when
+     * `display_errors` is off (production) but lands in the error log, where a
+     * refusal is supposed to leave nothing at all.
+     *
+     * So the include is error-suppressed as well as buffered. The gate still
+     * falls back to the persisted value, and the log stays empty — which is also
+     * how the refusal keeps from advertising that this file was ever read.
+     */
+    public function testAConfigThatWarnsLeavesNothingInTheResponseOrTheLog(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+        $fixture->writeConfig("<?php\n\$broken = \$undefined_variable_in_config;\n");
+
+        $persisted = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($persisted, $fixture->siblingSecretPath()));
+
+        $result = $fixture->runSnippet(
+            'echo json_encode(['
+            . "'persisted' => recovery_secret_gate(" . var_export($persisted, true) . ", __DIR__, __DIR__ . '/config.php'),"
+            . ']);',
+            ['display_errors' => '0']
+        );
+
+        $this->assertSame(0, $result['code'], $result['stderr']);
+        $decoded = json_decode(trim($result['stdout']), true);
+        $this->assertIsArray($decoded, 'the snippet answered: ' . $result['stdout'] . $result['stderr']);
+        $this->assertTrue($decoded['persisted']['granted'], 'the persisted value still decides');
+
+        $this->assertStringNotContainsString('Warning', $result['stdout'], 'the response body stays clean');
+        $this->assertStringNotContainsString('Warning', $result['stderr'], 'and the process says nothing either');
+        $this->assertSame(
+            '',
+            $fixture->errorLogContents(),
+            'a warning from config.php must not reach the error log either'
         );
     }
 
@@ -1034,11 +1120,17 @@ PHP);
      * Asserted on the function that does the comparing instead of by timing:
      * `===` short-circuits at the first differing byte, which is the property
      * RACC-04 requires the gate not to have.
+     *
+     * The order assertion flipped with the product-owner decision behind C-2:
+     * the gate consults the operator pin first and only then the persisted
+     * value, and `recovery_secret_gate_value()` implements the same order for the
+     * marker's fingerprint check.
      */
     public function testTheComparisonIsConstantTimeAndCoversTheWholeValue(): void
     {
         $source = (string) file_get_contents(dirname(__DIR__) . '/lib/recovery_secret.php');
         $body = $this->functionBody($source, 'recovery_secret_gate');
+        $valueBody = $this->functionBody($source, 'recovery_secret_gate_value');
 
         $this->assertStringContainsString('hash_equals(', $body, 'the gate must compare with hash_equals()');
         $this->assertStringNotContainsString('strcmp(', $body);
@@ -1050,9 +1142,14 @@ PHP);
         );
 
         $this->assertLessThan(
+            (int) strpos($body, 'recovery_secret_gate_value('),
             (int) strpos($body, 'recovery_secret_operator_pin('),
-            (int) strpos($body, 'recovery_secret_read('),
-            'the persisted value is read before the pin is ever considered'
+            'the operator pin is consulted before the persisted branch'
+        );
+        $this->assertLessThan(
+            (int) strpos($valueBody, 'recovery_secret_read('),
+            (int) strpos($valueBody, 'SU_RECOVERY_SECRET'),
+            'and the value order the marker consumes puts the pin first as well'
         );
     }
 
