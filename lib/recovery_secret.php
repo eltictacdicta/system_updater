@@ -127,10 +127,21 @@ function recovery_secret_filename(): string
  * candidates keep sitting beside their own installation.
  *
  * The digest is over the **resolved** root on purpose. `realpath()` folds the
- * spellings of one installation — a trailing slash, a redundant `..`, a
- * symlinked deployment path — onto one directory, so the same installation
- * cannot end up with two secrets depending on how it was reached. It is a
- * location, never an entropy source: the secret itself is still
+ * spellings of one installation's *path* onto one digest — a trailing slash, a
+ * redundant `..`, and a symlinked deployment path all hash the same. That is
+ * only half of the candidate, though: the parent is `dirname()` of the spelling
+ * the caller passed, which the operating system resolves afterwards. A trailing
+ * slash and a redundant `..` still land in one directory, and so does a symlink
+ * that sits in the parent of the real installation. A symlink reached through a
+ * different parent does not: the digest is identical and the candidate
+ * directory is not (S-7 of the re-verification, pinned by
+ * `RecoverySecretTest::testAPathSpellingFoldsOnlyWhenItsParentFolds`). Two
+ * *installations* still cannot collide, which is what RACC-02 requires; one
+ * installation reached through two differently-parented spellings can resolve
+ * two candidate files, and the operator must use the spelling the secret was
+ * written for.
+ *
+ * It is a location, never an entropy source: the secret itself is still
  * `random_bytes(32)` ({@see recovery_secret_generate()}), and RACC-02 forbids
  * deriving the value from the path.
  *

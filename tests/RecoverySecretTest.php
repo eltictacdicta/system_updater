@@ -221,6 +221,94 @@ final class RecoverySecretTest extends TestCase
     }
 
     /**
+     * RACC-02's path-spelling clause, measured instead of assumed (S-7 of the
+     * re-verification).
+     *
+     * The delta said a trailing slash, a redundant `..` and a symlink all "fold
+     * onto one directory". Two of the three do, the third does only under a
+     * condition, and the reason is structural: the digest goes through
+     * `realpath()`, so it folds every spelling of the installation, but the
+     * candidate's *parent* is `dirname()` of whatever spelling the caller
+     * passed, resolved by the operating system afterwards. When the symlink sits
+     * in the parent of the real installation, both spellings name the same
+     * parent and the candidate folds. When it is reached through a different
+     * parent, the digest is identical and the directory is not.
+     *
+     * That residual gap is worth pinning rather than smoothing over: the second
+     * directory is a *second* secret file for the same installation, so an
+     * operator who bookmarked the symlinked path and an operator who used the
+     * real one can be holding different credentials. The test asserts the exact
+     * boundary — same digest, same parent folds, different parent does not — so
+     * the sentence can be corrected without overclaiming in the other direction.
+     */
+    public function testAPathSpellingFoldsOnlyWhenItsParentFolds(): void
+    {
+        $fixture = $this->newFixture();
+        $real = $fixture->base . '/www/real';
+
+        if (
+            !mkdir($real, 0777, true)
+            || !mkdir($fixture->base . '/other', 0777, true)
+            || !@symlink($real, $fixture->base . '/www/same')
+            || !@symlink($real, $fixture->base . '/other/diff')
+        ) {
+            $this->markTestSkipped('this host cannot create the symlinks the clause is about');
+        }
+
+        $digest = static function (string $root): string {
+            return basename(dirname(recovery_secret_candidates($root)[0]));
+        };
+        // The candidate is `dirname($root) . '/' . digest($root)`, and only the
+        // *digest* is resolved before it is hashed. Folding therefore means
+        // "same physical parent and same digest", which is what these two
+        // accessors measure independently — comparing the directories as strings
+        // would call `..` unfolded when the filesystem has already folded it.
+        $parentOf = static function (string $root): string {
+            $resolved = realpath(dirname($root));
+
+            return $resolved === false ? dirname($root) : $resolved;
+        };
+
+        $canonical = $parentOf($real);
+
+        $this->assertSame($canonical, $parentOf($real . '/'), 'a trailing slash folds');
+        $this->assertSame($canonical, $parentOf($real . '/../real'), 'a redundant .. folds');
+        $this->assertSame(
+            $canonical,
+            $parentOf($fixture->base . '/www/same'),
+            'a symlink in the parent of the real installation folds'
+        );
+
+        foreach ([$real . '/', $real . '/../real', $fixture->base . '/www/same'] as $spelling) {
+            $this->assertSame($digest($real), $digest($spelling), 'the digest folds too: ' . $spelling);
+        }
+
+        $elsewhere = $parentOf($fixture->base . '/other/diff');
+
+        $this->assertNotSame(
+            $canonical,
+            $elsewhere,
+            'a symlink reached through another parent does not fold: dirname() names a different directory'
+        );
+        $this->assertSame(
+            $digest($real),
+            $digest($fixture->base . '/other/diff'),
+            'and the digest is identical, so it is the parent — not the digest — that fails to fold'
+        );
+
+        // The consequence an operator feels: the second directory is a second
+        // secret file for one installation.
+        $stored = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($stored, recovery_secret_candidates($real)[0]));
+
+        $this->assertSame($stored, recovery_secret_read($real), 'the canonical spelling reads the stored value');
+        $this->assertNull(
+            recovery_secret_read($fixture->base . '/other/diff'),
+            'the differently-parented spelling resolves no secret at all, because it looks beside another parent'
+        );
+    }
+
+    /**
      * RACC-02: the persisted secret is readable and writable by the PHP user
      * alone. `0600` is the whole claim, so it is asserted on the real mode.
      */

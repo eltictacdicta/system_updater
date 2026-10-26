@@ -148,9 +148,15 @@ fixed file beside the installation root. It lives in a per-installation director
 `<digest>` is the first 16 hex characters of `sha256()` over the **resolved**
 (`realpath()`) installation root. Two installations under one parent — the ordinary
 `public_html` next to `staging` layout — therefore resolve two different directories and
-two different values, while the same installation reached through a different spelling of
-its path (symlink, trailing slash, a redundant `..`) folds onto one directory. The digest
-names a **location** only: it is never a seed, and the value remains `random_bytes(32)`.
+two different values. The digest goes through `realpath()`, so it folds every spelling of
+one installation, but the candidate's parent is `dirname()` of the spelling the caller
+passed: a trailing slash or a redundant `..` still folds onto one directory, because the
+parent resolves to the same place once the filesystem sees it, whereas a symlink folds
+**only when it sits in the parent directory of the real installation**. A symlink reached
+through a different parent keeps the identical digest under a different parent, so it
+resolves a *second* candidate directory and therefore a second secret file for the same
+installation. The digest names a **location** only: it is never a seed, and the value
+remains `random_bytes(32)`.
 Inside the directory the file keeps a fixed operator-facing name, because an operator
 rescuing the installation by hand has to be able to grep for it. The directory is created
 `0700`, the file `0600`.
