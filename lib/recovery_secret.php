@@ -71,9 +71,9 @@ declare(strict_types=1);
  *
  * Resolution order (RACC-03), and the one thing that must not be misread
  * ---------------------------------------------------------------------
- * There is **one** order, and both the value accessor and the gate use it:
- * the operator pin when `config.php` defines `SU_RECOVERY_SECRET`, otherwise the
- * persisted value.
+ * There is **one** order, and every consumer uses it — the gate, the marker's
+ * fingerprint check and the CLI: the operator pin when `config.php` defines
+ * `SU_RECOVERY_SECRET`, otherwise the persisted value.
  *
  * {@see recovery_secret_resolve()} answers "what is the secret's value" and
  * never loads `config.php`, so branch 2 is reachable with a damaged or absent
@@ -90,6 +90,14 @@ declare(strict_types=1);
  * {@see recovery_secret_operator_pin()}), so a damaged file yields "no pin" with
  * no body, no warning and no parse error, and the answer falls back to the
  * persisted value.
+ *
+ * The CLI pays the same share of that decision, and for the same reason
+ * ({@see recovery_secret_cli_pin()}): it runs before the console's own
+ * `require_once` of `config.php`, so a read escape that skipped the file would
+ * report the persisted value while the gate answered to the pin — handing the
+ * operator a credential that is refused on use (N-1 of the re-verification).
+ * The read is the same suppressed, idempotent one, and `config.php` is a file of
+ * `define()`s, so the escape still loads no core code and opens no database.
  */
 
 /**
@@ -610,17 +618,87 @@ function recovery_secret_cli_command(array $argv): ?string
 }
 
 /**
+ * The operator pin as the CLI surfaces can see it.
+ *
+ * The CLI runs before the console's own `require_once FS_FOLDER/config.php`, so
+ * `SU_RECOVERY_SECRET` is never defined here by accident: it is defined because
+ * this function executes the file first, with the same four properties the
+ * gate's read carries ({@see recovery_secret_operator_pin()}) —
+ * error-suppressed, output-buffered, `Throwable`-caught and idempotent. A
+ * damaged or absent `config.php` therefore yields `null` with no body, no
+ * warning, no parse error and no log entry, and the escapes fall back to the
+ * persisted value exactly as the gate does.
+ *
+ * Reading `config.php` here is the CLI's share of the C-2 decision, not a
+ * lapse. `RACC-03` requires one resolution order for the gate, the marker's
+ * fingerprint check and the CLI; "is a pin defined?" cannot be answered by the
+ * two that skip the file, and a CLI that guesses is the defect this function
+ * exists to remove (N-1 of the re-verification): it reported the persisted
+ * value while the gate answered to the pin, so the operator was handed a
+ * credential that was refused on use.
+ *
+ * What the escapes still do not do — and what `RACC-06` escape 1 requires — is
+ * load core code or open a database. `config.php` is a file of `define()`s: no
+ * autoloader, no `base/`, no `src/`, no kernel, no connection.
+ */
+function recovery_secret_cli_pin(?string $installRoot = null): ?string
+{
+    $root = recovery_secret_install_root($installRoot);
+    if ($root === '') {
+        return null;
+    }
+
+    return recovery_secret_operator_pin($root . '/config.php');
+}
+
+/**
  * Run a CLI escape and print its result.
  *
  * Output contract, documented for scripts: the first line is the secret and
  * nothing else, so `php recovery.php --secret` is shell-composable; any
  * advisory text follows on lines that begin with `# `. A failure prints no
  * secret at all and exits non-zero.
+ *
+ * The read escape prints **the value the gate would accept**, and resolves the
+ * pin first for exactly that reason: with `SU_RECOVERY_SECRET` defined the gate
+ * answers to the pin, so reporting the persisted value handed the operator a
+ * credential that was refused on use — `RACC-03`'s "identical in every
+ * consumer" and `RACC-06` escape 1's "prints the current secret" were both
+ * false in that state.
+ *
+ * When a pin is in force the **pin itself** is printed, rather than a warning
+ * above the persisted value, for four reasons:
+ *
+ * - the first line has to be a usable secret. A prose first line breaks the
+ *   documented contract for every script that composes the command, and a
+ *   persisted value printed under a warning satisfies it formally while
+ *   delivering the one value that is guaranteed to be refused — the same trap,
+ *   one indirection deeper;
+ * - "the current secret" *is* the pin in that state; the persisted value
+ *   answers a different question than the one the operator asked;
+ * - disclosure does not change in kind. The pin lives in `config.php`, which
+ *   the operator running this on the server must already be able to read — it
+ *   is one `cat` away — and the persisted value is printed under the same
+ *   threat model today. Nothing is disclosed to anyone who did not already have
+ *   read access to the file that holds it;
+ * - the refused value is not printed at all, so there is nothing the answer can
+ *   be confused with. The advisory line names the source, never the alternative.
+ *
+ * `--rotate-secret` keeps its behaviour: it rotates the persisted file, which
+ * retires the previous persisted value and prepares the installation for the
+ * day the pin is removed. What it cannot do while a pin is defined is change
+ * what the gate accepts, so the pinned state says that out loud next to the
+ * existing override note.
  */
 function recovery_secret_cli_run(string $command, ?string $installRoot = null): int
 {
     $stdout = recovery_secret_cli_stream('STDOUT');
     $stderr = recovery_secret_cli_stream('STDERR');
+
+    // First, before `ensure()` can answer from the persisted branch: the same
+    // first step the gate takes, so the two cannot disagree about which
+    // credential is current.
+    $pin = recovery_secret_cli_pin($installRoot);
 
     $value = $command === 'rotate'
         ? recovery_secret_rotate($installRoot)
@@ -640,6 +718,14 @@ function recovery_secret_cli_run(string $command, ?string $installRoot = null): 
     if ($command === 'rotate') {
         fwrite($stdout, '# note: SU_RECOVERY_SECRET in config.php, when defined, overrides this value.'
             . PHP_EOL);
+
+        if ($pin !== null) {
+            fwrite($stdout, '# note: a pin is in force here: the gate does not accept it while the pin'
+                . ' is defined, so this rotation retires the persisted value only.' . PHP_EOL);
+        }
+    } elseif ($pin !== null) {
+        fwrite($stdout, '# note: SU_RECOVERY_SECRET from config.php is in force; the value above is'
+            . ' that operator pin, which is what the gate accepts.' . PHP_EOL);
     }
 
     return 0;

@@ -466,12 +466,20 @@ PHP);
     }
 
     /**
-     * RACC-06 escape 1: `php recovery.php --secret` prints the current value
-     * without loading `config.php` and without opening the database. The
-     * sentinel proves the second half: a DB connection needs `FS_DB_*`, which
-     * only `config.php` defines, so an unloaded config is an untouched DB.
+     * RACC-06 escape 1, and the part of it that survives the C-2 decision: the
+     * read escape answers with no database and, when `config.php` is damaged or
+     * absent, without it too.
+     *
+     * The original wording was "prints the current secret without loading
+     * `config.php`". That promise cannot survive a pin that outranks the
+     * persisted value: "is a pin defined?" is only answerable by executing the
+     * file, which is why the gate does it on every evaluation. The escape
+     * therefore consults it with the same suppression — that is half one, the
+     * sentinel proving the file really ran — and still answers from the
+     * persisted branch when the file is gone, which is half two and the half
+     * `RACC-03` still requires of branch 2.
      */
-    public function testCliReadPrintsTheCurrentSecretWithoutLoadingConfig(): void
+    public function testCliReadConsultsConfigForThePinAndStillAnswersWithoutIt(): void
     {
         $fixture = $this->newFixture();
         $fixture->installConsole();
@@ -484,7 +492,18 @@ PHP);
 
         $this->assertSame(0, $result['code'], 'the read escape must succeed: ' . $result['stderr']);
         $this->assertSame($value, trim($result['stdout']));
-        $this->assertFalse($fixture->configWasLoaded(), 'the read escape must not need config.php');
+        $this->assertTrue(
+            $fixture->configWasLoaded(),
+            'the escape consults config.php so the pin cannot be silently outranked'
+        );
+
+        unlink($fixture->root . '/config.php');
+        $this->assertFileDoesNotExist($fixture->root . '/config.php');
+
+        $without = $fixture->runConsole('--secret');
+
+        $this->assertSame(0, $without['code'], 'a missing config.php is not a failure for the escape: ' . $without['stderr']);
+        $this->assertSame($value, trim($without['stdout']), 'branch 2 still needs no config.php');
     }
 
     /**
@@ -505,7 +524,10 @@ PHP);
         $value = trim($first['stdout']);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $value);
         $this->assertSame($value, recovery_secret_read($fixture->root), 'the printed value is the persisted one');
-        $this->assertFalse($fixture->configWasLoaded());
+        $this->assertTrue(
+            $fixture->configWasLoaded(),
+            'the escape looks for the pin first, exactly as the gate does'
+        );
 
         $second = $fixture->runConsole('--secret');
 
@@ -539,7 +561,10 @@ PHP);
         $rotated = trim(explode("\n", trim($result['stdout']))[0]);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $rotated);
         $this->assertNotSame($previous, $rotated, 'rotation must produce a different value');
-        $this->assertFalse($fixture->configWasLoaded());
+        $this->assertTrue(
+            $fixture->configWasLoaded(),
+            'rotation reads the pin too, so its advisory note can name the state it is in'
+        );
 
         $this->assertSame($rotated, recovery_secret_read($fixture->root), 'the new value is persisted');
         $this->assertNotSame($previous, recovery_secret_read($fixture->root), 'the previous value is retired');
@@ -552,12 +577,202 @@ PHP);
     }
 
     /**
+     * RACC-03 "identical in every consumer — the gate, the marker's fingerprint
+     * check and the CLI", measured at the CLI (N-1 of the re-verification).
+     *
+     * The defect this forbids is precise and was shipped: the read escape used to
+     * resolve before `config.php` was ever executed, so in a pinned installation
+     * it printed the **persisted** value — the one the gate answers `404` for —
+     * while the pin was the credential the gate accepted. An operator acting on
+     * that output was refused, which makes `RACC-06` escape 1 ("prints the
+     * current secret") false in exactly the state the pin exists for.
+     *
+     * So the assertion is not "the output mentions the pin". It is the two
+     * properties the operator depends on: the accepted value is what comes out,
+     * and the refused value does not come out at all, so the two cannot be
+     * confused. The gate verdicts are measured in a fresh process, so "the value
+     * the CLI reports is one the gate accepts" is not taken on trust.
+     */
+    public function testCliReadUnderAnOperatorPinReportsTheValueTheGateAccepts(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+
+        $pin = 'operator-pin-' . bin2hex(random_bytes(12));
+        $persisted = recovery_secret_generate();
+
+        $fixture->writeSentinelConfig("define('SU_RECOVERY_SECRET', " . var_export($pin, true) . ");\n");
+        $this->assertTrue(recovery_secret_store($persisted, $fixture->siblingSecretPath()));
+
+        $result = $fixture->runConsole('--secret');
+
+        $this->assertSame(0, $result['code'], 'the read escape must succeed: ' . $result['stderr']);
+        $this->assertSame(
+            $pin,
+            $this->firstLine($result['stdout']),
+            'the first line is the credential the gate compares against, not the one it refuses'
+        );
+        $this->assertNotSame($persisted, $this->firstLine($result['stdout']));
+        $this->assertStringNotContainsString(
+            $persisted,
+            $result['stdout'],
+            'the refused value is never printed, so it cannot be mistaken for the accepted one'
+        );
+        $this->assertStringNotContainsString($persisted, $result['stderr']);
+        $this->assertTrue($fixture->configWasLoaded(), 'the pin can only be honoured by executing config.php');
+
+        $verdicts = $fixture->runSnippet(
+            'echo json_encode(['
+            . "'reported' => recovery_secret_gate(" . var_export($pin, true) . ', __DIR__),'
+            . "'persisted' => recovery_secret_gate(" . var_export($persisted, true) . ', __DIR__),'
+            . ']);'
+        );
+
+        $this->assertSame(0, $verdicts['code'], $verdicts['stderr']);
+        $gate = json_decode(trim($verdicts['stdout']), true);
+
+        $this->assertTrue($gate['reported']['granted'], 'the value the CLI reports opens the gate');
+        $this->assertSame('operator_pin', $gate['reported']['source']);
+        $this->assertFalse($gate['persisted']['granted'], 'and the value it withholds is the refused one');
+        $this->assertSame('operator_pin', $gate['persisted']['source']);
+    }
+
+    /**
+     * The other half of the same contract: a non-pinned installation is
+     * unchanged, line for line.
+     *
+     * The advisory line is what tells an operator that a pin is in force, so it
+     * must be conditional. If it leaked into the ordinary path, every script that
+     * composes `php recovery.php --secret` into a URL would carry a stray `#`
+     * line it never asked for — a regression dressed up as a fix.
+     */
+    public function testCliReadWithoutAPinPrintsThePersistedValueAndNothingElse(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+        $fixture->writeSentinelConfig();
+
+        $value = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($value, $fixture->siblingSecretPath()));
+
+        $result = $fixture->runConsole('--secret');
+
+        $this->assertSame(0, $result['code'], 'the read escape must succeed: ' . $result['stderr']);
+        $this->assertSame($value . "\n", $result['stdout'], 'the non-pinned output is the persisted value alone');
+        $this->assertSame('', $result['stderr']);
+    }
+
+    /**
+     * RACC-06 escape 2 under a pin: rotation still does what it owns, and stops
+     * implying something it cannot deliver.
+     *
+     * Rotation regenerates the persisted file — that half is unchanged and still
+     * matters, because it retires the old persisted value and prepares the
+     * installation for the day the pin is removed. What it cannot do while a pin
+     * is defined is change what the gate accepts, so printing a fresh value with
+     * only the old "when defined, overrides this value" note still leaves the
+     * operator holding a credential that is refused. The note is therefore kept
+     * verbatim (it is the documented contract) and the pinned state says the rest
+     * out loud.
+     */
+    public function testCliRotateUnderAnOperatorPinSaysTheGateStillAnswersToThePin(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+
+        $pin = 'operator-pin-' . bin2hex(random_bytes(12));
+        $previous = recovery_secret_generate();
+
+        $fixture->writeSentinelConfig("define('SU_RECOVERY_SECRET', " . var_export($pin, true) . ");\n");
+        $this->assertTrue(recovery_secret_store($previous, $fixture->siblingSecretPath()));
+
+        $result = $fixture->runConsole('--rotate-secret');
+
+        $this->assertSame(0, $result['code'], 'rotation must still succeed under a pin: ' . $result['stderr']);
+
+        $rotated = $this->firstLine($result['stdout']);
+
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $rotated);
+        $this->assertNotSame($pin, $rotated, 'rotation produces a persisted value, never the pin');
+        $this->assertNotSame($previous, $rotated, 'and it still retires the previous persisted value');
+        $this->assertSame($rotated, recovery_secret_read($fixture->root), 'the new persisted value is on disk');
+
+        $this->assertStringContainsString(
+            'SU_RECOVERY_SECRET in config.php, when defined, overrides this value.',
+            $result['stdout'],
+            'the pre-existing override note is the documented contract and is kept'
+        );
+        $this->assertStringContainsString(
+            'the gate does not accept it while the pin is defined',
+            $result['stdout'],
+            'and the pinned state says out loud what rotation cannot change'
+        );
+
+        $verdicts = $fixture->runSnippet(
+            'echo json_encode(['
+            . "'pin' => recovery_secret_gate(" . var_export($pin, true) . ', __DIR__),'
+            . "'rotated' => recovery_secret_gate(" . var_export($rotated, true) . ', __DIR__),'
+            . ']);'
+        );
+
+        $gate = json_decode(trim($verdicts['stdout']), true);
+
+        $this->assertTrue($gate['pin']['granted'], 'the pin is still what the gate accepts');
+        $this->assertFalse($gate['rotated']['granted'], 'and the freshly printed value is still refused');
+        $this->assertSame(
+            $pin,
+            $this->firstLine($fixture->runConsole('--secret')['stdout']),
+            'a later read escape reports the pin, never the rotated value'
+        );
+    }
+
+    /**
+     * RACC-01's suppression, now that the CLI is a `config.php` consumer too: a
+     * damaged file yields "no pin" and the persisted branch answers, with no
+     * parse error on stdout, on stderr, or in the server log — the same four
+     * properties the gate's read already carries.
+     */
+    public function testCliReadFallsBackSilentlyOnADamagedConfig(): void
+    {
+        $fixture = $this->newFixture();
+        $fixture->installConsole();
+        $fixture->writeConfig("<?php\nthis is not valid php\n");
+
+        $value = recovery_secret_generate();
+        $this->assertTrue(recovery_secret_store($value, $fixture->siblingSecretPath()));
+
+        $result = $fixture->runConsole('--secret');
+
+        $this->assertSame(0, $result['code'], 'a damaged config.php must not break the read escape: ' . $result['stderr']);
+        $this->assertSame(
+            $value . "\n",
+            $result['stdout'],
+            'with no pin visible, the persisted value is printed and nothing else'
+        );
+        $this->assertSame('', $result['stderr'], 'no parse error on stderr');
+
+        foreach (['Parse error', 'syntax error', 'PHP '] as $noise) {
+            $this->assertStringNotContainsString($noise, $result['stdout']);
+            $this->assertStringNotContainsString($noise, $result['stderr']);
+            $this->assertStringNotContainsString($noise, $fixture->errorLogContents(), 'nor in the server log');
+        }
+    }
+
+    /** The first stdout line: the documented position of the secret. */
+    private function firstLine(string $stdout): string
+    {
+        return trim(explode("\n", trim($stdout))[0]);
+    }
+
+    /**
      * RACC-06 "the CLI flags MUST be ignored for non-CLI SAPIs".
      *
      * `php-cgi` is not installed in this container and `php -S` belongs to the
      * next slice's harness, so the web half is pinned at its mechanism rather
      * than over HTTP: the console's only secret branch is guarded by
-     * `PHP_SAPI === 'cli'`, it runs *before* `config.php` is loaded, nothing in
+     * `PHP_SAPI === 'cli'`, it runs *before* the console's own `require_once` of
+     * `config.php` — it reads that file for the pin, but only through the
+     * library, never by reaching the console's normal path — nothing in
      * the library reads a request superglobal, and the flag parser accepts the
      * two documented tokens and nothing else. A query parameter therefore has
      * no path to the secret at all.
@@ -577,7 +792,7 @@ PHP);
         $this->assertNotFalse($config, 'the console must still load config.php for its normal path');
         $this->assertSame(1, substr_count($console, 'recovery_secret_cli_run('), 'exactly one call site');
         $this->assertLessThan($handler, $guard, 'the guard must wrap the handler');
-        $this->assertLessThan($config, $handler, 'the CLI escapes must run before config.php is loaded');
+        $this->assertLessThan($config, $handler, 'the CLI escapes must run before the console loads config.php for its normal path');
 
         $this->assertDoesNotMatchRegularExpression(
             '/\$_(GET|POST|REQUEST|COOKIE|SERVER\[.argv)/',
@@ -664,7 +879,15 @@ PHP);
     /**
      * The operator-visible surface of the state above is the CLI: exit
      * non-zero, no secret on stdout (a value that was not persisted must never
-     * escape), the diagnostic on stderr, and `config.php` still unloaded.
+     * escape), the diagnostic on stderr.
+     *
+     * `config.php` is executed here too now, for the pin. This case is also the
+     * one where that read must stay invisible: the installation and its parent
+     * are `0555`, so the sentinel `config.php` itself cannot complete its write.
+     * The suppression, not the file's success, is what keeps stdout empty and
+     * stderr limited to the one diagnostic — a failure from the pin read leaking
+     * into either stream would be indistinguishable from the secret failure and
+     * would break the non-zero/no-secret contract.
      */
     public function testCliReportsTheUnwritableLocationOnStderrAndPrintsNoSecret(): void
     {
@@ -684,7 +907,6 @@ PHP);
         );
         $this->assertStringContainsString('SU_RECOVERY_SECRET', $read['stderr'], 'and the escape that still works');
         $this->assertDoesNotMatchRegularExpression('/[0-9a-f]{64}/', $read['stderr']);
-        $this->assertFalse($fixture->configWasLoaded(), 'even the failing escape does not need config.php');
 
         $rotate = $fixture->runConsole('--rotate-secret');
 
@@ -700,6 +922,39 @@ PHP);
     // ---------------------------------------------------------------------
     // RACC-02 — the install root nobody passed in
     // ---------------------------------------------------------------------
+
+    /**
+     * The other half of the CLI contract, at the CLI entry point itself: an
+     * installation whose root cannot be verified has no candidate, so the
+     * escape must exit non-zero and print no secret — never a value it could not
+     * persist, and never one derived from a guessed path.
+     *
+     * This is also the case that proves the pin read added for N-1 did not widen
+     * the surface: with no verified root there is no `config.php` path to
+     * consult either, so the refusal is the same one the library documents and
+     * the escape stays silent about why beyond the diagnostic.
+     */
+    public function testCliAtAnUnverifiableInstallationExitsNonZeroAndPrintsNoSecret(): void
+    {
+        $fixture = $this->newFixture();
+        $library = $fixture->installLibraryAt('lib');
+
+        $probe = $fixture->root . '/cli_probe.php';
+        file_put_contents(
+            $probe,
+            "<?php\ndeclare(strict_types=1);\n"
+            . 'require_once ' . var_export($library, true) . ";\n"
+            . "exit(recovery_secret_cli_run('read'));\n"
+        );
+
+        $result = $fixture->runPhpFile($probe);
+
+        $this->assertSame(1, $result['code'], 'no verified root is a non-zero exit, not a value');
+        $this->assertSame('', $result['stdout'], 'and no secret reaches stdout');
+        $this->assertStringContainsString('SU_RECOVERY_SECRET', $result['stderr'], 'the escape that still works is named');
+        $this->assertStringContainsString('could not be verified', $result['stderr'], 'and the reason is the real one');
+        $this->assertDoesNotMatchRegularExpression('/[0-9a-f]{64}/', $result['stdout'] . $result['stderr']);
+    }
 
     /**
      * RACC-02's "outside the webroot" has to hold for the one caller that

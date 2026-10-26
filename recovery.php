@@ -44,8 +44,15 @@ require_once __DIR__ . '/lib/recovery_view.php';
 // Escapes de CLI (RACC-06): `--secret` lee el valor actual y `--rotate-secret`
 // lo regenera. El guard de SAPI es lo único que separa estas ramas del mundo
 // web: un request normal —incluido uno que lleve `?--secret`— no tiene ninguna
-// representación aquí y sigue por el camino de siempre. Se ejecutan antes de
-// config.php para no abrir base de datos ni cargar el core.
+// representación aquí y sigue por el camino de siempre.
+//
+// Se ejecutan antes de que el console cargue config.php por su cuenta, y sin
+// abrir base de datos ni cargar el core. Sí leen config.php para resolver el pin
+// del operador, con la misma supresión que la puerta (RACC-03: el orden es uno
+// solo para la puerta, la marca y el CLI), porque un `--secret` que ignorase el
+// pin devolvería el valor persistido mientras la puerta responde al pin: le
+// entregaría al operador una credencial que el gate rechaza (N-1 de la
+// reverificación).
 if (PHP_SAPI === 'cli') {
     $su_cli_command = recovery_secret_cli_command(
         isset($_SERVER['argv']) && is_array($_SERVER['argv']) ? $_SERVER['argv'] : []
