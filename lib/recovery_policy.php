@@ -175,6 +175,206 @@ const RECOVERY_POLICY_ACCOUNT_MAX_ATTEMPTS = 20;
 const RECOVERY_POLICY_ACCOUNT_WINDOW = 900;
 
 /**
+ * The single failure body of REC-05.
+ *
+ * One string for every cause: a wrong password, an unknown nick, an account
+ * without administrator rights, a missing form token, a banned address and a
+ * throttled nick all render this. Any second spelling would turn the console
+ * into an oracle that says which half of the guess was right.
+ */
+const RECOVERY_POLICY_FAILURE_MESSAGE = 'No se pudo iniciar sesión con esas credenciales.';
+
+/**
+ * Appended to a throttled refusal **only** when the core throttle is absent.
+ *
+ * REC-04's damaged-core scenario asks the message to state that the console is
+ * running its local limiter, because that is a deployment fact the operator has
+ * to act on. It is deliberately not part of the default state: there the
+ * refusal has to be the uniform failure of REC-05, or the console would tell an
+ * attacker whether the throttle that stopped them was the panel's.
+ */
+const RECOVERY_POLICY_LOCAL_LIMITER_NOTE = 'La consola está aplicando su limitador local porque el limitador del núcleo no está disponible.';
+
+/**
+ * A bcrypt hash that belongs to no account.
+ *
+ * REC-05 requires the unknown-nick path to perform the same work as the
+ * wrong-password path, so it must verify against *something* — and that
+ * something is a constant, because computing a hash per request would move a
+ * cost into the failure path and make the two cases distinguishable again.
+ *
+ * The plaintext was random bytes that were never stored, so no submission can
+ * ever match it: it grants nothing and it is not a backdoor. Its cost is 10,
+ * the default a real row carries, so the work is comparable. A deployment that
+ * hashes at a higher cost makes this path *faster* than a real row, which is the
+ * safe direction (it cannot make a missing user look slower).
+ */
+const RECOVERY_POLICY_DUMMY_HASH = '$2y$10$IW7bu5q.eqUlBMIyx9gFo.QLtTpa5fMhmjRV0kmduPYQxvCpn1fOS';
+
+/**
+ * The installation root this library reasons about.
+ *
+ * `FS_FOLDER` when the installation defined it, otherwise the tree this file
+ * sits in (`lib/` → `plugins/` → `<root>`), verified the same way
+ * `recovery_session_root()` verifies it. An explicit root always wins, which is
+ * what lets every test work on a throwaway install root instead of the real one.
+ */
+function recovery_policy_root(?string $installRoot = null): string
+{
+    if ($installRoot !== null && $installRoot !== '') {
+        return rtrim($installRoot, '/\\');
+    }
+
+    if (defined('FS_FOLDER')) {
+        $folder = rtrim((string) FS_FOLDER, '/\\');
+        if ($folder !== '') {
+            return $folder;
+        }
+    }
+
+    return rtrim(dirname(__DIR__, 3), '/\\');
+}
+
+/**
+ * The bucket the primary login reads and writes: `tmp/<FS_TMP_NAME>ip.log`.
+ *
+ * Same directory, same prefix and same file name as `fs_ip_filter`'s
+ * constructor, because reading a different file would be exactly the parallel
+ * bucket RACC-01 forbids. `FS_TMP_NAME` comes from `config.php`, so no core file
+ * has to be loaded to build this path.
+ */
+function recovery_policy_ip_log_path(?string $installRoot = null): string
+{
+    $root = recovery_policy_root($installRoot);
+    if ($root === '') {
+        return '';
+    }
+
+    return $root . '/tmp/' . (defined('FS_TMP_NAME') ? (string) FS_TMP_NAME : '') . 'ip.log';
+}
+
+/**
+ * Read the bucket as raw lines. Never writes, never creates.
+ *
+ * An absent, unreadable or directory path is an empty list, which the parser
+ * turns into "not banned" - the same answer the core gives when its
+ * `file_exists()` check fails.
+ *
+ * @return list<string>
+ */
+function recovery_policy_read_ban_lines(string $path): array
+{
+    if ($path === '' || !is_file($path) || !is_readable($path)) {
+        return [];
+    }
+
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return [];
+    }
+
+    $lines = [];
+
+    try {
+        while (!feof($handle)) {
+            $raw = fgets($handle);
+            if ($raw === false) {
+                break;
+            }
+            $lines[] = trim($raw);
+        }
+    } finally {
+        fclose($handle);
+    }
+
+    return $lines;
+}
+
+/**
+ * `fs_ip_filter::read_line()`, line for line.
+ *
+ *   - a line is considered only when it splits into **three** fields;
+ *   - its expiry is `intval()`-cast and compared with `$now`; a non-numeric
+ *     expiry becomes `0` and is dropped, exactly as the core drops it;
+ *   - the count is cast with `(int)`, so a non-numeric count becomes `0` and
+ *     bans nobody.
+ *
+ * The one deliberate difference is the clock: the core calls `time()` per line,
+ * this takes one `$now` for the whole file. Within a single read the two only
+ * differ on a line expiring mid-loop, which is not a behaviour worth
+ * reproducing and not one an operator can observe.
+ *
+ * @param array<array-key, mixed> $lines
+ *
+ * @return list<array{ip: string, count: int, expire: int}>
+ */
+function recovery_policy_parse_ban_lines(array $lines, int $now): array
+{
+    $entries = [];
+
+    foreach ($lines as $line) {
+        if (!is_string($line)) {
+            continue;
+        }
+
+        $fields = explode(';', trim($line));
+        if (count($fields) !== 3) {
+            continue;
+        }
+
+        $expire = (int) $fields[2];
+        if ($expire <= $now) {
+            continue;
+        }
+
+        $entries[] = [
+            'ip' => $fields[0],
+            'count' => (int) $fields[1],
+            'expire' => $expire,
+        ];
+    }
+
+    return $entries;
+}
+
+/**
+ * `fs_ip_filter::is_banned()`, over lines instead of a file.
+ *
+ * The comparison keeps the core's loose `==` on the address and its strict `>`
+ * on the count. A stricter (or laxer) rule here would be a second ban policy,
+ * which is precisely the drift REC-03 accepts only under a drift test - and a
+ * drifted *rule* is not something a fixture can catch, so the rule is copied
+ * verbatim instead.
+ *
+ * @param array<array-key, mixed> $lines
+ */
+function recovery_policy_is_banned(array $lines, string $ip, int $now): bool
+{
+    foreach (recovery_policy_parse_ban_lines($lines, $now) as $entry) {
+        if ($entry['ip'] == $ip && $entry['count'] > RECOVERY_POLICY_BAN_MAX_ATTEMPTS) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * REC-03's whole gate as the console calls it: is this address banned?
+ *
+ * Reads the bucket the primary login writes and answers the core's verdict.
+ * `$now` is injectable so the expiry cases are decided, not slept through.
+ */
+function recovery_policy_is_ip_banned(string $ip, ?string $installRoot = null, ?int $now = null): bool
+{
+    return recovery_policy_is_banned(
+        recovery_policy_read_ban_lines(recovery_policy_ip_log_path($installRoot)),
+        $ip,
+        $now ?? time()
+    );
+}
+
+/**
  * Counter key for a nick+address pair, and for an account.
  *
  * The derivation copies `LoginThrottle::cacheKey()` / `::accountCacheKey()`
@@ -475,166 +675,99 @@ function recovery_policy_fallback_prune(array $state, int $now): array
 }
 
 /**
- * The installation root this library reasons about.
+ * Whether a `fs_users.admin` value means "administrator".
  *
- * `FS_FOLDER` when the installation defined it, otherwise the tree this file
- * sits in (`lib/` → `plugins/` → `<root>`), verified the same way
- * `recovery_session_root()` verifies it. An explicit root always wins, which is
- * what lets every test work on a throwaway install root instead of the real one.
+ * The flag arrives in whatever shape the reader's driver produces: `1` / `0`
+ * from MySQL, `'1'` / `'0'` through some paths, `true` / `false` from a PHP
+ * array literal, `'t'` / `'f'` from PostgreSQL. A strict `=== true` would deny
+ * every PostgreSQL administrator - the same class of regression AUTH-06 was
+ * about - so the accepted shapes are listed once, here, and everything else
+ * denies.
+ *
+ * @param array<string, mixed> $row
  */
-function recovery_policy_root(?string $installRoot = null): string
+function recovery_policy_row_is_admin(array $row): bool
 {
-    if ($installRoot !== null && $installRoot !== '') {
-        return rtrim($installRoot, '/\\');
+    $flag = $row['admin'] ?? null;
+
+    if (is_bool($flag)) {
+        return $flag;
     }
 
-    if (defined('FS_FOLDER')) {
-        $folder = rtrim((string) FS_FOLDER, '/\\');
-        if ($folder !== '') {
-            return $folder;
-        }
+    if (is_int($flag)) {
+        return $flag === 1;
     }
 
-    return rtrim(dirname(__DIR__, 3), '/\\');
-}
-
-/**
- * The bucket the primary login reads and writes: `tmp/<FS_TMP_NAME>ip.log`.
- *
- * Same directory, same prefix and same file name as `fs_ip_filter`'s
- * constructor, because reading a different file would be exactly the parallel
- * bucket RACC-01 forbids. `FS_TMP_NAME` comes from `config.php`, so no core file
- * has to be loaded to build this path.
- */
-function recovery_policy_ip_log_path(?string $installRoot = null): string
-{
-    $root = recovery_policy_root($installRoot);
-    if ($root === '') {
-        return '';
-    }
-
-    return $root . '/tmp/' . (defined('FS_TMP_NAME') ? (string) FS_TMP_NAME : '') . 'ip.log';
-}
-
-/**
- * Read the bucket as raw lines. Never writes, never creates.
- *
- * An absent, unreadable or directory path is an empty list, which the parser
- * turns into "not banned" - the same answer the core gives when its
- * `file_exists()` check fails.
- *
- * @return list<string>
- */
-function recovery_policy_read_ban_lines(string $path): array
-{
-    if ($path === '' || !is_file($path) || !is_readable($path)) {
-        return [];
-    }
-
-    $handle = @fopen($path, 'rb');
-    if ($handle === false) {
-        return [];
-    }
-
-    $lines = [];
-
-    try {
-        while (!feof($handle)) {
-            $raw = fgets($handle);
-            if ($raw === false) {
-                break;
-            }
-            $lines[] = trim($raw);
-        }
-    } finally {
-        fclose($handle);
-    }
-
-    return $lines;
-}
-
-/**
- * `fs_ip_filter::read_line()`, line for line.
- *
- *   - a line is considered only when it splits into **three** fields;
- *   - its expiry is `intval()`-cast and compared with `$now`; a non-numeric
- *     expiry becomes `0` and is dropped, exactly as the core drops it;
- *   - the count is cast with `(int)`, so a non-numeric count becomes `0` and
- *     bans nobody.
- *
- * The one deliberate difference is the clock: the core calls `time()` per line,
- * this takes one `$now` for the whole file. Within a single read the two only
- * differ on a line expiring mid-loop, which is not a behaviour worth
- * reproducing and not one an operator can observe.
- *
- * @param array<array-key, mixed> $lines
- *
- * @return list<array{ip: string, count: int, expire: int}>
- */
-function recovery_policy_parse_ban_lines(array $lines, int $now): array
-{
-    $entries = [];
-
-    foreach ($lines as $line) {
-        if (!is_string($line)) {
-            continue;
-        }
-
-        $fields = explode(';', trim($line));
-        if (count($fields) !== 3) {
-            continue;
-        }
-
-        $expire = (int) $fields[2];
-        if ($expire <= $now) {
-            continue;
-        }
-
-        $entries[] = [
-            'ip' => $fields[0],
-            'count' => (int) $fields[1],
-            'expire' => $expire,
-        ];
-    }
-
-    return $entries;
-}
-
-/**
- * `fs_ip_filter::is_banned()`, over lines instead of a file.
- *
- * The comparison keeps the core's loose `==` on the address and its strict `>`
- * on the count. A stricter (or laxer) rule here would be a second ban policy,
- * which is precisely the drift REC-03 accepts only under a drift test - and a
- * drifted *rule* is not something a fixture can catch, so the rule is copied
- * verbatim instead.
- *
- * @param array<array-key, mixed> $lines
- */
-function recovery_policy_is_banned(array $lines, string $ip, int $now): bool
-{
-    foreach (recovery_policy_parse_ban_lines($lines, $now) as $entry) {
-        if ($entry['ip'] == $ip && $entry['count'] > RECOVERY_POLICY_BAN_MAX_ATTEMPTS) {
-            return true;
-        }
+    if (is_string($flag)) {
+        return in_array(strtolower(trim($flag)), ['1', 't', 'true', 'y', 'yes', 'on'], true);
     }
 
     return false;
 }
 
 /**
- * REC-03's whole gate as the console calls it: is this address banned?
+ * REC-05's verdict: one outcome token, one verification, no reason.
  *
- * Reads the bucket the primary login writes and answers the core's verdict.
- * `$now` is injectable so the expiry cases are decided, not slept through.
+ * The order inside is the requirement:
+ *
+ *   1. a row with no stored password is treated as "no such account", so it
+ *      verifies against {@see RECOVERY_POLICY_DUMMY_HASH} and costs the same as
+ *      an unknown nick;
+ *   2. the verifier is called **exactly once**, whoever the caller is and
+ *      whatever the answer - the seam W7 binds with `password_verify()` for
+ *      modern hashes and with W6's bridge for legacy ones;
+ *   3. only then is the administrator flag read, which is why a correct password
+ *      on a non-administrator account is indistinguishable from a wrong one.
+ *
+ * A verifier must answer `true`; anything else is a denial, so a bridge that
+ * returns a truthy value by accident cannot authenticate.
+ *
+ * A legacy digest reaches the verifier unchanged: substituting the dummy for a
+ * hash the modern path does not recognize would lock out exactly the
+ * administrator REC-07 exists for.
+ *
+ * @param array<string, mixed>|null $row
+ * @param callable(string, string): bool $verifier `(storedHash, plain)`
  */
-function recovery_policy_is_ip_banned(string $ip, ?string $installRoot = null, ?int $now = null): bool
+function recovery_policy_verify_credentials(?array $row, string $plain, callable $verifier): string
 {
-    return recovery_policy_is_banned(
-        recovery_policy_read_ban_lines(recovery_policy_ip_log_path($installRoot)),
-        $ip,
-        $now ?? time()
-    );
+    $stored = is_array($row) ? ($row['password'] ?? null) : null;
+    $hasStoredCredential = is_string($stored) && $stored !== '';
+
+    $verified = ($verifier)(
+        $hasStoredCredential ? $stored : RECOVERY_POLICY_DUMMY_HASH,
+        $plain
+    ) === true;
+
+    if (!$hasStoredCredential || !$verified) {
+        return RECOVERY_POLICY_OUTCOME_DENY;
+    }
+
+    return recovery_policy_row_is_admin($row) ? RECOVERY_POLICY_OUTCOME_OK : RECOVERY_POLICY_OUTCOME_DENY;
+}
+
+/**
+ * The body a phase renders when it refuses.
+ *
+ * One message for every refusal, with the single documented exception of a
+ * throttled submission while the local limiter is in force. `null` for the mode
+ * detects it, exactly like {@see recovery_policy_evaluate()}.
+ */
+function recovery_policy_failure_message(string $phase, ?bool $sharedThrottleAvailable = null): string
+{
+    if ($phase === RECOVERY_POLICY_PHASE_CREDENTIAL_OK) {
+        return '';
+    }
+
+    if ($phase === RECOVERY_POLICY_PHASE_THROTTLED) {
+        $shared = $sharedThrottleAvailable ?? recovery_policy_shared_throttle_available();
+
+        if (!$shared) {
+            return RECOVERY_POLICY_FAILURE_MESSAGE . ' ' . RECOVERY_POLICY_LOCAL_LIMITER_NOTE;
+        }
+    }
+
+    return RECOVERY_POLICY_FAILURE_MESSAGE;
 }
 
 /**
