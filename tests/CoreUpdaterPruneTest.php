@@ -674,6 +674,20 @@ final class CoreUpdaterPruneTest extends TestCase
             preg_match_all('/\$this->prune(?:NonRuntimeDirectories|StagingSource)\([^)]*FS_FOLDER/', $source),
             'FS_FOLDER is the installation root; it must never be pruned'
         );
+
+        // Trap: the updater prefers `git clone` whenever git is available. A
+        // prune wired only on the ZIP path leaves the property false on the
+        // branch that runs most of the time, so both are pinned by argument.
+        preg_match_all('/\$this->pruneStagingSource\(([^)]*)\)/', $source, $callSites);
+
+        $arguments = array_map('trim', $callSites[1]);
+        sort($arguments);
+
+        $this->assertSame(
+            ['$clonePath', '$destination'],
+            $arguments,
+            'the ZIP extraction and the git clone must both hand a staging directory to the prune'
+        );
     }
 
     /**
