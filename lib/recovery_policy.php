@@ -424,21 +424,27 @@ function recovery_policy_counter_key(string $nick, string $ip, bool $account): s
 /**
  * The local counter's file.
  *
- * One file per installation: the suffix is a digest of the install root, because
- * `sys_get_temp_dir()` is shared by every installation on the host and two
- * installations sharing a budget would let one operator's failures lock the
- * other out. `FS_TMP_NAME` prefixes it for the same reason the framework uses it
- * - so a suite or a second framework tree can namespace its own state.
+ * One file per installation, inside the installation: `<root>/tmp/` is a
+ * directory the installer owns, already exists (the framework creates it for
+ * `ip.log`), and needs nothing from the core to be used. The alternative -
+ * `sys_get_temp_dir()` - is world-writable, and with a name derived only from
+ * `FS_TMP_NAME` and the install root it is predictable: another local user could
+ * pre-create it `0666` and then delete the counts (disabling the limiter),
+ * inflate them (locking the administrator out), or plant a symlink for the next
+ * write to follow. A counter in a directory the attacker can write to is not a
+ * counter. `FS_TMP_NAME` still prefixes the name, so a suite or a second
+ * framework tree can namespace its own state, and the digest of the install root
+ * still distinguishes two installations that share a document root.
  *
- * `$directory` exists for tests and for a deployment that keeps its temp state
- * somewhere else; `null` means the system temp directory.
+ * `$directory` exists for tests and for a deployment that keeps its writable
+ * state elsewhere; `null` means "the installation's own tmp".
  */
 function recovery_policy_fallback_path(?string $installRoot = null, ?string $directory = null): string
 {
     $root = recovery_policy_root($installRoot);
     $directory = ($directory !== null && $directory !== '')
         ? rtrim($directory, '/\\')
-        : rtrim(sys_get_temp_dir(), '/');
+        : $root . '/tmp';
     $prefix = defined('FS_TMP_NAME') ? (string) FS_TMP_NAME : '';
 
     return $directory . '/' . $prefix . 'system_updater_recovery_throttle_'
@@ -457,7 +463,7 @@ function recovery_policy_fallback_path(?string $installRoot = null, ?string $dir
  */
 function recovery_policy_fallback_state(string $path): array
 {
-    if ($path === '' || !is_file($path) || !is_readable($path)) {
+    if ($path === '' || is_link($path) || !is_file($path) || !is_readable($path)) {
         return [];
     }
 
@@ -691,6 +697,13 @@ function recovery_policy_fallback_record(string $path, string $nick, string $ip,
 
 /**
  * REC-04's "success clears the budget": drop both dimensions for this subject.
+ *
+ * This is the release of a reservation too. {@see recovery_policy_evaluate()}
+ * calls the `$release` seam only when it charged the budget for the submission
+ * and the credential was accepted, so a legitimate login can never leave its own
+ * attempt behind. Clearing is deliberately stronger than undoing the increment:
+ * a zeroed budget is what REC-04 asks for, and subtracting one would let a
+ * failed-then-succeeded pattern keep someone else's count alive.
  */
 function recovery_policy_fallback_clear(string $path, string $nick, string $ip): bool
 {
@@ -702,6 +715,60 @@ function recovery_policy_fallback_clear(string $path, string $nick, string $ip):
 
         return $state;
     }, null);
+}
+
+/**
+ * Open the counter file without following a link and without trusting its mode.
+ *
+ * Two properties, and the second is why this is not just `fopen()`:
+ *
+ *   1. **The descriptor must be the regular file the path names.** A symlink is
+ *      refused before the open, and the pair `fstat()` / `lstat()` closes the
+ *      window between that check and the descriptor actually existing - which is
+ *      what `O_NOFOLLOW` would do and PHP exposes no flag for. Following a
+ *      planted link would let whoever created it choose where the write lands.
+ *   2. **The file must not be readable by anyone else.** A counter holds one
+ *      installation's attempt counts, and a pre-created `0666` file is the other
+ *      half of the shared-directory attack: the counts could be read to time a
+ *      guess, or left world-writable to be edited between requests. The mode is
+ *      narrowed on every open that finds it loose, so the file heals instead of
+ *      being trusted.
+ *
+ * @return resource|false
+ */
+function recovery_policy_fallback_open(string $path)
+{
+    if ($path === '' || is_link($path)) {
+        return false;
+    }
+
+    $handle = @fopen($path, 'c+b');
+    if ($handle === false) {
+        return false;
+    }
+
+    $stat = fstat($handle);
+    $named = @lstat($path);
+
+    $regular = is_array($stat) && (($stat['mode'] & 0170000) === 0100000);
+    $sameFile = is_array($stat) && is_array($named)
+        && $named['dev'] === $stat['dev']
+        && $named['ino'] === $stat['ino'];
+
+    if (!$regular || !$sameFile) {
+        fclose($handle);
+
+        return false;
+    }
+
+    if (($stat['mode'] & 0077) !== 0) {
+        // Heal a loose mode rather than refuse to count: the counters inside are
+        // still this installation's, and refusing would disable the limiter for
+        // exactly the deployment that needs it.
+        @chmod($path, 0600);
+    }
+
+    return $handle;
 }
 
 /**
@@ -719,8 +786,8 @@ function recovery_policy_fallback_clear(string $path, string $nick, string $ip):
  * the plain increment share one implementation instead of two locks that could
  * be interleaved.
  *
- * A failure (no directory, no permission, a lock that cannot be taken, an
- * encoding error) returns `null` and leaves the previous content alone.
+ * A failure (no directory, no permission, a link, a lock that cannot be taken,
+ * an encoding error) returns `null` and leaves the previous content alone.
  *
  * @param callable(array<string, array{count: int, updated: int}>): array{0: array<string, array{count: int, updated: int}>, 1: bool} $transact
  *
@@ -728,11 +795,7 @@ function recovery_policy_fallback_clear(string $path, string $nick, string $ip):
  */
 function recovery_policy_fallback_transact(string $path, ?int $now, callable $transact): ?array
 {
-    if ($path === '') {
-        return null;
-    }
-
-    $handle = @fopen($path, 'c+b');
+    $handle = recovery_policy_fallback_open($path);
     if ($handle === false) {
         return null;
     }

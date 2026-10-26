@@ -258,7 +258,7 @@ final class RecoveryFallbackLimiterTest extends TestCase
         $this->assertSame($root . '/tmp', dirname($path), 'the installation own tmp directory, not the host one');
         $this->assertStringContainsString(FS_TMP_NAME, $path, 'the suite namespaces its own tmp prefix');
         $this->assertStringStartsWith(
-            'system_updater_recovery_throttle_',
+            FS_TMP_NAME . 'system_updater_recovery_throttle_',
             basename($path),
             'one predictable file name per installation, inside a directory the installation controls'
         );
