@@ -830,7 +830,7 @@ class core_updater
                 continue;
             }
 
-            $this->deleteDirectoryRecursive($resolved);
+            $this->deleteStagingDirectory($resolved);
 
             if (file_exists($resolved) || is_link($resolved)) {
                 $report['failed'][$name] = 'could not be removed';
@@ -841,6 +841,45 @@ class core_updater
         }
 
         return $report;
+    }
+
+    /**
+     * Delete a directory tree without ever entering a symlink.
+     *
+     * `deleteDirectoryRecursive()` decides with `is_dir()`, which follows a
+     * link, so a link found inside an allowlisted directory would make it
+     * delete files outside the staging tree — and then leave the candidate in
+     * place. Here a link is unlinked as a link, whatever it points at, and only
+     * real directories are entered. The candidate itself has already been
+     * proven not to be a link and to resolve inside the staging directory.
+     *
+     * @param string $dir
+     *
+     * @return bool
+     */
+    private function deleteStagingDirectory($dir)
+    {
+        if (is_link($dir) || !is_dir($dir)) {
+            return @unlink($dir);
+        }
+
+        $entries = @scandir($dir);
+        if (!is_array($entries)) {
+            return false;
+        }
+
+        foreach (array_diff($entries, ['.', '..']) as $entry) {
+            $path = $dir . '/' . $entry;
+
+            if (is_link($path) || !is_dir($path)) {
+                @unlink($path);
+                continue;
+            }
+
+            $this->deleteStagingDirectory($path);
+        }
+
+        return @rmdir($dir);
     }
 
     /**
