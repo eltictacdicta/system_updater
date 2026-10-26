@@ -55,6 +55,26 @@ Where a core service would normally provide a control, the script MUST implement
 *policy* locally while consuming the *same state* the core consumes — never a parallel
 bucket. `RACC-01` is a constraint on dependencies, not a licence to fork security state.
 
+**`config.php` is read on every gate evaluation, by design.** `SU_RECOVERY_SECRET` lives
+in `config.php`, so `RACC-03`'s order — operator pin first — cannot be honoured without
+executing that file, including on a request that will be refused. `config.php` therefore
+remains the one core file the console may touch, and it is now touched on every
+evaluation. The read is acceptable only because the implementation keeps four properties,
+all of which are binding: it is error-suppressed (`@include`) and output-buffered, so a
+damaged file emits no body and no warning; the `Throwable` catch includes `ParseError`, so
+a damaged file cannot become a fatal page; this path writes nothing to the error log; and
+it is idempotent — it never re-executes a file the request already included, and never one
+whose pin is already visible — so it can redeclare nothing. A damaged or unparseable
+`config.php` yields "no pin", and the gate falls back to the persisted value of `RACC-02`.
+
+*Original text.* This requirement previously promised, in the scenario "A wrong secret
+never reaches `config.php`", that a request without a valid secret never reached
+`config.php` at all. The product-owner decision of 2026-10-26 (recorded as C-2 in
+`verify-report.md`) made the operator pin the first branch of the gate's order and
+superseded that promise. What survives — and what this requirement still protects — is the
+dependency rule above: `config.php` is the **only** permitted core file, with no
+autoloader, no core class and no kernel.
+
 #### Scenario: The console authenticates with a damaged core
 
 - GIVEN `vendor/autoload.php` deleted
@@ -81,6 +101,9 @@ bucket. `RACC-01` is a constraint on dependencies, not a licence to fork securit
 - WHEN the static include graph is enumerated
 - THEN the only entry resolving outside `plugins/system_updater/` is
   `FS_FOLDER/config.php`
+- AND when a request is actually served — a refusal included, because the gate resolves
+  the operator pin — the same file is the only one executed outside
+  `plugins/system_updater/`: no `vendor/autoload.php`, no `base/` file, no `src/` file
 
 #### Scenario: A missing `config.php` is the only hard stop
 
@@ -92,12 +115,18 @@ bucket. `RACC-01` is a constraint on dependencies, not a licence to fork securit
 - AND no other core file is loaded and no database connection is attempted
 - AND the message contains no credential, no path to the secret file and no stack trace
 
-#### Scenario: A wrong secret never reaches `config.php`
+#### Scenario: A wrong secret never loads a core file other than `config.php`
 
-- GIVEN `FS_FOLDER/config.php` exists but is damaged
+- GIVEN `FS_FOLDER/config.php` exists but is damaged (it does not parse, or it emits a
+  warning when executed)
+- AND a persisted secret already exists
 - WHEN a request without a valid secret arrives
 - THEN the response is the indistinguishable 404 of `RACC-04`
-- AND `config.php` is not loaded and its parse errors are never echoed
+- AND `config.php` was executed only to resolve the operator pin, error-suppressed and
+  output-buffered
+- AND no parse error, no warning and no stack trace appear in the body or in the error log
+- AND the gate falls back to the persisted value of `RACC-02`, so the refusal does not
+  depend on `config.php` being readable
 
 ### Requirement: RACC-02 — Per-installation secret: generation and storage
 
@@ -113,9 +142,28 @@ The console MUST be protected by a secret that:
   direct HTTP request discloses nothing;
 - is never written to an HTTP response except through `RACC-06`'s CLI path.
 
+**How per-installation uniqueness is achieved.** The outside-webroot candidate is not a
+fixed file beside the installation root. It lives in a per-installation directory,
+`<parent>/system_updater_recovery_<digest>/system_updater_recovery_secret.php`, where
+`<digest>` is the first 16 hex characters of `sha256()` over the **resolved**
+(`realpath()`) installation root. Two installations under one parent — the ordinary
+`public_html` next to `staging` layout — therefore resolve two different directories and
+two different values, while the same installation reached through a different spelling of
+its path (symlink, trailing slash, a redundant `..`) folds onto one directory. The digest
+names a **location** only: it is never a seed, and the value remains `random_bytes(32)`.
+Inside the directory the file keeps a fixed operator-facing name, because an operator
+rescuing the installation by hand has to be able to grep for it. The directory is created
+`0700`, the file `0600`.
+
 The persisted secret MUST be readable and writable by the PHP user alone; a failed write
-MUST be a loud error, never a silent regeneration per request (a per-request regeneration
-would make the console permanently unusable while appearing to work).
+MUST be a loud error on an operator-visible surface and never a silent regeneration per
+request (a per-request regeneration would make the console permanently unusable while
+appearing to work). "Loud" is scoped to the surfaces that can carry it: the library
+records the failure (`recovery_secret_last_error()`) and the CLI prints a diagnostic to
+stderr and exits non-zero. The web path stays silent by design and answers the `RACC-04`
+404 — it MUST NOT disclose that a secret location was unwritable any more than it
+discloses that the secret was wrong. The operator-visible surfaces for this failure are
+therefore the CLI and the server log, never the HTTP response.
 
 #### Scenario: Two installations never share a secret
 
@@ -124,6 +172,9 @@ would make the console permanently unusable while appearing to work).
 - WHEN each resolves its secret
 - THEN the two values differ
 - AND neither value is derivable from the install path or the database name alone
+- AND this holds when both installations sit under the **same** parent directory, because
+  the outside-webroot candidate is keyed by the per-installation digest directory and not
+  by the parent
 
 #### Scenario: The secret survives a restart
 
@@ -138,24 +189,53 @@ would make the console permanently unusable while appearing to work).
 - THEN the response body contains no hex secret and no PHP source
 - AND the console's behavior is unchanged
 
-#### Scenario: An unwritable secret location is a loud error
+#### Scenario: An unwritable secret location is loud on the operator surfaces and silent over HTTP
 
 - GIVEN no writable location for the secret
-- WHEN the console is opened with a plausible secret
-- THEN the operator sees an error naming the failure
+- WHEN the console is opened with a plausible secret over HTTP
+- THEN the response is the indistinguishable 404 of `RACC-04` and names no failure
+- AND the CLI (`--secret`, `--rotate-secret`) prints a diagnostic to stderr naming the
+  failure and exits non-zero
+- AND the library exposes the same failure through `recovery_secret_last_error()`
 - AND the script does not fall back to a per-request generated secret
+
+*Original text.* The uniqueness clause above was satisfied as written but did not say how;
+the per-installation digest directory is the mechanism the shipped code uses. The
+loud-error clause promised an error the web surface never shows: it was narrowed to the
+CLI, the library and the server log by the verify phase (W-2, `verify-report.md`). No
+security claim was weakened — `RACC-04` still forbids disclosing which condition failed.
 
 ### Requirement: RACC-03 — The secret MUST be resolvable without core code
 
 Resolving the secret MUST NOT require `class_exists()`, the Composer autoloader, or any
-core file. The resolution order MUST be deterministic and documented, and MUST be:
+core class, and the value accessor MUST NOT load any core file. The resolution order MUST
+be deterministic, documented, and identical in every consumer — the gate, the marker's
+fingerprint check and the CLI. It MUST be:
 
 1. a `SU_RECOVERY_SECRET` constant defined by `config.php` when present (operator pin);
-2. the persisted per-installation value of `RACC-02`.
+2. the persisted per-installation value of `RACC-02`;
+3. on first use only, a generated value persisted per `RACC-02`.
 
-`config.php` MUST NOT be required in order to take branch 2 — the gate of `RACC-04` runs
-before `config.php` is loaded, so an installation with a damaged `config.php` still answers
-the gate with a plain 404 instead of a PHP error.
+The pin is the **first** branch and wins even when a persisted value exists. Because the
+pin lives in `config.php`, the gate reads that file on every evaluation — including on a
+request it will refuse — in order to answer "is a pin defined?". That read is the accepted
+cost of the order, and it is bounded: it is error-suppressed and output-buffered, the
+`Throwable` catch covers `ParseError`, it produces no output and no error-log entry, and it
+is idempotent — it never re-executes a file the request already included, and never one
+whose pin is already visible. A damaged `config.php` therefore yields "no pin" and the gate
+falls back to branch 2.
+
+Branch 2 MUST NOT require `config.php`, and the value accessor
+(`recovery_secret_resolve()`) MUST NOT load it. That is what keeps the secret readable and
+rotatable when `config.php` is damaged or absent, and it is what the CLI escapes of
+`RACC-06` rely on.
+
+*Original text.* This requirement previously said the gate "answers before `config.php` is
+loaded", with a scenario of the same name. The product-owner decision of 2026-10-26
+(recorded as C-2 in `verify-report.md`) made the operator pin the first branch, which means
+`config.php` **is** read on every gate evaluation, and superseded that sentence. The order
+above is the shipped order — pin → persisted → generate. The only protection of the old
+wording that survives, and that still holds, is that branch 2 needs no `config.php`.
 
 #### Scenario: Resolution works with the autoloader removed
 
@@ -169,13 +249,24 @@ the gate with a plain 404 instead of a PHP error.
 - AND a different persisted value on disk
 - WHEN the secret is resolved
 - THEN the constant value is used
-- AND the persisted value is neither read nor rewritten
+- AND the persisted value is not consulted for the comparison and is not rewritten
 
-#### Scenario: The gate answers before `config.php` is loaded
+#### Scenario: A damaged `config.php` cannot turn a refusal into an error
 
-- GIVEN a `config.php` that would fatal if loaded
-- WHEN a request arrives with no secret parameter
-- THEN the response is the 404 of `RACC-04`, not a fatal error page
+- GIVEN a `config.php` that does not parse, or that emits a warning when executed
+- AND a persisted secret already exists
+- WHEN a request arrives with no secret parameter or a wrong one
+- THEN the response is the 404 of `RACC-04`, not a fatal error page and not a warning
+- AND the parse error or warning appears neither in the body nor in the error log
+- AND the gate falls back to the persisted value of `RACC-02`
+
+#### Scenario: The pin read is suppressed and idempotent
+
+- GIVEN `config.php` was already executed earlier in the request
+- WHEN the gate resolves the operator pin
+- THEN the file is not executed a second time
+- AND no constant, function or class it declares is redeclared
+- AND the read contributes no output and no error-log entry
 
 ### Requirement: RACC-04 — Without the secret the console does not exist
 
@@ -275,8 +366,12 @@ operate the server at all can regain access with no core code available:
    database.
 2. **CLI rotation.** When `PHP_SAPI === 'cli'`, the script MUST regenerate and print a new
    secret (`php recovery.php --rotate-secret`), invalidating the previous value.
-3. **Operator pin.** Defining `SU_RECOVERY_SECRET` in `config.php` overrides the persisted
-   value (`RACC-03`).
+3. **Operator pin (primary override).** Defining `SU_RECOVERY_SECRET` in `config.php`
+   overrides the persisted value (`RACC-03`). It is the primary override, not a
+   lost-secret-only fallback: the pin wins **even when a persisted value exists**, which
+   is what lets an operator who still has the secret *file* but has lost its *value* get
+   back in. `config.php` has to be executable for the pin to be seen; a damaged file
+   yields "no pin" and the persisted value is used.
 
 In addition, the first generation MUST write the generated secret exactly once to the PHP
 error log, under a fixed, documented prefix, so an operator with log access but no shell
@@ -285,6 +380,13 @@ response, ever.
 
 The CLI flags MUST be ignored for non-CLI SAPIs — a web request carrying them behaves
 exactly like any other request and yields the 404 of `RACC-04`.
+
+*Original text.* Escape 3 was written as a lost-secret fallback that applied only when no
+persisted value existed, so "overrides the persisted value" was true only in that state.
+The product-owner decision of 2026-10-26 (recorded as C-2 in `verify-report.md`) made the
+pin the primary override — it wins even when a persisted value exists — and superseded
+that reading. The three escapes remain independent; escape 3 is now the first one an
+operator with file access reaches.
 
 #### Scenario: Recovering from a lost secret over the shell
 
@@ -303,8 +405,10 @@ exactly like any other request and yields the 404 of `RACC-04`.
 #### Scenario: Recovering from a lost secret with only file access
 
 - GIVEN an operator who can edit `config.php` but has no shell
+- AND a persisted secret file that still exists and holds a different value
 - WHEN `SU_RECOVERY_SECRET` is set to a value of their choosing
 - THEN the console accepts that value on the next request
+- AND the persisted value is not consulted for the comparison, nor rewritten
 
 #### Scenario: Recovering from the log
 
@@ -475,7 +579,7 @@ the operator is not single-signed-on from the panel and will be asked to log in.
 |---|---|---|---|
 | 1 | The secret is a bearer value in a URL; anyone who reads it once (shell history, log, shoulder) owns the console | Fail-open | Bounded by `RACC-05` (no re-supply after the first request) plus `Referrer-Policy: no-referrer`; rotation is one CLI command. The alternative — no reachability control at all — is today's state. |
 | 2 | A secret does not add authentication strength; it adds *reachability* control on top of the credential check | Neither | Explicit: possession of the secret never authenticates anybody. The administrator credential remains mandatory (`plugin-recovery-login`). |
-| 3 | `SU_RECOVERY_SECRET` in `config.php` can be weaker than a generated 256-bit value | Fail-open | Operator decision, documented. It exists so an operator is never locked out; `RACC-06` does not depend on it. |
+| 3 | `SU_RECOVERY_SECRET` in `config.php` can be weaker than a generated 256-bit value, and it outranks the persisted value on every gate evaluation | Fail-open | Operator decision, documented. It is escape 3 of `RACC-06` and the primary override of `RACC-03`; the accepted cost is that `config.php` is executed on every evaluation, which the suppression, idempotence and fallback properties of `RACC-01`/`RACC-03` bound. |
 | 4 | Two authorized minting points instead of one: a leaked recovery secret combined with administrator credentials yields a `su_csrf_token` that did not come from a rendered `#[AdminOnly]` page | Neither | Deliberate product-owner decision (`RACC-07`). The second gate is A2's per-installation secret, which is not weaker than the first, and the token still confers neither identity (`CSRF-01`) nor access to any admin page. |
 | 5 | A read-only "is the secret right?" oracle exists — 404 vs. console | Low | The comparison is constant-time and the two outcomes differ only by the caller's knowledge of a 256-bit value; there is no incremental leak. |
 | 6 | The console can now instruct `process_restore.php` to overwrite the installation. An operator mistake there is destructive, where the previous decision made it impossible | Availability | This is the console's purpose (`RACC-07`): an emergency console that cannot restore is not an emergency console. Bounded by the two gates, the stepped protocol's resumability, and the existing stale-lock healing. |
@@ -497,10 +601,13 @@ the operator is not single-signed-on from the panel and will be asked to log in.
 
 - `RACC-01` is asserted statically: the include graph of the script resolves outside
   `plugins/system_updater/` exactly once, to `config.php`; no `vendor/autoload.php`
-  reference remains.
+  reference remains. The runtime graph is asserted with the core stripped, on a refusal as
+  well as an accepted request, because the gate executes `config.php` for the pin.
 - `RACC-02`, `RACC-03`, `RACC-06` are asserted against temporary directories: generation,
-  persistence, uniqueness across two temp roots, the operator pin, both CLI paths (invoked
-  through a subprocess with a temp `config.php`), and the log line.
+  persistence, uniqueness across two temp roots and across two roots **under one shared
+  parent**, the operator pin winning while a different persisted value exists, a damaged
+  `config.php` falling back silently, both CLI paths (invoked through a subprocess with a
+  temp `config.php`), and the log line.
 - `RACC-04` is asserted by invoking the script as a subprocess with headers captured: status
   404, identical bodies for the three failure inputs, no `Set-Cookie`.
 - `RACC-05` is asserted by two sequential subprocess invocations sharing a cookie jar, with

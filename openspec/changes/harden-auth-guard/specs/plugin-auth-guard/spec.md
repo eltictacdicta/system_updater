@@ -47,6 +47,18 @@ the defect.
 The guard MUST NOT consult the framework CSRF subsystem (`CsrfManager`, `_csrf`,
 `_token`, `X-CSRF-Token`) for any purpose, including as a secondary signal.
 
+**Recorded, deferred — one pre-existing identity path outside this rule (W-3).**
+`system_updater_is_logged_in()` (`lib/session_auth.php`) falls back to
+`fs_session_manager::isLoggedIn()` when the decision above denies. That method reads
+`user_nick` and the legacy `user`/`logkey` cookies and **never** consults the administrator
+flag — the shape `AUTH-03` exists to forbid. In the standalone bootstrap it is unreachable:
+the legacy autoloader (`base/fs_autoload.php`) is not loaded by the console's graph, so
+`class_exists('fs_session_manager', false)` is `false`. It is untested, and no test covers
+it. It is recorded as deferred, not accepted: any future `require` of the legacy autoloader
+in that path turns it into an `AUTH-03` bypass, and nothing in the suite would notice.
+Removing it, or gating it behind an explicit `admin` check, is a separate change.
+*Original text did not record this path; the verify phase (W-3) added it as a deferred gap.*
+
 #### Scenario: A self-minted framework token is not a session
 
 - GIVEN a request carrying `_csrf_token` (or `_token`, or `X-CSRF-Token`) whose value the
@@ -290,6 +302,7 @@ is not fixed, removal alone breaks polling for everybody.
 | 2 | The administrator verdict is a single row read with no cache, so a database outage denies legitimate administrators | Deliberate: a cache would reopen a revoked-admin window, which the core's own `fs_auth` avoids. Recovery is the documented path back in. |
 | 3 | A `progress` poll whose admin re-read fails during a restore (the restore rewrites `fs_users`) is denied | Fail-closed is kept for every action; the UI is required to treat that denial as transient (`plugin-backup-access` delta, stepped-restore scenarios), not as a fatal error. |
 | 4 | Denials are not counted anywhere, so an authenticated non-administrator can probe repeatedly | Each probe requires a real login session; counting it would consume `LoginThrottle` budget that belongs to credential handlers (`LTI-03`). |
+| 5 | `system_updater_is_logged_in()` falls back to `fs_session_manager::isLoggedIn()` when the decision denies; that fallback reads `user_nick` and the legacy `user`/`logkey` cookies and never checks `admin` (`AUTH-01`, W-3) | Deferred, not accepted. Unreachable today: the legacy autoloader is not loaded in the standalone bootstrap, so `class_exists('fs_session_manager', false)` is `false` and the fallback is dead. It predates this change and is untested; it is recorded here so the merged text does not imply the administrator verdict is the only identity path. Any future `require` of `base/fs_autoload.php` in that graph would make it an `AUTH-03` bypass. |
 
 ## Traceability
 
