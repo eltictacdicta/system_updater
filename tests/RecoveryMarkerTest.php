@@ -357,6 +357,14 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
      * non-transferability, asserted as provenance rather than behaviour alone),
      * and it is never an identity key: no `_sf2_attributes`, no `_csrf`, no
      * `user_nick`.
+     *
+     * The carrier list is the console and the two libraries only it includes.
+     * `lib/recovery_login_token.php` joins it by design: REC-01 puts the login
+     * form's token in the same console-owned namespace, which is what keeps the
+     * console's state in one bucket instead of two. What the list must never
+     * grow is an entry the process scripts or `download_backup.php` can reach —
+     * that would make the namespace transferable, which is the property this
+     * test exists for.
      */
     public function testTheMarkerNamespaceIsConfinedToTheConsole(): void
     {
@@ -384,9 +392,9 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
         sort($carriers);
 
         $this->assertSame(
-            ['lib/recovery_session.php', 'recovery.php'],
+            ['lib/recovery_login_token.php', 'lib/recovery_session.php', 'recovery.php'],
             $carriers,
-            'only the console and its own session library may know the marker namespace'
+            'only the console and the libraries it includes may know the console namespace'
         );
 
         $library = self::codeWithoutComments((string) file_get_contents($plugin . '/lib/recovery_session.php'));
