@@ -246,11 +246,17 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
     }
 
     /**
-     * The operator pin is a credential of its own, and it is not what rotation
-     * changes — but a rotation that *persists* a value does displace it at the
-     * gate, so the marker it granted must not outlive that moment.
+     * The pin, after a rotation. The product-owner decision behind C-2 is that
+     * the pin wins over the persisted value, so a rotation that writes a new
+     * value does **not** displace it: the marker the pin granted still names the
+     * credential the gate answers against, and the operator is not sent back to
+     * the secret on every reload.
+     *
+     * This is the mirror of `testRotatingTheSecretRetiresTheMarkerItGranted`:
+     * rotation retires markers when it changes *what the gate accepts*. With a
+     * pin defined, it does not.
      */
-    public function testAMarkerGrantedByTheOperatorPinDiesWhenARotationPersistsAValue(): void
+    public function testAMarkerGrantedByTheOperatorPinSurvivesARotationWhileThePinIsCurrent(): void
     {
         $pin = $this->newSecret();
         $harness = $this->newHarness(self::FILES);
@@ -262,17 +268,25 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
         $this->assertSame(200, $open['status'], 'the operator pin opens the console: ' . $open['body']);
         $this->assertFalse($harness->secretExists(), 'premise: the pin grants while nothing has been persisted');
 
-        $harness->persistSecret($this->newSecret());
+        $rotated = $this->newSecret();
+        $harness->persistSecret($rotated);
+        $this->assertTrue($harness->secretExists(), 'premise: a value is now persisted');
 
         $reload = $harness->request(self::CONSOLE, ['jar' => true]);
 
         $this->assertSame(
-            404,
+            200,
             $reload['status'],
-            'once a value is persisted it is what the gate answers against, so the pin-granted marker is stale: '
+            'the pin still wins over the persisted value, so the marker it granted is still current: '
             . $reload['body']
         );
-        $this->assertStringNotContainsString('name="nick"', $reload['body']);
+        $this->assertStringContainsString('name="nick"', $reload['body']);
+        $this->assertStringNotContainsString($pin, $reload['body'], 'and the pin is never echoed');
+
+        // And the persisted value is not a credential while the pin exists: a
+        // browser without the marker is refused with it.
+        $stale = $harness->request(self::CONSOLE . '?secret=' . $rotated);
+        $this->assertSame(404, $stale['status'], 'the persisted value loses to the pin: ' . $stale['body']);
     }
 
     /**

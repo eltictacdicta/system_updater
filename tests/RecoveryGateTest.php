@@ -162,14 +162,108 @@ final class RecoveryGateTest extends ConsoleHttpTestCase
         $this->assertSame([], $harness->headersMatching($absent, 'x-powered-by'));
 
         $this->assertSame([], $harness->sessionFiles(), 'a secret-less request must not create a session file');
-        $this->assertFalse($harness->configWasLoaded(), 'a secret-less request must never load config.php');
+        // C-2 (product-owner decision): the operator pin wins, so the gate has to
+        // read `config.php` to see whether one is defined — on the refusal path
+        // too. What must not vary with secret correctness is the *response*, and
+        // that is what every assertion above measures; the file being consulted
+        // is the accepted, documented cost of the pin order.
+        $this->assertTrue(
+            $harness->configWasLoaded(),
+            'the gate consults config.php for the operator pin before it refuses'
+        );
         $this->assertTrue($harness->secretExists(), 'premise: the secret was persisted, so nothing was generated');
     }
 
     /**
-     * RACC-03 "the gate answers before `config.php` is loaded": a config that
-     * would fatal if executed cannot paint the response, and its parse error is
-     * never echoed.
+     * C-2, end to end: while a pin is defined, the pin is the credential — a
+     * persisted value on disk is not.
+     *
+     * This is the case the verify phase measured as broken: the same pin that
+     * opened the console once the secret file was deleted answered `Not Found`
+     * while the file existed, so RACC-03's "the operator pin wins" and RACC-06's
+     * escape 3 were false in the normal operating state.
+     */
+    public function testTheOperatorPinWinsOverThePersistedValueOverHttp(): void
+    {
+        $pin = 'operator-pin-' . bin2hex(random_bytes(8));
+        $persisted = $this->newSecret();
+
+        $harness = $this->newHarness(self::CONSOLE_FILES);
+        $harness->boot($this->gateConfigBody() . $this->pinDefinition($pin));
+        $harness->persistSecret($persisted);
+
+        $pinned = $harness->request(self::CONSOLE . '?secret=' . rawurlencode($pin));
+
+        $this->assertSame(200, $pinned['status'], 'the pin must open the console with the secret file present: ' . $pinned['body']);
+        $this->assertStringContainsString('name="nick"', $pinned['body'], 'the login form is rendered');
+        $this->assertSame(
+            ['Referrer-Policy: no-referrer'],
+            $harness->headersMatching($pinned, 'referrer-policy'),
+            'premise: the accepted path announces the referrer policy'
+        );
+
+        $stale = $harness->request(self::CONSOLE . '?secret=' . $persisted);
+
+        $this->assertSame(
+            404,
+            $stale['status'],
+            'the persisted value loses to the pin, so it is the gate refusal: ' . $stale['body']
+        );
+        $this->assertStringNotContainsString('name="nick"', $stale['body']);
+
+        $this->assertStringNotContainsString($pin, $pinned['body'], 'the pin never reaches a body');
+        $this->assertStringNotContainsString($pin, $pinned['headers'], 'nor a header');
+        $this->assertStringNotContainsString($pin, $stale['body'], 'a refusal does not leak the pin either');
+        $this->assertStringNotContainsString($persisted, $stale['body']);
+    }
+
+    /**
+     * "The refusal shape is unchanged" is part of the C-2 decision: the pin only
+     * decides *which* value the gate compares against, never how a miss looks.
+     * With a pin configured, absent / empty / wrong stay one indistinguishable
+     * 404, and neither credential is disclosed.
+     */
+    public function testTheRefusalShapeIsUnchangedWhenAPinIsConfigured(): void
+    {
+        $pin = 'operator-pin-' . bin2hex(random_bytes(8));
+        $persisted = $this->newSecret();
+
+        $harness = $this->newHarness(self::CONSOLE_FILES);
+        $harness->boot($this->gateConfigBody() . $this->pinDefinition($pin));
+        $harness->persistSecret($persisted);
+
+        $absent = $harness->request(self::CONSOLE);
+        $empty = $harness->request(self::CONSOLE . '?secret=');
+        $wrong = $harness->request(self::CONSOLE . '?secret=' . $this->newSecret());
+        $missing = $harness->request(self::MISSING);
+
+        $this->assertSame(404, $absent['status'], 'the refusal is the 404, pin or no pin: ' . $absent['body']);
+        $this->assertSame($absent['body'], $empty['body'], 'absent and empty stay byte-identical');
+        $this->assertSame($absent['body'], $wrong['body'], 'absent and wrong stay byte-identical');
+        $this->assertSame($missing['status'], $absent['status'], 'and a missing path still answers the same status');
+
+        $missingNames = $this->controllableHeaderNames($missing);
+        foreach (['absent' => $absent, 'empty' => $empty, 'wrong' => $wrong] as $label => $response) {
+            $this->assertSame([], $harness->headersMatching($response, 'set-cookie'), $label . ' sets no cookie');
+            $this->assertSame([], $harness->headersMatching($response, 'x-powered-by'), $label . ' hides PHP');
+            $this->assertSame(
+                [],
+                array_values(array_diff($this->controllableHeaderNames($response), $missingNames)),
+                'the ' . $label . ' refusal carries no header a missing path lacks'
+            );
+            $this->assertBodyCarriesNoConsoleMarker($response['body'], $label);
+            $this->assertStringNotContainsString($pin, $response['body'], 'the pin is never disclosed');
+            $this->assertStringNotContainsString($persisted, $response['body'], 'nor the persisted value');
+        }
+
+        $this->assertSame([], $harness->sessionFiles(), 'and a refusal still creates no session');
+    }
+
+    /**
+     * RACC-03 "the gate answers before `config.php` is loaded", superseded by the
+     * C-2 decision: the gate now consults `config.php` on every evaluation to look
+     * for the operator pin. What RACC-01 still forbids is what this case asserts —
+     * a damaged file must never paint the response and must never be echoed.
      */
     public function testTheGateAnswersWithADamagedConfigInsteadOfAPhpError(): void
     {
@@ -182,7 +276,63 @@ final class RecoveryGateTest extends ConsoleHttpTestCase
         $this->assertSame(404, $response['status'], 'a damaged config.php must still answer the 404: ' . $response['body']);
         $this->assertStringNotContainsString('Parse error', $response['body']);
         $this->assertStringNotContainsString('syntax error', $response['body']);
-        $this->assertFalse($harness->configWasLoaded(), 'the gate runs before config.php, so nothing executed it');
+        $this->assertFalse($harness->configWasLoaded(), 'a parse error never gets as far as its first statement');
+        $this->assertStringNotContainsString(
+            'Parse error',
+            $harness->errorLogContents(),
+            'and it is not warned about in the server log either'
+        );
+    }
+
+    /**
+     * RACC-01's "a missing `config.php` is the only hard stop": HTTP 500 and a
+     * plain-text body naming the file **and the directory it was expected in**.
+     *
+     * The verify phase measured `200 OK` with a body that named only the file
+     * (W-1), which is also an operational defect: a hard stop that answers 200 is
+     * invisible to uptime checks and access logs. This is the one case where a
+     * distinct response is correct — the operator has to be able to see what is
+     * missing — so the case also asserts it cannot be mistaken for the gate's
+     * 404.
+     */
+    public function testAMissingConfigIsAFiveHundredThatNamesTheDirectory(): void
+    {
+        $secret = $this->newSecret();
+        $harness = $this->newHarness(self::CONSOLE_FILES);
+        $harness->boot($this->gateConfigBody());
+        $harness->persistSecret($secret);
+
+        unlink($harness->root . '/config.php');
+        $this->assertFileDoesNotExist($harness->root . '/config.php', 'premise: the only hard stop is missing');
+
+        $response = $harness->request(self::CONSOLE . '?secret=' . $secret);
+
+        $this->assertSame(500, $response['status'], 'a missing config.php is a server-side hard stop: ' . $response['body']);
+        $this->assertStringContainsString('config.php', $response['body'], 'the body names the missing file');
+        $this->assertStringContainsString(
+            $harness->root,
+            $response['body'],
+            'and the directory it was expected in, which is what an operator needs to fix it'
+        );
+        $this->assertNotSame(404, $response['status'], 'the hard stop is not the gate refusal');
+        $this->assertStringNotContainsString('Not Found', $response['body'], 'and its body is not the refusal body');
+        $this->assertSame(
+            ['Content-Type: text/plain; charset=utf-8'],
+            $harness->headersMatching($response, 'content-type'),
+            'the body is plain text, as the requirement states'
+        );
+        $this->assertSame([], $harness->headersMatching($response, 'set-cookie'), 'and it starts no session');
+
+        foreach (['Fatal error', 'Stack trace', 'Uncaught', $secret, 'FS_DB_PASS'] as $leak) {
+            $this->assertStringNotContainsString($leak, $response['body'], 'the hard stop discloses nothing');
+            $this->assertStringNotContainsString($leak, $response['headers'], 'not even in a header');
+        }
+
+        // The same missing file, requested without the secret, is still the plain
+        // 404: the two responses are decided by the gate first, so nothing about
+        // the hard stop is reachable without the secret.
+        $anonymous = $harness->request(self::CONSOLE);
+        $this->assertSame(404, $anonymous['status'], 'without the secret the console still does not exist');
     }
 
     /**
@@ -279,6 +429,12 @@ final class RecoveryGateTest extends ConsoleHttpTestCase
             "define('FS_SESSION_NAME', '" . self::SESSION_NAME . "');",
             '',
         ]);
+    }
+
+    /** The operator pin, appended to the sentinel config body. */
+    private function pinDefinition(string $pin): string
+    {
+        return 'define(' . var_export('SU_RECOVERY_SECRET', true) . ', ' . var_export($pin, true) . ");\n";
     }
 
     private function newSecret(): string

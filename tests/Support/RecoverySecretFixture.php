@@ -14,6 +14,12 @@ declare(strict_types=1);
 
 namespace Tests\SystemUpdater\Support;
 
+// The candidate locations come from the library, never from a copy of the
+// formula: a harness that duplicated the derivation could agree with a wrong one
+// and hide the defect it is supposed to observe (that is exactly how the
+// shared-parent bug stayed green).
+require_once dirname(__DIR__, 2) . '/lib/recovery_secret.php';
+
 /**
  * A throwaway install root for the recovery console's per-installation secret.
  *
@@ -25,8 +31,9 @@ namespace Tests\SystemUpdater\Support;
  * Layout of one fixture (`$base` is a random directory, `$root` is the
  * installation the console believes it is running in):
  *
- *     <base>/                          the parent of the install root, i.e. the
- *                                      outside-webroot candidate location
+ *     <base>/                          the parent of the install root
+ *     <base>/<install digest>/         the outside-webroot candidate location,
+ *                                      one directory per installation
  *     <base>/root/                     the install root (the webroot)
  *     <base>/root/plugins/system_updater/recovery.php
  *     <base>/root/plugins/system_updater/lib/recovery_secret.php
@@ -78,7 +85,7 @@ final class RecoverySecretFixture
         'lib/recovery_view.php',
     ];
 
-    /** Parent of the install root: the outside-webroot candidate. */
+    /** Parent of the install root: what the outside-webroot candidate sits under. */
     public string $base;
 
     /** The install root the console resolves its secret for. */
@@ -97,16 +104,33 @@ final class RecoverySecretFixture
      */
     public string $scratch;
 
-    public function __construct()
+    /**
+     * Whether this fixture owns `$base` and must remove it.
+     *
+     * Two roots under one parent is the layout that exposed C-1, so a fixture
+     * can be attached to a base somebody else created — and then it must not
+     * tear that base down underneath its sibling.
+     */
+    private bool $ownsBase = true;
+
+    /**
+     * `$baseDirectory` and `$rootName` exist for the shared-parent layout: two
+     * fixtures can be built as `<base>/vhostA` and `<base>/vhostB` instead of
+     * each getting a private `<random>/root`.
+     */
+    public function __construct(?string $baseDirectory = null, string $rootName = 'root')
     {
         $suffix = bin2hex(random_bytes(6));
-        $this->base = rtrim(sys_get_temp_dir(), '/') . '/su_recsec_' . $suffix;
-        $this->root = $this->base . '/root';
+        $this->ownsBase = $baseDirectory === null;
+        $this->base = $baseDirectory !== null && trim($baseDirectory) !== ''
+            ? rtrim($baseDirectory, '/')
+            : rtrim(sys_get_temp_dir(), '/') . '/su_recsec_' . $suffix;
+        $this->root = $this->base . '/' . trim($rootName, '/');
         $this->scratch = rtrim(sys_get_temp_dir(), '/') . '/su_recsec_sinks_' . $suffix;
         $this->logFile = $this->scratch . '/secret_error_log.txt';
 
-        foreach ([$this->root, $this->scratch] as $directory) {
-            if (!mkdir($directory, 0777, true) && !is_dir($directory)) {
+        foreach ([$this->base, $this->root, $this->scratch] as $directory) {
+            if (!is_dir($directory) && !mkdir($directory, 0777, true) && !is_dir($directory)) {
                 throw new \RuntimeException('cannot create the fixture directory at ' . $directory);
             }
         }
@@ -214,8 +238,17 @@ final class RecoverySecretFixture
         return is_file($this->root . '/config_loaded.sentinel');
     }
 
-    /** Directory that holds the outside-webroot candidate. */
+    /**
+     * Directory that holds the outside-webroot candidate: the per-installation
+     * directory, derived by the library rather than by this fixture.
+     */
     public function siblingDirectory(): string
+    {
+        return dirname($this->siblingSecretPath());
+    }
+
+    /** The parent of both installations' candidates — the shared parent. */
+    public function parentDirectory(): string
     {
         return $this->base;
     }
@@ -226,9 +259,17 @@ final class RecoverySecretFixture
         return $this->root . '/tmp';
     }
 
+    /**
+     * The outside-webroot candidate, as the library computes it.
+     *
+     * Never re-derived here: the harness has to observe the shipped derivation,
+     * not agree with a copy of it.
+     */
     public function siblingSecretPath(): string
     {
-        return $this->siblingDirectory() . '/' . self::SECRET_FILENAME;
+        $candidates = recovery_secret_candidates($this->root);
+
+        return $candidates[0] ?? ($this->base . '/' . self::SECRET_FILENAME);
     }
 
     public function nestedSecretPath(): string
@@ -252,8 +293,16 @@ final class RecoverySecretFixture
      * Run a snippet with the plugin-local secret library preloaded, in a fresh
      * process. Used wherever a constant definition would otherwise leak into
      * the PHPUnit process (a pin, or a class-loading assertion).
+     *
+     * `$iniSettings` exists for the cases that have to observe the *logging*
+     * behaviour of a damaged `config.php`: with `display_errors` on (the suite's
+     * default, `STDOUT`) a PHP warning is printed instead of being logged, so
+     * "does it leak into the error log" is only observable with the setting a
+     * production host uses.
+     *
+     * @param array<string, string> $iniSettings
      */
-    public function runSnippet(string $phpCode): array
+    public function runSnippet(string $phpCode, array $iniSettings = []): array
     {
         $runner = $this->root . '/runner.php';
         file_put_contents(
@@ -263,11 +312,14 @@ final class RecoverySecretFixture
             . $phpCode
         );
 
-        return $this->runProcess(
-            escapeshellarg(PHP_BINARY)
-            . ' -d error_log=' . escapeshellarg($this->logFile)
-            . ' ' . escapeshellarg($runner)
-        );
+        $command = escapeshellarg(PHP_BINARY)
+            . ' -d error_log=' . escapeshellarg($this->logFile);
+
+        foreach ($iniSettings as $name => $value) {
+            $command .= ' -d ' . $name . '=' . escapeshellarg($value);
+        }
+
+        return $this->runProcess($command . ' ' . escapeshellarg($runner));
     }
 
     /** Execute a single PHP file, the way a PHP-enabled web server would. */
@@ -309,7 +361,13 @@ final class RecoverySecretFixture
     {
         @chmod($this->base, 0777);
         @chmod($this->root, 0777);
-        self::removeTree($this->base);
+
+        if ($this->ownsBase) {
+            self::removeTree($this->base);
+        } else {
+            self::removeTree($this->root);
+        }
+
         self::removeTree($this->scratch);
     }
 
