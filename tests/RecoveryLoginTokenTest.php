@@ -217,6 +217,32 @@ final class RecoveryLoginTokenTest extends TestCase
         $this->assertArrayHasKey(RECOVERY_LOGIN_TOKEN_NAMESPACE, $_SESSION);
     }
 
+    /**
+     * RACC-05's marker and this token share one namespace, so the mint is one
+     * write away from logging an operator out of a console they had already
+     * opened. Rendering the login form is exactly what a marker-less session
+     * does, but a marker-carrying session can render it too (REC-08's
+     * "the marker alone does not authenticate" scenario), and losing the marker
+     * there would turn the next reload back into a secret prompt.
+     */
+    #[Test]
+    public function mintingKeepsTheConsoleAuthorizationMarker(): void
+    {
+        $_SESSION[RECOVERY_LOGIN_TOKEN_NAMESPACE] = [
+            'authorized' => true,
+            'fingerprint' => str_repeat('f', 64),
+        ];
+
+        recovery_login_token_mint();
+
+        $this->assertTrue($_SESSION[RECOVERY_LOGIN_TOKEN_NAMESPACE]['authorized']);
+        $this->assertSame(
+            str_repeat('f', 64),
+            $_SESSION[RECOVERY_LOGIN_TOKEN_NAMESPACE]['fingerprint'],
+            'the marker and the token are neighbours, not replacements'
+        );
+    }
+
     #[Test]
     public function theFormFieldCarriesTheMintedToken(): void
     {
