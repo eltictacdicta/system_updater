@@ -14,6 +14,11 @@ declare(strict_types=1);
 
 namespace Tests\SystemUpdater\Support;
 
+// The candidate locations come from the library, never from a copy of the
+// formula: a harness that duplicated the derivation could agree with a wrong one
+// and hide the defect it is supposed to observe.
+require_once dirname(__DIR__, 2) . '/lib/recovery_secret.php';
+
 /**
  * The `php -S` + `curl` seam for the recovery console.
  *
@@ -36,8 +41,9 @@ namespace Tests\SystemUpdater\Support;
  *
  * Layout of one fixture
  * ---------------------
- *     <base>/                                   parent of the install root, i.e.
- *                                               the outside-webroot secret candidate
+ *     <base>/                                   parent of the install root
+ *     <base>/<install digest>/                  the outside-webroot candidate
+ *                                               location, one per installation
  *     <base>/root/                              the install root == document root
  *     <base>/root/plugins/system_updater/...    the copied console graph
  *     <base>/root/config.php                    optional sentinel config
@@ -241,7 +247,32 @@ final class ConsoleHttpHarness
 
     public function siblingSecretPath(): string
     {
-        return $this->base . '/' . self::SECRET_FILENAME;
+        return $this->siblingCandidate($this->root);
+    }
+
+    /**
+     * The outside-webroot candidate for arbitrary install root.
+     *
+     * The library is the only source of this path: a harness with its own copy
+     * of the derivation is how the shared-parent defect stayed invisible.
+     */
+    public function siblingCandidate(string $installRoot): string
+    {
+        $candidates = recovery_secret_candidates($installRoot);
+
+        return $candidates[0] ?? ($this->base . '/' . self::SECRET_FILENAME);
+    }
+
+    /** The per-installation directory that holds the outside-webroot file. */
+    public function siblingDirectory(): string
+    {
+        return dirname($this->siblingSecretPath());
+    }
+
+    /** The parent shared by every installation created under this harness. */
+    public function parentDirectory(): string
+    {
+        return $this->base;
     }
 
     /**
@@ -250,9 +281,16 @@ final class ConsoleHttpHarness
      */
     public function persistSecret(string $value): void
     {
+        $path = $this->siblingSecretPath();
+        $directory = dirname($path);
+
+        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+            throw new \RuntimeException('cannot create the secret directory at ' . $directory);
+        }
+
         $payload = "<?php\n// fixture\nhttp_response_code(404);\nexit;\n" . '# secret: ' . $value . "\n";
-        file_put_contents($this->siblingSecretPath(), $payload);
-        chmod($this->siblingSecretPath(), 0600);
+        file_put_contents($path, $payload);
+        chmod($path, 0600);
     }
 
     public function secretExists(): bool

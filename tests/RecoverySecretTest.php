@@ -241,6 +241,11 @@ final class RecoverySecretTest extends TestCase
      * leak the name and the bytes to a sibling tenant — so the location itself
      * is part of the contract, and the last-resort path is only taken when the
      * sibling is not writable (asserted separately).
+     *
+     * The location is the *per-installation* directory beside the installation
+     * (C-1): a fixed file name in the parent made two installations that share
+     * a parent resolve one file. The file name stays fixed, because that is what
+     * an operator greps for.
      */
     public function testTheSecretIsStoredOutsideTheInstallRootWhenASiblingIsWritable(): void
     {
@@ -251,13 +256,24 @@ final class RecoverySecretTest extends TestCase
         $path = recovery_secret_path($fixture->root);
         $webroot = $fixture->root . '/';
 
-        $this->assertStringStartsWith($fixture->siblingDirectory() . '/', $path);
+        $this->assertStringStartsWith($fixture->parentDirectory() . '/', $path);
         $this->assertStringNotContainsString(
             $webroot,
             $path,
             'the secret must not live inside the webroot while a writable sibling exists'
         );
         $this->assertSame(RecoverySecretFixture::SECRET_FILENAME, basename($path));
+        $this->assertSame(
+            $fixture->siblingDirectory(),
+            dirname($path),
+            'the file sits in the directory derived from the installation, not directly in the shared parent'
+        );
+        $this->assertNotSame(
+            $fixture->parentDirectory(),
+            dirname($path),
+            'a fixed file name directly in the parent is the shared-secret defect (C-1)'
+        );
+        $this->assertSame(0700, $fixture->modeOf(dirname($path)), 'the per-installation directory is owner-only');
     }
 
     /**

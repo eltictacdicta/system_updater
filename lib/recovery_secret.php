@@ -27,7 +27,7 @@ declare(strict_types=1);
  * The value is persisted as plain data on disk, in one of two locations, in
  * this order:
  *
- *   1. `dirname(FS_FOLDER) . '/system_updater_recovery_secret.php'`;
+ *   1. `dirname(FS_FOLDER) . '/<per-installation directory>/system_updater_recovery_secret.php'`;
  *   2. `FS_FOLDER . '/tmp/system_updater_recovery_secret.php'`.
  *
  * Candidate 1 is a sibling of the installation, so it is normally outside the
@@ -39,6 +39,15 @@ declare(strict_types=1);
  * request discloses nothing (see {@see recovery_secret_payload()}: the bytes
  * begin with a PHP guard that answers 404 and exits before the value line is
  * reached, and the value is only ever parsed as text, never included).
+ *
+ * Candidate 1's *directory* is derived from the installation, not from the
+ * parent: see {@see recovery_secret_install_directory()}. A fixed file name
+ * beside the installation made two installations that share a parent
+ * (`public_html` next to `staging`, or any two vhosts under `/var/www`) resolve
+ * one file and therefore share one secret — reachability of one installation's
+ * console from the other's operator secret, and a `--rotate-secret` that
+ * silently retired the neighbour's URL. The file name stays fixed because it is
+ * the part an operator greps for; the digest lives one level up.
  *
  * Both locations are *outside* the database, *outside* the framework session
  * and *outside* `config.php`, which is the point: the console exists for the
@@ -80,11 +89,47 @@ declare(strict_types=1);
  * Operator-facing file name of the persisted secret.
  *
  * It is part of the contract, not an implementation detail: an operator who
- * rescues an installation by hand has to know what to look for.
+ * rescues an installation by hand has to know what to look for. The name is
+ * stable across installations on purpose; the *directory* is what identifies
+ * the installation ({@see recovery_secret_install_directory()}), so
+ * `ls <parent>` shows one directory per installation, each holding a file with
+ * this exact name.
  */
 function recovery_secret_filename(): string
 {
     return 'system_updater_recovery_secret.php';
+}
+
+/**
+ * The per-installation directory that holds the outside-webroot candidate.
+ *
+ * RACC-02's uniqueness MUST is a statement about **installations**, not about
+ * host directories, and the previous derivation keyed the candidate on
+ * `dirname($root)` alone: two installations under one parent resolved the very
+ * same file, shared one value, and each one's gate accepted the other's secret
+ * (measured; `verify-report.md` C-1). The directory name is therefore a digest
+ * of the installation root, so two installations cannot collide while both
+ * candidates keep sitting beside their own installation.
+ *
+ * The digest is over the **resolved** root on purpose. `realpath()` folds the
+ * spellings of one installation — a trailing slash, a redundant `..`, a
+ * symlinked deployment path — onto one directory, so the same installation
+ * cannot end up with two secrets depending on how it was reached. It is a
+ * location, never an entropy source: the secret itself is still
+ * `random_bytes(32)` ({@see recovery_secret_generate()}), and RACC-02 forbids
+ * deriving the value from the path.
+ *
+ * Sixteen hex characters (64 bits) of `sha256` is the same order of magnitude a
+ * handful of installations on one host could ever need; a collision would have
+ * to be constructed, and it would still only reproduce the defect this
+ * function exists to remove.
+ */
+function recovery_secret_install_directory(string $installRoot): string
+{
+    $resolved = realpath($installRoot);
+    $identity = $resolved === false ? rtrim($installRoot, '/\\') : $resolved;
+
+    return 'system_updater_recovery_' . substr(hash('sha256', $identity), 0, 16);
 }
 
 /**
@@ -276,6 +321,12 @@ function recovery_secret_detect_install_root(): string
  * Candidate locations, in the documented order: outside the webroot first,
  * inside it only as a last resort.
  *
+ * The outside-webroot candidate is one directory per installation
+ * ({@see recovery_secret_install_directory()}), so two installations that share
+ * a parent directory — the ordinary production-plus-staging layout — never
+ * read or write the same file. The inside-webroot candidate needs no such
+ * treatment: it is already keyed on `$root`.
+ *
  * An unresolvable install root produces no candidates at all. That is a
  * deliberate empty list rather than a guess: every candidate is derived from
  * the root, so without one there is no path whose position relative to the
@@ -292,7 +343,7 @@ function recovery_secret_candidates(?string $installRoot = null): array
     }
 
     return [
-        dirname($root) . '/' . recovery_secret_filename(),
+        dirname($root) . '/' . recovery_secret_install_directory($root) . '/' . recovery_secret_filename(),
         $root . '/tmp/' . recovery_secret_filename(),
     ];
 }
