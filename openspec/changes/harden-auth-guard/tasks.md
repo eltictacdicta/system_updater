@@ -1103,7 +1103,7 @@ Nothing is wired yet; the console is unchanged.
 
 ### Phase 1: The legacy bridge (TDD)
 
-- [ ] 1.1 **[TEST] [RED]** Each variant from REC-07 in the exact core order and with `hash_equals()`:
+- [x] 1.1 **[TEST] [RED]** Each variant from REC-07 in the exact core order and with `hash_equals()`:
   `sha1($salt . $plain)` when a salt is supplied, `sha1($plain)`,
   `sha1(mb_strtolower($plain, 'UTF8'))`, `md5($plain)`. Plus: a bcrypt row is verified by
   `password_verify()` and the legacy comparisons are **not attempted** (assert by injecting a
@@ -1115,27 +1115,76 @@ Nothing is wired yet; the console is unchanged.
   bootstrap loads it globally, so assert instead that the module's source references no core class
   (`LegacyCompatibility`, `PasswordHasherService`, `class_exists`) and that all four comparisons are
   present with `hash_equals`.
-- [ ] 1.2 Implement the bridge as pure functions over `(storedHash, plain, ?salt)`. No
+- [x] 1.2 Implement the bridge as pure functions over `(storedHash, plain, ?salt)`. No
   `class_exists()`, no `require`, no Composer symbol.
 
 ### Phase 2: The console's form token (REC-01 primitive, TDD)
 
-- [ ] 2.1 **[TEST] [RED]** Minting stores the value under a console-only namespace
+- [x] 2.1 **[TEST] [RED]** Minting stores the value under a console-only namespace
   (`$_SESSION['recovery_console']['login_token']` — D2), the value is 64 hex, validation uses
   `hash_equals()`, a token minted in one session is refused in another, and after minting
   `$_SESSION['system_updater']['csrf_tokens']` is **absent** and `$_SESSION['_csrf']` is untouched.
   This is the assertion that keeps the login form from handing an unauthenticated visitor a value
   that `start`/`begin`/`chunk` would accept.
-- [ ] 2.2 Implement mint/read/validate with a 4-hour TTL consistent with the plugin token, no
+- [x] 2.2 Implement mint/read/validate with a 4-hour TTL consistent with the plugin token, no
   dependency on `lib/csrf_token.php` (importing it would open the plugin session inside the console
   and write the wrong store).
 
 ### PR 6 verification
 
-- [ ] `--filter RecoveryLegacyHashTest`, `--filter RecoveryLoginTokenTest`
-- [ ] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — record counts
-- [ ] `ddev exec php -l` on both new files
+- [x] `--filter RecoveryLegacyHashTest` (38 / 76), `--filter RecoveryLoginTokenTest` (10 / 51)
+- [x] `ddev exec php vendor/bin/phpunit -c plugins/system_updater/phpunit.xml` — **577 / 2026 /
+  2 skipped**, 0 failures, 0 errors (baseline **529 / 1899 / 2 skipped**)
+- [x] `ddev exec php -l` on both new files, both new tests and `tests/RecoveryMarkerTest.php`
 - [ ] PR body states the A1 ordering explicitly: REC-07 proven **before** PR 7 removes the autoloader
+  — **not applicable in this phase**: no PR is opened from here. The ordering is recorded in the
+  implementation commit body instead.
+
+**Applied notes (W6, working tree only — nothing under `openspec/` is committed).**
+
+- **REC-07 is satisfied and proven.** `lib/recovery_legacy_hash.php` reproduces the core set in the
+  core order — `password_verify()`, `sha1($salt . $plain)` (only with a non-null salt),
+  `sha1($plain)`, `sha1(mb_strtolower($plain, 'UTF8'))`, `md5($plain)` — with `hash_equals()` on
+  each comparison. The **salted variant is legacy-schema-only** and unreachable from the current
+  schema: `model/table/fs_users.xml` has no `salt` column, so the console passes `null` for every
+  row it can read today; it is kept so a legacy schema keeps working and so a salted digest cannot
+  fall through to the unsalted set.
+- **The drift is enforced, not prose.** `theComparisonSetMatchesTheCoreAlgorithm()` runs the same
+  matrix through `PasswordHasherService::verifyLegacyHash()` and skips with the class it looked for
+  when the plugin is checked out standalone. Proved by mutation: removing the folded-sha1 comparison
+  turns it red (`the local verifier disagrees with the core algorithm on: folded sha1`).
+- **Ordering deviation, stated.** `password_verify()` runs *first* and the modern-format detector
+  runs *after* it, as the gate that closes the legacy block. Both sentences of REC-07 hold, and the
+  reverse shape (detector first) would deny a format PHP accepts but the detector has not learned
+  yet — the one failure mode this requirement exists to prevent. The detector is
+  `password_get_info()` plus the blowfish spellings it reports as `unknown` while `password_verify()`
+  accepts them (`$2a$`, `$2b$`, `$2x$`; measured on PHP 8.3.33).
+- **An empty password never verifies**, even when the row holds `sha1('')` — that digest is valid,
+  so an emptied row would otherwise authenticate free cross-site submissions. `REC-02` closes the
+  same door earlier in the pipeline; this is the last line.
+- **REC-01's token primitive is satisfied and proven.** `lib/recovery_login_token.php` mints 64 hex
+  into `$_SESSION['recovery_console']['login_token']`, validates with `hash_equals()`, is bound to
+  the session that minted it, has a 4 h TTL aligned with the plugin token (held together by a drift
+  test that reads the plugin definition as text instead of importing it), and writes nothing into
+  `system_updater.csrf_tokens` (asserted from both directions: minting leaves it absent, and a value
+  it holds is refused) or into `_csrf` (sentinel unchanged). Minting without an open session is
+  refused.
+- **One W4 assertion was extended, deliberately.**
+  `RecoveryMarkerTest::testTheMarkerNamespaceIsConfinedToTheConsole()` listed the two files that know
+  the console namespace; the login token joins the same namespace on purpose (one console-owned
+  bucket, not two), so the list is now three. Observed RED before the correction, and the property
+  that test protects is unchanged: no file reachable from the process scripts or
+  `download_backup.php` may appear in the list.
+- **`#[RunInSeparateProcess]` is method-level**, not class-level: PHPUnit 11 allows the attribute on
+  methods only (measured). It is applied to the cross-session case, the one assertion an inherited
+  session file could satisfy by accident; every test already re-initialises its own session
+  (identifier, private `save_path`, empty `$_SESSION`).
+- **Line budget overrun, measured.** ~1,161 changed lines (source ~376, tests ~785) against a ~270
+  estimate and the 800-line session budget. The excess is documentation and data-provider matrices,
+  in the same house style as W3 and W5; no behaviour was added to reach it.
+- **Not done here, by design**: `recovery.php` is untouched, so nothing is wired; the form does not
+  render the field and the handler does not validate it yet (W7). REC-07 is proven *before* the
+  autoloader removal, so W7 cannot lock out a legacy-hash administrator.
 
 ---
 
