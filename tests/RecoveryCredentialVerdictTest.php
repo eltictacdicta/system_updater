@@ -238,7 +238,10 @@ final class RecoveryCredentialVerdictTest extends TestCase
     {
         $this->assertSame('shared', recovery_policy_count_bucket('credential_failed', true));
         $this->assertSame('fallback', recovery_policy_count_bucket('credential_failed', false));
-        $this->assertSame('none', recovery_policy_count_bucket('credential_ok', true));
+        $this->assertSame('shared', recovery_policy_count_bucket('credential_ok', true));
+        $this->assertSame('fallback', recovery_policy_count_bucket('credential_ok', false));
         $this->assertSame('none', recovery_policy_count_bucket('token_rejected', false));
+        $this->assertSame('none', recovery_policy_count_bucket('banned', true));
+        $this->assertSame('none', recovery_policy_count_bucket('throttled', true));
     }
 }
