@@ -194,6 +194,16 @@ final class DownloadBackupHandlerTest extends TestCase
     // ============================================================
 
     #[Test]
+    public function resolveBackupFileRefusesUnfinishedLibzipTempFile(): void
+    {
+        file_put_contents($this->backupDir . '/h_files.zip.nyg1iu.part', 'partial');
+        $resolution = system_updater_resolve_backup_file('h_files.zip.nyg1iu.part', $this->backupDir);
+
+        $this->assertSame('missing_file', $resolution['status']);
+        $this->assertFalse($resolution['real_path']);
+    }
+
+    #[Test]
     public function resolveBackupFileReportsMissingFile(): void
     {
         $resolution = system_updater_resolve_backup_file('does-not-exist.sql.gz', $this->backupDir);

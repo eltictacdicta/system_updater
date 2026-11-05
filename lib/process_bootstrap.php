@@ -22,7 +22,7 @@ system_updater_prime_fs_path_from_request();
 function system_updater_shutdown_on_missing_config(string $mode = 'sse'): void
 {
     if (headers_sent()) {
-        return;
+        exit; // cannot report, but must not continue without config.php
     }
 
     $isSse = ($mode === 'sse') || (defined('SYSTEM_UPDATER_SSE_MODE') && SYSTEM_UPDATER_SSE_MODE);
@@ -183,7 +183,8 @@ function system_updater_send_sse(string $event, array $data): void
     echo 'data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) . "\n\n";
 
     // Flush any output buffer layer, then push to the web server
-    while (ob_get_level() > 0) {
+    // ob_flush() keeps the level, so looping on ob_get_level() never ends.
+    if (ob_get_level() > 0) {
         @ob_flush();
     }
     @flush();
@@ -276,4 +277,49 @@ function system_updater_save_progress(
     }
 
     return $data;
+}
+
+/**
+ * Whether the background worker that owns a progress snapshot is still alive.
+ * The PID is probed first; when it cannot be (posix disabled, /proc hidden by
+ * open_basedir) the snapshot age decides, so a dead worker is eventually
+ * reported instead of being polled forever.
+ *
+ * @param callable(int): ?bool|null $killProbe true=alive, false=dead, null=unknown
+ */
+function system_updater_worker_is_alive(array $data, ?callable $killProbe = null, string $procRoot = '/proc', ?int $now = null): bool
+{
+    $pid = (int) ($data['pid'] ?? 0);
+    if ($pid > 0) {
+        $alive = ($killProbe ?? 'system_updater_posix_probe')($pid);
+        if ($alive !== null) {
+            return $alive;
+        }
+        if (@is_dir($procRoot)) { // @: open_basedir warns on every poll
+            return file_exists($procRoot . '/' . $pid);
+        }
+    }
+
+    // Steps with a close() heartbeat refresh the snapshot every ~1%; any other
+    // step (e.g. a huge table export) may legitimately stay silent for minutes.
+    $heartbeat = in_array($data['step'] ?? '', ['files_closing', 'unify_closing'], true);
+
+    return (($now ?? time()) - (int) ($data['timestamp'] ?? 0)) < ($heartbeat ? 120 : 600);
+}
+
+function system_updater_posix_probe(int $pid): ?bool
+{
+    if (!function_exists('posix_kill')) {
+        return null;
+    }
+    if (@posix_kill($pid, 0)) {
+        return true;
+    }
+    $errno = function_exists('posix_get_last_error') ? posix_get_last_error() : 0;
+
+    return match ($errno) {
+        1 => true,   // EPERM: exists, owned by another user
+        3 => false,  // ESRCH: no such process
+        default => null,
+    };
 }

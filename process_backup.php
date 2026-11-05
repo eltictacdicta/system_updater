@@ -48,40 +48,24 @@ $progressCallback = function ($step, $message, $percent) use ($progressFile, &$l
     }
 };
 
-/**
- * Best-effort liveness check for the background worker that owns the progress
- * snapshot. Returns true unless it is reasonably certain the worker is gone,
- * so the status endpoint never reports a false "stalled" for a live backup.
- */
-function system_updater_worker_is_alive(array $data): bool
-{
-    $pid = (int) ($data['pid'] ?? 0);
-    if ($pid <= 0) {
-        return true; // Snapshot without a PID (older run): cannot prove death.
-    }
-
-    if (function_exists('posix_kill')) {
-        if (@posix_kill($pid, 0)) {
-            return true;
-        }
-        // EPERM (1) means the process exists but belongs to another user.
-        if (function_exists('posix_get_last_error') && posix_get_last_error() === 1) {
-            return true;
-        }
-    }
-
-    if (is_dir('/proc')) {
-        return file_exists('/proc/' . $pid);
-    }
-
-    return true;
-}
-
 switch ($action) {
     case 'start':
         // Clear any previous run's progress so a concurrent action=status poll
         // can never read a stale 'complete' from an earlier backup.
         @unlink($progressFile);
+
+        // A fatal error (e.g. memory exhausted inside ZipArchive::close()) skips
+        // the catch below; record a terminal state so the UI stops polling.
+        $terminalWritten = false;
+        register_shutdown_function(function () use ($progressFile, &$terminalWritten) {
+            if ($terminalWritten) {
+                return;
+            }
+            $err = error_get_last();
+            $fatal = $err && ($err['type'] & (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR));
+            $msg = 'El backup se interrumpió; no se generó una copia válida.' . ($fatal ? ' ' . $err['message'] : '');
+            system_updater_save_progress($progressFile, 'error', $msg, 0, $msg);
+        });
         system_updater_send_sse('start', ['message' => 'Iniciando copia de seguridad...', 'percent' => 0]);
         system_updater_save_progress($progressFile, 'init', 'Preparando copia de seguridad...', 0);
 
@@ -94,6 +78,7 @@ switch ($action) {
             if (isset($result['complete']) && !empty($result['complete']['success'])) {
                 $backupName = $result['complete']['backup_name'] ?? '';
                 system_updater_save_progress($progressFile, 'complete', '¡Copia de seguridad creada con éxito!', 100, null, ['backup_name' => $backupName]);
+                $terminalWritten = true;
                 system_updater_send_sse('complete', [
                     'message' => '¡Copia de seguridad creada con éxito!',
                     'percent' => 100,
@@ -104,11 +89,13 @@ switch ($action) {
                 $errors = $backupManager->get_errors();
                 $errorMsg = !empty($errors) ? implode('; ', $errors) : 'Error desconocido durante el backup';
                 system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
+                $terminalWritten = true;
                 system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
             }
         } catch (\Throwable $e) {
             $errorMsg = 'Excepción: ' . $e->getMessage();
             system_updater_save_progress($progressFile, 'error', $errorMsg, 0, $errorMsg);
+            $terminalWritten = true;
             system_updater_send_sse('error', ['message' => $errorMsg, 'percent' => 0]);
         }
 

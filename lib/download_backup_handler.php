@@ -97,6 +97,14 @@ if (!function_exists('system_updater_resolve_backup_file')) {
             return $result;
         }
 
+        // Layer 1b: only finished archives are downloadable, never libzip
+        // temp files (same rule as backup_manager::is_backup_archive_name()).
+        if (!preg_match('/\.(zip|sql\.gz)$/i', $name)) {
+            $result['name'] = $name;
+            $result['status'] = 'missing_file';
+            return $result;
+        }
+
         // Layer 2: realpath() — collapses symlinks. If the file does not
         // exist, realpath() returns false and we report missing_file (not
         // traversal — it is a legitimate, just-non-existent name).

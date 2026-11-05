@@ -945,6 +945,7 @@ class backup_manager
         $baseName = $customName ? $customName : $this->resolve_host_slug() . '_' . $timestamp;
 
         $reportProgress('init', 'Obteniendo información del sistema...', 5);
+        $this->remove_stale_zip_temp_files();
 
         // Get version info
         $versionInfo = $this->get_version_info();
@@ -978,7 +979,7 @@ class backup_manager
             $reportProgress('unify', 'Creando paquete unificado...', 90);
 
             // Create a unified backup package (ZIP containing both backups + metadata)
-            $unifiedResult = $this->create_unified_package($baseName, $dbResult, $filesResult, $versionInfo);
+            $unifiedResult = $this->create_unified_package($baseName, $dbResult, $filesResult, $versionInfo, $reportProgress);
 
             $results['complete'] = array(
                 'success' => $unifiedResult['success'],
@@ -1016,7 +1017,7 @@ class backup_manager
      * @param array $versionInfo
      * @return array
      */
-    private function create_unified_package($baseName, $dbResult, $filesResult, $versionInfo)
+    private function create_unified_package($baseName, $dbResult, $filesResult, $versionInfo, $reportProgress = null)
     {
         if (!extension_loaded('zip')) {
             $this->errors[] = "La extensión PHP ZIP no está instalada.";
@@ -1068,6 +1069,9 @@ class backup_manager
         // Building the unified package re-compresses every file; keep the
         // background phase unbounded just like the files ZIP close.
         @set_time_limit(0);
+        if ($reportProgress) {
+            $this->register_close_heartbeat($zip, $reportProgress, 'unify_closing', 'Creando paquete unificado...', 90);
+        }
 
         if (!$zip->close()) {
             $this->errors[] = "Error al cerrar el paquete unificado.";
@@ -1700,6 +1704,7 @@ class backup_manager
         // max_execution_time: the SSE response is already closed and the client
         // polls for the terminal state.
         @set_time_limit(0);
+        $this->register_close_heartbeat($zip, $reportProgress, 'files_closing', 'Finalizando archivo ZIP...', 88);
 
         if (!$zip->close()) {
             $this->errors[] = "Error al cerrar el archivo ZIP.";
@@ -2524,6 +2529,11 @@ class backup_manager
      */
     private function get_backup_file_path($file)
     {
+        // Never restore an unfinished archive (libzip temp/.part files).
+        if (!self::is_backup_archive_name(basename((string) $file))) {
+            return false;
+        }
+
         // If already full path
         if (file_exists($file)) {
             return $file;
@@ -2813,8 +2823,9 @@ class backup_manager
                 continue;
             }
 
-            // Skip temp directories
-            if (strpos($file, 'temp_') === 0) {
+            // Skip temp directories and anything that is not a finished archive
+            // (e.g. libzip's "<name>.zip.XXXXXX.part" left by a killed close()).
+            if (strpos($file, 'temp_') === 0 || !self::is_backup_archive_name($file)) {
                 continue;
             }
 
@@ -2853,6 +2864,54 @@ class backup_manager
     private function sort_by_timestamp($a, $b)
     {
         return $b['timestamp'] - $a['timestamp'];
+    }
+
+    /**
+     * Refresh the progress snapshot while ZipArchive::close() compresses, so a
+     * live worker keeps a fresh timestamp and a dead one is detected quickly.
+     * Needs PHP >= 8.0 / libzip >= 1.3; older hosts fall back to the slow
+     * staleness window.
+     */
+    private function register_close_heartbeat(ZipArchive $zip, callable $reportProgress, $step, $message, $percent)
+    {
+        if (!method_exists($zip, 'registerProgressCallback')) {
+            return;
+        }
+        $zip->registerProgressCallback(0.01, function ($rate) use ($reportProgress, $step, $message, $percent) {
+            $reportProgress($step, $message . ' ' . (int) round($rate * 100) . '%', $percent);
+        });
+    }
+
+    /**
+     * Delete libzip temp files ("<name>.zip.XXXXXX[.part]") orphaned by a
+     * killed close(). An in-flight close() writes continuously, so only files
+     * untouched for an hour are removed. They are never valid backups.
+     *
+     * @return int Number of files removed.
+     */
+    public function remove_stale_zip_temp_files($maxAgeSeconds = 3600)
+    {
+        $removed = 0;
+        foreach ((array) @scandir($this->backupPath) as $file) {
+            $path = $this->backupPath . DIRECTORY_SEPARATOR . $file;
+            if (preg_match('/\.zip\.[A-Za-z0-9]{6}(\.part)?$/', (string) $file)
+                && is_file($path)
+                && time() - (int) filemtime($path) > $maxAgeSeconds
+                && @unlink($path)) {
+                $removed++;
+            }
+        }
+
+        return $removed;
+    }
+
+    /**
+     * Only finished archives count as backups: libzip writes to a temp
+     * "<name>.zip.XXXXXX.part" and renames it on a successful close().
+     */
+    public static function is_backup_archive_name(string $name): bool
+    {
+        return (bool) preg_match('/\.(zip|sql\.gz)$/i', $name);
     }
 
     /**
