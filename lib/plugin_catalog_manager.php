@@ -96,9 +96,15 @@ class plugin_catalog_manager
             $rawToken = trim((string) ($existing['github_token'] ?? ''));
         }
 
+        $errorCount = count($this->errors);
+        $repo = $this->sanitizeRepo($catalogRepo);
+        if (trim($catalogRepo) !== '' && count($this->errors) > $errorCount) {
+            return false; // invalid "owner/repo": keep the previous config
+        }
+
         $this->config = [
             'github_token' => $this->encryptToken($rawToken),
-            'catalog_repo' => $this->sanitizeRepo($catalogRepo),
+            'catalog_repo' => $repo,
             'catalog_branch' => trim($catalogBranch) !== '' ? trim($catalogBranch) : self::DEFAULT_BRANCH,
             'catalog_file' => trim($catalogFile) !== '' ? trim($catalogFile) : self::DEFAULT_FILE,
             'enabled' => $rawToken !== '',
@@ -191,7 +197,7 @@ class plugin_catalog_manager
 
         $json = function_exists('fs_file_get_contents')
             ? @fs_file_get_contents($rawUrl, 15)
-            : @file_get_contents($rawUrl);
+            : @file_get_contents($rawUrl, false, stream_context_create(['http' => ['timeout' => 15]]));
 
         if (!$json || $json === 'ERROR') {
             $this->errors[] = 'No se pudo descargar el catálogo remoto.';

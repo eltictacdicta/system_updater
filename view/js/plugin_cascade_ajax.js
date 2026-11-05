@@ -35,6 +35,11 @@
 
             var current = items[index++];
             worker(current, index - 1, items.length).done(function (result) {
+                // Step endpoints answer HTTP 200 with success:false on failure.
+                if (!result || result.success === false) {
+                    deferred.reject(result, current);
+                    return;
+                }
                 results.push(result);
                 next();
             }).fail(function (xhr) {

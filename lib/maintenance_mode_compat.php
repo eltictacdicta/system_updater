@@ -65,7 +65,7 @@ function system_updater_maintenance_stealth_required(): bool
 /**
  * Usuarios con actividad reciente (según last_login / last_login_time).
  *
- * @return list<array{nick: string, last_login: string, last_ip: string}>
+ * @return list<array{nick: string, last_login: string}>
  */
 function system_updater_get_recent_active_users(string $excludeNick = '', int $minutesThreshold = 15): array
 {

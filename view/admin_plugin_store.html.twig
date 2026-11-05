@@ -315,7 +315,7 @@
                             <span class="glyphicon glyphicon-gift" aria-hidden="true"></span>&nbsp; Obtener
                         </a>
                         {% elseif plugin.estable is defined and not plugin.estable %}
-                        <button type="button" class="btn btn-xs btn-primary" onclick="return descargar_plugin_publico_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
+                        <button type="button" class="btn btn-xs btn-primary" onclick="return descargar_plugin_publico_inestable_confirm(event, '{{ plugin.id|e('js') }}', '{{ plugin.nombre|e('js') }}');">
                             <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
                         </button>
                         {% else %}
@@ -486,7 +486,7 @@
                                             </button>
                                             {% endif %}
                                         {% elseif plugin.estable is defined and not plugin.estable %}
-                                        <button type="button" class="btn btn-xs btn-warning" onclick="return descargar_plugin_privado_inestable_confirm(event, '{{ plugin.id }}', '{{ plugin.nombre|e('js') }}');">
+                                        <button type="button" class="btn btn-xs btn-warning" onclick="return descargar_plugin_privado_inestable_confirm(event, '{{ plugin.id|e('js') }}', '{{ plugin.nombre|e('js') }}');">
                                             <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>&nbsp; Descargar
                                         </button>
                                         {% else %}

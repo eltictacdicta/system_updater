@@ -138,32 +138,4 @@ class SystemUpdaterUtils
 
         return $returnVar === 0 && is_dir($destination . '/.git');
     }
-
-    /**
-     * Extrae un ZIP de forma segura a un directorio destino.
-     *
-     * @param string $zipPath
-     * @param string $destination
-     * @return bool
-     */
-    public static function extractZip(string $zipPath, string $destination): bool
-    {
-        if (!file_exists($zipPath)) {
-            return false;
-        }
-
-        if (!is_dir($destination)) {
-            @mkdir($destination, 0755, true);
-        }
-
-        $zip = new \ZipArchive();
-        if ($zip->open($zipPath) !== true) {
-            return false;
-        }
-
-        $success = $zip->extractTo($destination);
-        $zip->close();
-
-        return $success;
-    }
 }

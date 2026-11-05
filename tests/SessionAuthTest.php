@@ -69,6 +69,7 @@ final class SessionAuthTest extends TestCase
         ]));
     }
 
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
     public function testResolveCookiePathUsesRootForDocumentRootInstall(): void
     {
         if (defined('FS_PATH')) {

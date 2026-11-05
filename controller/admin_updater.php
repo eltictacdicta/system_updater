@@ -517,7 +517,19 @@ class admin_updater extends fs_controller
      * 
      * @return string|false Nueva versión disponible o false
      */
+    /** @var string|false|null Per-request cache: each fetch can take up to 6 s. */
+    private $coreUpdateCache = null;
+
     private function checkCoreUpdate()
+    {
+        if ($this->coreUpdateCache === null) {
+            $this->coreUpdateCache = $this->resolveCoreUpdate();
+        }
+
+        return $this->coreUpdateCache;
+    }
+
+    private function resolveCoreUpdate()
     {
         $remoteVersion = $this->fetchRemoteCoreVersion();
 
