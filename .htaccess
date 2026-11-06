@@ -46,3 +46,13 @@
         Header set X-Content-Type-Options "nosniff"
     </FilesMatch>
 </IfModule>
+
+# LiteSpeed (lsphp) kills the PHP process as soon as the client connection
+# closes, ignoring ignore_user_abort(). The backup ends the HTTP response with
+# fastcgi_finish_request() before ZipArchive::close() and keeps working in
+# background, so without noabort the worker is killed at 88% ("Abort request
+# processing by PID ..., kill: 1" in the log). Only LiteSpeed reads this block.
+<IfModule LiteSpeed>
+    RewriteEngine On
+    RewriteRule ^process_[a-z_]+\.php$ - [E=noabort:1,E=noconntimeout:1]
+</IfModule>

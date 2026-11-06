@@ -164,4 +164,11 @@ class ProcessBackupTest extends TestCase
             @rmdir($dir);
         }
     }
+
+    public function testLiteSpeedDoesNotKillTheDetachedWorker(): void
+    {
+        // LiteSpeed aborts PHP when the client disconnects unless noabort is set.
+        $htaccess = (string) file_get_contents(FS_FOLDER . '/plugins/system_updater/.htaccess');
+        $this->assertMatchesRegularExpression('/<IfModule LiteSpeed>.*E=noabort:1.*<\/IfModule>/s', $htaccess);
+    }
 }
