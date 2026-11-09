@@ -2147,6 +2147,21 @@ class backup_manager
             if ($tempDir) {
                 $this->delete_directory($tempDir);
             }
+            $this->invalidate_core_schema_stamp();
+        }
+    }
+
+    /**
+     * Tras reemplazar la BD, la siguiente petición debe volver a ejecutar el
+     * self-heal y las migraciones del core: se borran los sellos de
+     * CoreSchemaBootstrap (core >= 0.33; sin sellos no hace nada). Sin usar la
+     * clase del core, porque recovery.php no puede cargar su autoloader.
+     */
+    private function invalidate_core_schema_stamp(): void
+    {
+        $tmpName = defined('FS_TMP_NAME') ? (string) FS_TMP_NAME : '';
+        foreach (glob(rtrim($this->fsRoot, '/') . '/tmp/' . $tmpName . 'core_schema_*.ok') ?: array() as $file) {
+            @unlink($file);
         }
     }
 
@@ -4117,6 +4132,10 @@ class backup_manager
 
                 $mysqli->close();
             }
+        }
+
+        if (in_array($type, array('complete', 'database'), true)) {
+            $this->invalidate_core_schema_stamp();
         }
 
         if (!empty($state['temp_dir']) && is_dir((string) $state['temp_dir'])) {
