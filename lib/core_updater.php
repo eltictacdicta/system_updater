@@ -181,6 +181,7 @@ class core_updater
         }
 
         $this->clearTemplateCache();
+        $this->resetOpcache();
 
         $installedVersion = $this->getInstalledCoreVersion();
         $message = 'Núcleo actualizado correctamente.';
@@ -479,6 +480,18 @@ class core_updater
     /**
      * @return void
      */
+    /**
+     * With opcache.validate_timestamps=0 PHP keeps serving the old compiled
+     * core next to the new files until php-fpm restarts. Best effort:
+     * opcache.restrict_api may forbid it, and the CLI has its own cache.
+     */
+    private function resetOpcache()
+    {
+        if (function_exists('opcache_reset')) {
+            @opcache_reset();
+        }
+    }
+
     private function clearTemplateCache()
     {
         $this->clearDirectoryContents($this->rootPath . '/tmp/twig_cache', true);
