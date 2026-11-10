@@ -273,12 +273,13 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
 
     /**
      * The production shape of the same guarantee: the browser has no `SU_SESS`
-     * cookie yet, so the plugin session is opened on the console's identifier.
-     * Nothing may be lost in that switch.
+     * cookie yet. The plugin session gets its own identifier (never the
+     * console's: sharing it merged both stores), the console session is left
+     * intact and the token lands where the process scripts read it.
      */
     #[Test]
     #[RunInSeparateProcess]
-    public function openingThePluginSessionOnTheConsoleIdentifierLosesNothing(): void
+    public function openingThePluginSessionWithoutACookieLosesNothing(): void
     {
         $consoleId = bin2hex(random_bytes(16));
         $this->openConsoleSession(['user_nick' => 'admin'], $consoleId);
@@ -291,10 +292,17 @@ final class RecoveryMintOrderTest extends ConsoleHttpTestCase
 
         $this->assertIsString($token);
 
-        $shared = $this->sessionFile($consoleId);
-        $this->assertStringContainsString('user_nick', $shared, 'the console identity survives');
-        $this->assertStringContainsString('recovery_console', $shared, 'the marker survives');
-        $this->assertStringContainsString('csrf_tokens', $shared, 'and the token is where the process scripts read it');
+        $pluginId = (string) ($_COOKIE[system_updater_resolve_session_name()] ?? '');
+        $this->assertNotSame('', $pluginId);
+        $this->assertNotSame($consoleId, $pluginId, 'the plugin session has its own identifier');
+
+        $console = $this->sessionFile($consoleId);
+        $this->assertStringContainsString('user_nick', $console, 'the console identity survives');
+        $this->assertStringContainsString('recovery_console', $console, 'the marker survives');
+        $this->assertStringNotContainsString('csrf_tokens', $console, 'no plugin token leaks into it');
+
+        $this->assertStringContainsString('csrf_tokens', $this->sessionFile($pluginId), 'and the token is where the process scripts read it');
+        $this->assertTrue(system_updater_csrf_validate($token));
     }
 
     /**

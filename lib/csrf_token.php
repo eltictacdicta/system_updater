@@ -27,42 +27,58 @@ require_once __DIR__ . '/session_name.php';
 
 /**
  * Ensure the plugin's dedicated session is active.
- * 
- * This function ensures that the plugin uses its own session (SU_SESS_*)
- * instead of the framework session, so tokens are stored in a session
- * that both the controller and SSE scripts can access.
- * 
- * IMPORTANT: If a different session is active (e.g., framework session),
- * this function will close it and start the plugin session. This is intentional
- * because the plugin needs its own session namespace that persists across
- * controller requests and standalone SSE scripts. The framework session data
- * is preserved (session_write_close() saves it), and the framework can
- * continue using its session after this function returns.
+ *
+ * The plugin keeps its tokens in its own session (SU_SESS_*) so the controller
+ * and the standalone SSE scripts share them. When another session is active
+ * (the framework's FSSESS_*), it is written, remembered and closed here, and
+ * system_updater_csrf_restore_session() resumes it afterwards.
+ *
+ * The plugin session never inherits the id of the session it replaces: that
+ * silently merged both stores, and once the framework id rotated (logout/login)
+ * the stale SU_SESS cookie made the framework continue the request with the
+ * plugin's id, so every page rendered a framework CSRF token that was already
+ * gone ("Token de seguridad inválido").
  */
 function system_updater_csrf_ensure_session(): void
 {
-    // If session is already active and it's our plugin session, we're good
+    $expectedName = system_updater_resolve_session_name();
+
     if (session_status() === PHP_SESSION_ACTIVE) {
-        $currentName = session_name();
-        $expectedName = system_updater_resolve_session_name();
-        if ($currentName === $expectedName) {
+        if (session_name() === $expectedName) {
             return;
         }
-        // Session is active but it's not our plugin session
-        // We need to close it and start our own
-        // This is safe: session_write_close() saves the session data
+        $GLOBALS['system_updater_previous_session'] = [session_name(), session_id()];
         session_write_close();
     }
 
-    // Start our plugin session
-    $sessionName = system_updater_resolve_session_name();
-    session_name($sessionName);
-    
-    // Try to resume existing session from cookie
-    if (isset($_COOKIE[$sessionName])) {
-        session_id($_COOKIE[$sessionName]);
+    $cookieId = (string) ($_COOKIE[$expectedName] ?? '');
+    session_name($expectedName);
+    session_id(preg_match('/^[A-Za-z0-9,-]{22,256}$/', $cookieId) === 1 ? $cookieId : session_create_id());
+
+    @session_start();
+    // Later calls in this request must reopen this same session, not mint another one.
+    $_COOKIE[$expectedName] = session_id();
+}
+
+/**
+ * Resume the session that system_updater_csrf_ensure_session() closed, if any.
+ *
+ * No-op when the plugin session was opened from scratch (SSE scripts).
+ */
+function system_updater_csrf_restore_session(): void
+{
+    $previous = $GLOBALS['system_updater_previous_session'] ?? null;
+    if (!is_array($previous)) {
+        return;
     }
-    
+    unset($GLOBALS['system_updater_previous_session']);
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+
+    session_name($previous[0]);
+    session_id($previous[1]);
     @session_start();
 }
 
@@ -98,6 +114,7 @@ function system_updater_csrf_generate(string $tokenId = 'system_updater_csrf'): 
     if (session_status() === PHP_SESSION_ACTIVE) {
         session_write_close();
     }
+    system_updater_csrf_restore_session();
 
     return $token;
 }
@@ -111,12 +128,10 @@ function system_updater_csrf_generate(string $tokenId = 'system_updater_csrf'): 
 function system_updater_csrf_get_stored(string $tokenId = 'system_updater_csrf'): ?string
 {
     system_updater_csrf_ensure_session();
-    
-    if (!isset($_SESSION['system_updater']['csrf_tokens'][$tokenId]['value'])) {
-        return null;
-    }
+    $stored = $_SESSION['system_updater']['csrf_tokens'][$tokenId]['value'] ?? null;
+    system_updater_csrf_restore_session();
 
-    return (string) $_SESSION['system_updater']['csrf_tokens'][$tokenId]['value'];
+    return $stored === null ? null : (string) $stored;
 }
 
 /**
@@ -136,7 +151,18 @@ function system_updater_csrf_validate(string $token, string $tokenId = 'system_u
     }
 
     system_updater_csrf_ensure_session();
+    try {
+        return system_updater_csrf_check_entry($token, $tokenId);
+    } finally {
+        system_updater_csrf_restore_session();
+    }
+}
 
+/**
+ * Token check against the (already active) plugin session.
+ */
+function system_updater_csrf_check_entry(string $token, string $tokenId): bool
+{
     if (!isset($_SESSION['system_updater']['csrf_tokens'][$tokenId])) {
         return false;
     }

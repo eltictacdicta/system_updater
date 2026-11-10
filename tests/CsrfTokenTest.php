@@ -12,8 +12,49 @@ final class CsrfTokenTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        // Clean session state before each test
+        // Each test starts from a fresh framework-like session and no plugin cookie.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+        unset($_COOKIE[system_updater_resolve_session_name()], $GLOBALS['system_updater_previous_session']);
+        session_name('PHPSESSID');
+        session_id(session_create_id());
         $_SESSION = [];
+    }
+
+    /** Reads a slot from the plugin store, leaving the caller's session as it was. */
+    private function pluginSlot(string $slot = 'system_updater_csrf'): ?array
+    {
+        system_updater_csrf_ensure_session();
+        $entry = $_SESSION['system_updater']['csrf_tokens'][$slot] ?? null;
+        system_updater_csrf_restore_session();
+
+        return $entry;
+    }
+
+    /**
+     * Regression: minting from a page must not hijack the framework session.
+     * Inheriting its id made the framework continue the request on the plugin's
+     * session after a logout/login, so its own CSRF token was always invalid.
+     */
+    #[Test]
+    public function generatingKeepsTheFrameworkSessionIntact(): void
+    {
+        session_name('FSSESS_regression');
+        @session_start();
+        $frameworkId = session_id();
+        $_SESSION['_csrf'] = ['fs_form' => 'framework-token'];
+        $_COOKIE[system_updater_resolve_session_name()] = 'stalecookieid0123456789abcdef'; // destroyed on logout
+
+        $token = system_updater_csrf_generate();
+
+        $this->assertSame('FSSESS_regression', session_name());
+        $this->assertSame($frameworkId, session_id());
+        $this->assertSame('framework-token', $_SESSION['_csrf']['fs_form'] ?? null);
+        $this->assertArrayNotHasKey('system_updater', $_SESSION, 'plugin tokens live in their own session');
+        $this->assertNotSame($frameworkId, $_COOKIE[system_updater_resolve_session_name()]);
+        $this->assertTrue(system_updater_csrf_validate($token));
+        $this->assertSame($frameworkId, session_id(), 'validating also resumes the framework session');
     }
 
     #[Test]
@@ -29,11 +70,9 @@ final class CsrfTokenTest extends TestCase
 
         $this->assertSame(64, strlen($token), 'Token must be 64-char hex (bin2hex of 32 bytes)');
         $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $token);
-        $this->assertSame(
-            $token,
-            $_SESSION['system_updater']['csrf_tokens']['system_updater_csrf']['value']
-        );
-        $this->assertArrayHasKey('created_at', $_SESSION['system_updater']['csrf_tokens']['system_updater_csrf']);
+        $slot = $this->pluginSlot();
+        $this->assertSame($token, $slot['value'] ?? null);
+        $this->assertArrayHasKey('created_at', $slot);
     }
 
     #[Test]
@@ -48,10 +87,7 @@ final class CsrfTokenTest extends TestCase
         $token2 = system_updater_csrf_generate();
 
         $this->assertNotSame($token1, $token2);
-        $this->assertSame(
-            $token2,
-            $_SESSION['system_updater']['csrf_tokens']['system_updater_csrf']['value']
-        );
+        $this->assertSame($token2, $this->pluginSlot()['value'] ?? null);
     }
 
     #[Test]
@@ -192,10 +228,8 @@ final class CsrfTokenTest extends TestCase
 
         $html = system_updater_csrf_field();
 
-        // Token should now exist in session
-        $this->assertArrayHasKey('system_updater', $_SESSION);
-        $this->assertArrayHasKey('csrf_tokens', $_SESSION['system_updater']);
-        $this->assertArrayHasKey('system_updater_csrf', $_SESSION['system_updater']['csrf_tokens']);
+        // Token should now exist in the plugin store
+        $this->assertNotNull($this->pluginSlot());
         $this->assertStringContainsString('value="', $html);
         // Value should not be empty
         $this->assertDoesNotMatchRegularExpression('/value=""/', $html);
@@ -211,7 +245,7 @@ final class CsrfTokenTest extends TestCase
 
         $html = system_updater_csrf_meta();
 
-        $this->assertArrayHasKey('system_updater', $_SESSION);
+        $this->assertNotNull($this->pluginSlot());
         $this->assertStringContainsString('content="', $html);
         $this->assertDoesNotMatchRegularExpression('/content=""/', $html);
     }
