@@ -556,8 +556,9 @@ class backup_manager
      */
     private static function is_dir_usable(string $dir): bool
     {
-        if (is_dir($dir)) {
-            return is_writable($dir);
+        // @: candidates outside open_basedir (shared hosting) warn on every probe; they are simply unusable.
+        if (@is_dir($dir)) {
+            return @is_writable($dir);
         }
         return @mkdir($dir, 0700, true) === true;
     }
@@ -1139,19 +1140,21 @@ class backup_manager
         }
 
         if ($dbType === 'POSTGRESQL') {
-            if (!$this->shell_command_available('pg_dump') || !$this->shell_command_available('gzip')) {
-                $this->errors[] = "No se encontraron los comandos pg_dump/gzip necesarios para exportar PostgreSQL.";
-                return array('success' => false, 'file' => null, 'error' => 'pg_dump or gzip not available');
+            if (!$this->shell_command_available('pg_dump')) {
+                $this->errors[] = "No se encontró el comando pg_dump necesario para exportar PostgreSQL.";
+                return array('success' => false, 'file' => null, 'error' => 'pg_dump not available');
             }
 
-            // PostgreSQL backup
+            // pg_dump compresses itself (gzip) so the exit code is pg_dump's: piping into gzip
+            // reported gzip's status and saved a failed dump (error text) as a valid backup.
+            // --no-owner/--no-privileges: restorable by whichever role the target install uses.
             $command = sprintf(
-                'pg_dump --host=%s --port=%s --username=%s %s 2>&1 | gzip > %s',
+                'pg_dump --host=%s --port=%s --username=%s --no-owner --no-privileges --compress=6 --file=%s %s 2>&1',
                 escapeshellarg($dbHost),
                 escapeshellarg($dbPort),
                 escapeshellarg($dbUser),
-                escapeshellarg($dbName),
-                escapeshellarg($filePath)
+                escapeshellarg($filePath),
+                escapeshellarg($dbName)
             );
             putenv('PGPASSWORD=' . $dbPass);
         } else {
@@ -2485,43 +2488,39 @@ class backup_manager
             return $result;
         }
 
-        $reportProgress('db_clean', 'Limpiando base de datos PostgreSQL...', 60);
-
-        // Limpiar todas las tablas en PostgreSQL
-        $command = sprintf(
-            'PGPASSWORD=%s psql --host=%s --port=%s --username=%s -d %s -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>&1',
-            escapeshellarg($dbPass),
-            escapeshellarg($dbHost),
-            escapeshellarg($dbPort),
-            escapeshellarg($dbUser),
-            escapeshellarg($dbName)
-        );
-
-        $cleanOutput = array();
-        $cleanReturnVar = 0;
-        exec($command, $cleanOutput, $cleanReturnVar);
-
-        if ($cleanReturnVar !== 0) {
-            $this->errors[] = 'Error al limpiar PostgreSQL antes de restaurar: ' . implode("\n", $cleanOutput);
-            $reportProgress('db_error', 'Error limpiando la base de datos PostgreSQL', 60);
+        $integrity = array();
+        $integrityVar = 0;
+        exec('gzip -t ' . escapeshellarg($backupPath) . ' 2>&1', $integrity, $integrityVar);
+        if ($integrityVar !== 0) {
+            $this->errors[] = 'El fichero de backup PostgreSQL está dañado: ' . implode("\n", $integrity);
+            $reportProgress('db_error', 'Backup PostgreSQL dañado', 60);
             return $result;
         }
 
         $reportProgress('db_import', 'Importando backup PostgreSQL...', 65);
 
+        // One psql run, one transaction: schema wipe + import commit together or not at all.
+        // ON_ERROR_STOP makes any SQL error fail (and roll back) instead of exiting 0 with a
+        // half-restored database; before, the schema was dropped first and a failed import left it empty.
         $command = sprintf(
-            'gunzip -c %s | PGPASSWORD=%s psql --host=%s --port=%s --username=%s -d %s 2>&1',
+            // shortcut: drops the one known harmless SET that a newer pg_dump (17+) emits and an older
+            // server rejects; other cross-version dump features still fail (and roll back) loudly.
+            'gunzip -c %s | sed %s | psql --host=%s --port=%s --username=%s -d %s -X -q -v ON_ERROR_STOP=1 --single-transaction'
+            . ' -c %s -f - 2>&1',
             escapeshellarg($backupPath),
-            escapeshellarg($dbPass),
+            escapeshellarg('/^SET transaction_timeout = /d'),
             escapeshellarg($dbHost),
             escapeshellarg($dbPort),
             escapeshellarg($dbUser),
-            escapeshellarg($dbName)
+            escapeshellarg($dbName),
+            escapeshellarg('DROP SCHEMA public CASCADE; CREATE SCHEMA public;')
         );
 
         $output = array();
         $returnVar = 0;
+        putenv('PGPASSWORD=' . $dbPass); // env, not argv: argv is visible in `ps`
         exec($command, $output, $returnVar);
+        putenv('PGPASSWORD');
 
         if ($returnVar !== 0) {
             $this->errors[] = "Error al restaurar PostgreSQL: " . implode("\n", $output);
