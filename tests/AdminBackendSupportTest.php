@@ -12,20 +12,16 @@ require_once dirname(__DIR__) . '/lib/session_auth.php';
 /**
  * The guard's database backend contract.
  *
- * `system_updater_resolve_admin_verdict()` reads `fs_users` through `mysqli`.
- * That is the only client the plugin ships: `recovery.php` and the PHP-native
- * backup path in `lib/backup_manager.php` connect the same way. The PostgreSQL
- * branches of `backup_manager` shell out to `pg_dump`/`psql`; they never give
- * PHP a PostgreSQL reader.
- *
- * So on a PostgreSQL install the guard cannot verify anybody. Before this
+ * `system_updater_resolve_admin_verdict()` reads `fs_users` through `mysqli`
+ * (MySQL/MariaDB) or `pgsql` (PostgreSQL). On any other backend the guard
+ * cannot verify anybody. Before this
  * contract it failed *silently*: `null` from the resolver collapsed into the
  * uniform "unauthenticated" denial and an operator saw every administrator
  * refused with no cause named anywhere. Fail-closed is correct; mute is not.
  *
  * These cases pin the loud half without weakening the closed half:
  *  - the backend is classified before any connection is attempted;
- *  - a non-MySQL backend is refused, never accepted;
+ *  - a backend without a reader is refused, never accepted;
  *  - the refusal is recorded once per process, naming the backend and the
  *    limitation, where an operator reads errors;
  *  - the decision the *caller* receives stays byte-identical to the anonymous
@@ -76,11 +72,15 @@ final class AdminBackendSupportTest extends TestCase
             'mysql with padding' => ['  MySql  ', 'MYSQL'],
             'mariadb is a mysql protocol' => ['MARIADB', 'MYSQL'],
             'empty falls back to the mysql default' => ['', 'MYSQL'],
+            'postgresql canonical' => ['POSTGRESQL', 'POSTGRESQL'],
+            'postgresql lower case' => ['postgresql', 'POSTGRESQL'],
+            'postgres alias' => ['POSTGRES', 'POSTGRESQL'],
+            'pgsql alias' => ['PGSQL', 'POSTGRESQL'],
         ];
     }
 
     #[DataProvider('supportedBackendProvider')]
-    public function testMysqlFamilyBackendsAreSupported(string $dbType, string $expectedBackend): void
+    public function testReadableBackendsAreSupported(string $dbType, string $expectedBackend): void
     {
         $support = system_updater_admin_backend_support($dbType);
 
@@ -95,17 +95,13 @@ final class AdminBackendSupportTest extends TestCase
     public static function unsupportedBackendProvider(): array
     {
         return [
-            'postgresql canonical' => ['POSTGRESQL', 'POSTGRESQL'],
-            'postgresql lower case' => ['postgresql', 'POSTGRESQL'],
-            'postgres alias' => ['POSTGRES', 'POSTGRESQL'],
-            'pgsql alias' => ['PGSQL', 'POSTGRESQL'],
             'sqlite' => ['SQLITE', 'SQLITE'],
             'oracle' => ['oracle', 'ORACLE'],
         ];
     }
 
     #[DataProvider('unsupportedBackendProvider')]
-    public function testNonMysqlBackendsAreUnsupportedAndNamed(string $dbType, string $expectedBackend): void
+    public function testBackendsWithoutAReaderAreUnsupportedAndNamed(string $dbType, string $expectedBackend): void
     {
         $support = system_updater_admin_backend_support($dbType);
 
@@ -133,11 +129,11 @@ final class AdminBackendSupportTest extends TestCase
     {
         $message = system_updater_admin_read_diagnostic_message(
             SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED,
-            'POSTGRESQL'
+            'SQLITE'
         );
 
         $this->assertStringContainsString('system_updater', $message, 'the line must name its origin');
-        $this->assertStringContainsString('POSTGRESQL', $message, 'the operator must know which backend');
+        $this->assertStringContainsString('SQLITE', $message, 'the operator must know which backend');
         $this->assertStringContainsString('mysqli', $message, 'the operator must know what is missing');
         $this->assertStringNotContainsString(
             SYSTEM_UPDATER_GUARD_REASON_UNAUTHENTICATED,
@@ -147,16 +143,16 @@ final class AdminBackendSupportTest extends TestCase
     }
 
     /**
-     * The load-bearing case: a PostgreSQL install loses every administrator,
-     * and now says so instead of pretending nobody is logged in.
+     * The load-bearing case: an install on a backend without a reader loses
+     * every administrator, and says so instead of pretending nobody is logged in.
      */
     public function testResolverRefusesAndLogsOnceOnAnUnsupportedBackend(): void
     {
-        $support = system_updater_admin_backend_support('POSTGRESQL');
-        $this->assertFalse($support['supported'], 'premise: PostgreSQL is not readable by this guard');
+        $support = system_updater_admin_backend_support('SQLITE');
+        $this->assertFalse($support['supported'], 'premise: SQLite is not readable by this guard');
 
-        $first = system_updater_resolve_admin_verdict('admin', 'POSTGRESQL');
-        $second = system_updater_resolve_admin_verdict('admin', 'POSTGRESQL');
+        $first = system_updater_resolve_admin_verdict('admin', 'SQLITE');
+        $second = system_updater_resolve_admin_verdict('admin', 'SQLITE');
 
         $this->assertNull($first, 'an unreadable backend is "no verdict", never an accept');
         $this->assertNull($second, 'repeat polls stay closed');
@@ -164,7 +160,7 @@ final class AdminBackendSupportTest extends TestCase
 
         $lines = $this->diagnosticLines();
         $this->assertCount(1, $lines, 'one line per process, not one per poll: ' . implode("\n", $lines));
-        $this->assertStringContainsString('POSTGRESQL', $lines[0]);
+        $this->assertStringContainsString('SQLITE', $lines[0]);
         $this->assertStringContainsString('mysqli', $lines[0]);
     }
 
@@ -191,7 +187,7 @@ final class AdminBackendSupportTest extends TestCase
                 'last_activity' => time(),
             ]],
             [],
-            static fn (string $nick): ?bool => system_updater_resolve_admin_verdict($nick, 'POSTGRESQL')
+            static fn (string $nick): ?bool => system_updater_resolve_admin_verdict($nick, 'SQLITE')
         );
 
         $this->assertSame(
@@ -270,6 +266,22 @@ final class AdminBackendSupportTest extends TestCase
             $lines[0],
             'the operator line must not be the caller-facing reason'
         );
+    }
+
+    /** A PostgreSQL install needs the pgsql extension, and the line says so. */
+    public function testAMissingPgsqlExtensionIsReportedAndRefused(): void
+    {
+        $constants = ['FS_DB_HOST', 'FS_DB_USER', 'FS_DB_NAME'];
+
+        $availability = system_updater_admin_read_availability(false, $constants, 'POSTGRESQL');
+        $this->assertSame(['pgsql'], $availability['missing']);
+
+        $this->assertNull(system_updater_resolve_admin_verdict('admin', 'POSTGRESQL', false, $constants));
+
+        $lines = $this->diagnosticLines();
+        $this->assertCount(1, $lines);
+        $this->assertStringContainsString('pgsql', $lines[0]);
+        $this->assertStringContainsString('POSTGRESQL', $lines[0]);
     }
 
     /**

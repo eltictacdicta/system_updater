@@ -681,17 +681,16 @@ function system_updater_guard_decision(array $sessions, array $request, callable
 }
 
 /**
- * The only database backend this guard can read `fs_users` through.
- *
- * One client, one backend: `mysqli`. `recovery.php` connects the same way.
- * (`lib/backup_manager.php` reads PostgreSQL for backups — `pg_dump`/`psql` or
- * `lib/pg_native_dump.php` — but this guard does not.) A PostgreSQL
- * install is therefore a supported target for backups and an unreadable one
- * for this guard, which is why the backend has to be *classified* before a
- * connection is attempted instead of being discovered by a failed connect.
+ * Database backends this guard reads `fs_users` through: MySQL/MariaDB via
+ * `mysqli` and PostgreSQL via the `pgsql` extension. Anything else is
+ * *classified* as unsupported before a connection is attempted instead of
+ * being discovered by a failed connect.
  */
 if (!defined('SYSTEM_UPDATER_GUARD_BACKEND_MYSQL')) {
     define('SYSTEM_UPDATER_GUARD_BACKEND_MYSQL', 'MYSQL');
+}
+if (!defined('SYSTEM_UPDATER_GUARD_BACKEND_POSTGRESQL')) {
+    define('SYSTEM_UPDATER_GUARD_BACKEND_POSTGRESQL', 'POSTGRESQL');
 }
 
 /**
@@ -747,7 +746,7 @@ function system_updater_normalize_database_backend(?string $dbType = null): stri
     }
 
     if (in_array($normalized, ['POSTGRES', 'POSTGRESQL', 'PGSQL'], true)) {
-        return 'POSTGRESQL';
+        return SYSTEM_UPDATER_GUARD_BACKEND_POSTGRESQL;
     }
 
     return $normalized;
@@ -765,7 +764,7 @@ function system_updater_normalize_database_backend(?string $dbType = null): stri
 function system_updater_admin_backend_support(?string $dbType = null): array
 {
     $backend = system_updater_normalize_database_backend($dbType);
-    $supported = $backend === SYSTEM_UPDATER_GUARD_BACKEND_MYSQL;
+    $supported = in_array($backend, [SYSTEM_UPDATER_GUARD_BACKEND_MYSQL, SYSTEM_UPDATER_GUARD_BACKEND_POSTGRESQL], true);
 
     return [
         'backend' => $backend,
@@ -801,18 +800,23 @@ function system_updater_admin_read_required_constants(): array
  * Precedence is deliberate: no client outranks no configuration, because
  * installing the extension is a prerequisite for the constants to matter.
  *
- * @param bool|null $mysqliAvailable override for "mysqli is loaded"
+ * @param bool|null $mysqliAvailable override for "the backend's client extension is loaded"
  * @param array<int, string>|null $definedConstants override for "which of the
  *        required constants exist"; `null` asks PHP
+ * @param string $backend normalized backend whose client is required
  * @return array{available: bool, diagnostic: string, missing: array<int, string>}
  */
-function system_updater_admin_read_availability(?bool $mysqliAvailable = null, ?array $definedConstants = null): array
-{
-    if (($mysqliAvailable ?? class_exists('mysqli')) !== true) {
+function system_updater_admin_read_availability(
+    ?bool $mysqliAvailable = null,
+    ?array $definedConstants = null,
+    string $backend = SYSTEM_UPDATER_GUARD_BACKEND_MYSQL
+): array {
+    $isPostgres = $backend === SYSTEM_UPDATER_GUARD_BACKEND_POSTGRESQL;
+    if (($mysqliAvailable ?? ($isPostgres ? function_exists('pg_connect') : class_exists('mysqli'))) !== true) {
         return [
             'available' => false,
             'diagnostic' => SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING,
-            'missing' => ['mysqli'],
+            'missing' => [$isPostgres ? 'pgsql' : 'mysqli'],
         ];
     }
 
@@ -849,16 +853,16 @@ function system_updater_admin_read_diagnostic_message(string $diagnostic, string
 {
     if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_BACKEND_UNSUPPORTED) {
         return 'system_updater: no se puede verificar la cuenta de administrador. Este guard solo'
-            . ' lee fs_users con mysqli y la instalación usa el motor ' . $backend . '. Toda acción'
-            . ' protegida (status, progress, descargas) será rechazada hasta que la instalación use'
-            . ' MySQL/MariaDB o el guard incorpore un lector para ' . $backend . '.';
+            . ' lee fs_users con mysqli (MySQL/MariaDB) o pgsql (PostgreSQL) y la instalación usa el motor '
+            . $backend . '. Toda acción protegida (status, progress, descargas) será rechazada.';
     }
 
     if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_MYSQLI_MISSING) {
-        return 'system_updater: no se puede verificar la cuenta de administrador. La extensión mysqli de'
-            . ' PHP no está cargada en este proceso y es el único cliente con el que este guard lee'
-            . ' fs_users. Toda acción protegida (status, progress, descargas) será rechazada hasta que la'
-            . ' extensión esté disponible.';
+        $extension = $missing[0] ?? 'mysqli';
+        return 'system_updater: no se puede verificar la cuenta de administrador. La extensión ' . $extension
+            . ' de PHP no está cargada en este proceso y es el cliente con el que este guard lee'
+            . ' fs_users en ' . $backend . '. Toda acción protegida (status, progress, descargas) será'
+            . ' rechazada hasta que la extensión esté disponible.';
     }
 
     if ($diagnostic === SYSTEM_UPDATER_GUARD_DIAGNOSTIC_DB_CONFIG_MISSING) {
@@ -978,15 +982,19 @@ function system_updater_resolve_admin_verdict(
     // Then classify the reader environment for the same reason: a missing
     // extension and a broken config.php are operator problems that used to
     // present as "you are not logged in".
-    $availability = system_updater_admin_read_availability($mysqliAvailable, $definedConstants);
+    $availability = system_updater_admin_read_availability($mysqliAvailable, $definedConstants, $backendSupport['backend']);
     if (!$availability['available']) {
         system_updater_report_admin_read_unavailable(
             $availability['diagnostic'],
-            SYSTEM_UPDATER_GUARD_BACKEND_MYSQL,
+            $backendSupport['backend'],
             $availability['missing']
         );
 
         return null;
+    }
+
+    if ($backendSupport['backend'] === SYSTEM_UPDATER_GUARD_BACKEND_POSTGRESQL) {
+        return system_updater_resolve_admin_verdict_postgresql($nick);
     }
 
     $link = null;
@@ -1028,6 +1036,54 @@ function system_updater_resolve_admin_verdict(
 
         if ($link instanceof \mysqli) {
             @$link->close();
+        }
+    }
+}
+
+/**
+ * PostgreSQL half of {@see system_updater_resolve_admin_verdict()}: same
+ * contract (true/false/null), read with the pgsql extension.
+ */
+function system_updater_resolve_admin_verdict_postgresql(string $nick): ?bool
+{
+    // libpq conninfo: values single-quoted, \ and ' escaped (spaces/quotes in passwords).
+    $parts = [];
+    foreach ([
+        'host' => (string) FS_DB_HOST,
+        'port' => defined('FS_DB_PORT') ? (string) FS_DB_PORT : '',
+        'dbname' => (string) FS_DB_NAME,
+        'user' => (string) FS_DB_USER,
+        'password' => defined('FS_DB_PASS') ? (string) FS_DB_PASS : '',
+    ] as $key => $value) {
+        if ($value !== '') {
+            $parts[] = $key . "='" . addcslashes($value, "'\\") . "'";
+        }
+    }
+
+    $conn = false;
+    try {
+        $conn = @pg_connect(implode(' ', $parts), PGSQL_CONNECT_FORCE_NEW);
+        if ($conn === false) {
+            return null;
+        }
+
+        $result = @pg_query_params($conn, 'SELECT admin FROM fs_users WHERE nick = $1 LIMIT 1', [$nick]);
+        if ($result === false) {
+            return null;
+        }
+
+        $row = pg_fetch_assoc($result);
+        if (!is_array($row)) {
+            return false;
+        }
+
+        // boolean arrives as 't'/'f' (a non-empty 'f' must not count as admin).
+        return in_array(strtolower((string) $row['admin']), ['t', 'true', '1'], true);
+    } catch (\Throwable $error) {
+        return null;
+    } finally {
+        if ($conn !== false) {
+            @pg_close($conn);
         }
     }
 }
