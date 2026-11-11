@@ -63,6 +63,7 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
         'lib/recovery_login_token.php',
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',
+        'lib/pg_native_dump.php',
         'lib/session_name.php',
         'lib/csrf_token.php',
         'lib/recovery_csrf.php',
@@ -80,6 +81,7 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
         self::PLUGIN . '/lib/SqlDumpReader.php',
         self::PLUGIN . '/lib/backup_manager.php',
         self::PLUGIN . '/lib/csrf_token.php',
+        self::PLUGIN . '/lib/pg_native_dump.php',
         self::PLUGIN . '/lib/recovery_csrf.php',
         self::PLUGIN . '/lib/recovery_handler.php',
         self::PLUGIN . '/lib/recovery_legacy_hash.php',
@@ -286,7 +288,7 @@ final class RecoveryIncludeGraphTest extends ConsoleHttpTestCase
             copy(dirname(__DIR__) . '/lib/' . $file, $library . '/' . $file);
         }
 
-        foreach (['recovery_secret.php', 'recovery_session.php', 'backup_manager.php', 'SqlDumpReader.php'] as $file) {
+        foreach (['recovery_secret.php', 'recovery_session.php', 'backup_manager.php', 'SqlDumpReader.php', 'pg_native_dump.php'] as $file) {
             copy(dirname(__DIR__) . '/lib/' . $file, $library . '/' . $file);
         }
 

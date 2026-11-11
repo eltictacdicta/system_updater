@@ -683,9 +683,9 @@ function system_updater_guard_decision(array $sessions, array $request, callable
 /**
  * The only database backend this guard can read `fs_users` through.
  *
- * One client, one backend: `mysqli`. `recovery.php` connects the same way, and
- * `lib/backup_manager.php`'s PostgreSQL branches only shell out to
- * `pg_dump`/`psql` — they never hand PHP a PostgreSQL reader. A PostgreSQL
+ * One client, one backend: `mysqli`. `recovery.php` connects the same way.
+ * (`lib/backup_manager.php` reads PostgreSQL for backups — `pg_dump`/`psql` or
+ * `lib/pg_native_dump.php` — but this guard does not.) A PostgreSQL
  * install is therefore a supported target for backups and an unreadable one
  * for this guard, which is why the backend has to be *classified* before a
  * connection is attempted instead of being discovered by a failed connect.

@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/SqlDumpReader.php';
+require_once __DIR__ . '/pg_native_dump.php';
 
 /**
  * MySQL helper used by the standalone backup manager.
@@ -1133,16 +1134,14 @@ class backup_manager
         if (!$this->shell_functions_available()) {
             // Use PHP-native backup method
             if ($dbType === 'POSTGRESQL') {
-                $this->errors[] = "El backup nativo de PostgreSQL no está soportado en servidores con funciones shell deshabilitadas.";
-                return array('success' => false, 'file' => null, 'error' => 'PostgreSQL native backup not supported');
+                return $this->create_database_backup_postgresql_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
             }
             return $this->create_database_backup_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
         }
 
         if ($dbType === 'POSTGRESQL') {
             if (!$this->shell_command_available('pg_dump')) {
-                $this->errors[] = "No se encontró el comando pg_dump necesario para exportar PostgreSQL.";
-                return array('success' => false, 'file' => null, 'error' => 'pg_dump not available');
+                return $this->create_database_backup_postgresql_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName);
             }
 
             // pg_dump compresses itself (gzip) so the exit code is pg_dump's: piping into gzip
@@ -2193,10 +2192,8 @@ class backup_manager
         }
 
         if ($dbType === 'POSTGRESQL') {
-            if (!$this->shell_functions_available()) {
-                $this->errors[] = "La restauración de PostgreSQL no está soportada en servidores con funciones shell deshabilitadas.";
-                $reportProgress('db_error', 'PostgreSQL no soportado sin funciones shell', 55);
-                return $result;
+            if (!$this->shell_command_available('psql') || !$this->shell_command_available('gunzip')) {
+                return $this->restore_database_postgresql_native($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress, $result);
             }
             return $this->restore_database_postgresql($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress, $result);
         }
@@ -2473,6 +2470,109 @@ class backup_manager
 
         $result['success'] = true;
         $this->messages[] = "Base de datos restaurada (modo nativo): {$statementCount} sentencias ejecutadas";
+
+        return $result;
+    }
+
+    /**
+     * PostgreSQL backup without shell functions or pg_dump (pgsql extension).
+     *
+     * @return array
+     */
+    private function create_database_backup_postgresql_native($filePath, $fileName, $dbHost, $dbPort, $dbUser, $dbPass, $dbName)
+    {
+        if (!function_exists('pg_connect')) {
+            $this->errors[] = 'No se puede exportar PostgreSQL: falta la extensión pgsql de PHP y no hay pg_dump disponible.';
+            return array('success' => false, 'file' => null, 'error' => 'pgsql extension not available');
+        }
+
+        // Written as .part (never listed as a backup) and renamed only when complete,
+        // so a dump killed half way (e.g. by the host time limit) never looks valid.
+        $partPath = $filePath . '.part';
+        $gz = @gzopen($partPath, 'wb6');
+        if (!$gz) {
+            $this->errors[] = 'No se puede crear el archivo de backup comprimido.';
+            return array('success' => false, 'file' => null, 'error' => 'Cannot create gzip file');
+        }
+
+        $conn = null;
+        try {
+            $conn = pg_native_dump::connect((string) $dbHost, (string) $dbPort, (string) $dbUser, (string) $dbPass, (string) $dbName);
+            $dump = new pg_native_dump($conn);
+            $tableCount = $dump->dump($gz, (string) $dbName);
+            $closed = gzclose($gz);
+            $gz = null;
+            if (!$closed || !@rename($partPath, $filePath)) {
+                throw new RuntimeException('No se pudo cerrar el archivo de backup.');
+            }
+        } catch (RuntimeException $e) {
+            if ($gz) {
+                gzclose($gz);
+            }
+            @unlink($partPath);
+            $this->errors[] = 'Error al exportar PostgreSQL (modo nativo): ' . $e->getMessage();
+            return array('success' => false, 'file' => null, 'error' => $e->getMessage());
+        } finally {
+            if ($conn) {
+                pg_close($conn);
+            }
+        }
+
+        foreach ($dump->warnings as $warning) {
+            $this->messages[] = $warning;
+        }
+        $this->messages[] = 'Copia de base de datos creada (modo nativo): ' . $fileName . ' (' . $tableCount . ' tablas)';
+
+        return array(
+            'success' => true,
+            'file' => $fileName,
+            'path' => $filePath,
+            'size' => filesize($filePath),
+            'size_formatted' => $this->format_bytes(filesize($filePath)),
+        );
+    }
+
+    /**
+     * PostgreSQL restore without shell functions or psql (pgsql extension).
+     * Atomic: on any error the database is left as it was.
+     */
+    private function restore_database_postgresql_native($backupPath, $dbHost, $dbPort, $dbUser, $dbPass, $dbName, $reportProgress, $result)
+    {
+        if (!function_exists('pg_connect')) {
+            $this->errors[] = 'No se puede restaurar PostgreSQL: falta la extensión pgsql de PHP y no hay psql disponible.';
+            $reportProgress('db_error', 'Extensión pgsql no disponible', 60);
+            return $result;
+        }
+
+        $gz = @gzopen($backupPath, 'rb');
+        if (!$gz) {
+            $this->errors[] = 'No se puede abrir el archivo de backup.';
+            $reportProgress('db_error', 'No se puede abrir el backup', 60);
+            return $result;
+        }
+
+        $reportProgress('db_import_native', 'Importando backup PostgreSQL (modo nativo PHP)...', 65);
+
+        $conn = null;
+        try {
+            $conn = pg_native_dump::connect((string) $dbHost, (string) $dbPort, (string) $dbUser, (string) $dbPass, (string) $dbName);
+            (new pg_native_dump($conn))->restore($gz, static function (int $count) use ($reportProgress) {
+                $reportProgress('db_import_native', 'Sentencias importadas: ' . $count, 75);
+            });
+        } catch (RuntimeException $e) {
+            $this->errors[] = 'Error al restaurar PostgreSQL (modo nativo): ' . $e->getMessage();
+            $reportProgress('db_error', 'Error: ' . $e->getMessage(), 90);
+            return $result;
+        } finally {
+            gzclose($gz);
+            if ($conn) {
+                pg_close($conn);
+            }
+        }
+
+        $result['success'] = true;
+        $this->messages[] = 'PostgreSQL restaurado correctamente (modo nativo)';
+        $reportProgress('db_done', '¡Base de datos restaurada!', 95);
 
         return $result;
     }
@@ -3362,13 +3462,6 @@ class backup_manager
 
         $state = $this->restore_session_initial_state($sessionId, $backupFile, $restoreType);
 
-        if ($restoreType !== 'files' && $this->get_database_type() === 'POSTGRESQL') {
-            $message = 'El modo de restauración resumible solo soporta MySQL. '
-                . 'PostgreSQL requiere shell, deshabilitado en producción.';
-            $this->errors[] = $message;
-            return $this->restore_session_response(false, false, $message, 'prepare', $message, 0, $state);
-        }
-
         $this->restore_session_save($state);
 
         return $this->restore_session_step($state, $budget);
@@ -3637,7 +3730,12 @@ class backup_manager
             $state['db_backup_path'] = $dbBackupPath;
         }
 
-        if ($needsDatabase) {
+        if ($needsDatabase && $this->get_database_type() === 'POSTGRESQL') {
+            // PostgreSQL imports the .gz in one atomic transaction (import phase):
+            // no decompress/users/drop phases, which exist for MySQL's stepped import.
+            $next = $type === 'complete' ? 'files' : 'import';
+            $message = 'Paquete preparado.';
+        } elseif ($needsDatabase) {
             $next = 'decompress';
             $message = 'Paquete preparado. Descomprimiendo el dump...';
         } else {
@@ -3802,7 +3900,7 @@ class backup_manager
         }
 
         $state['files_done'] = true;
-        $next = $type === 'complete' ? 'drop' : 'cleanup';
+        $next = $type !== 'complete' ? 'cleanup' : ($this->get_database_type() === 'POSTGRESQL' ? 'import' : 'drop');
         $this->restore_add_warning_if_slow($state, 'files', $startedAt, $deadline);
 
         return $this->restore_unit(true, $next, 'files', 'Archivos restaurados correctamente.', 50);
@@ -3873,6 +3971,10 @@ class backup_manager
      */
     private function restore_step_import(array &$state, float $deadline): array
     {
+        if ($this->get_database_type() === 'POSTGRESQL') {
+            return $this->restore_step_import_postgresql($state, $deadline);
+        }
+
         $dumpPath = isset($state['dump_path']) ? (string) $state['dump_path'] : '';
         if ($dumpPath === '' || !is_file($dumpPath)) {
             return $this->restore_fatal('import', 'No se encontró el dump SQL temporal.', 65, 'cleanup');
@@ -3978,6 +4080,30 @@ class backup_manager
             'Importando sentencias (' . (int) $state['statement_count'] . ')...',
             min(88, $percent)
         );
+    }
+
+    /**
+     * Fase import en PostgreSQL: una sola unidad no reanudable, porque la
+     * restauración es una transacción (todo o nada) que no puede repartirse
+     * entre peticiones. Usa psql si hay shell y, si no, el modo nativo PHP.
+     */
+    private function restore_step_import_postgresql(array &$state, float $deadline): array
+    {
+        $startedAt = microtime(true);
+        $dbBackupPath = isset($state['db_backup_path']) ? (string) $state['db_backup_path'] : '';
+        if ($dbBackupPath === '' || !is_file($dbBackupPath)) {
+            return $this->restore_fatal('import', 'No se encontró el dump comprimido del backup.', 65, 'cleanup');
+        }
+
+        $result = $this->execute_database_restore($dbBackupPath, static function () {
+        }, array('success' => false));
+        if (!($result['success'] ?? false)) {
+            return $this->restore_fatal('import', $this->last_error_message('Error al restaurar PostgreSQL.'), 65, 'cleanup');
+        }
+
+        $this->restore_add_warning_if_slow($state, 'import', $startedAt, $deadline);
+
+        return $this->restore_unit(true, 'cleanup', 'import', 'Base de datos PostgreSQL restaurada.', 88);
     }
 
     /**
@@ -4093,7 +4219,8 @@ class backup_manager
         $type = (string) $state['type'];
         $errorCount = count((array) $state['errors']);
 
-        if (in_array($type, array('complete', 'database'), true)) {
+        // PostgreSQL has no temp users copy: its import is atomic and rolls back on error.
+        if (in_array($type, array('complete', 'database'), true) && $this->get_database_type() !== 'POSTGRESQL') {
             $connectionError = null;
             $mysqli = $this->restore_open_mysqli($connectionError);
             if ($mysqli !== null) {
