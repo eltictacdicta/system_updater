@@ -103,6 +103,8 @@ function ensure_request_csrf(): void
         return;
     }
 
+    $reason = system_updater_csrf_failure_reason($token);
+
     if (system_updater_csrf_validate($token)) {
         // Valid — close session immediately so SSE can stream without blocking
         if (session_status() === PHP_SESSION_ACTIVE) {
@@ -116,10 +118,13 @@ function ensure_request_csrf(): void
     $sessionStatus = session_status() === PHP_SESSION_ACTIVE ? 'active' : 'inactive';
 
     error_log(sprintf(
-        '[system_updater] CSRF validation failed. uri=%s, session=%s, token_len=%d',
+        '[system_updater] CSRF validation failed. uri=%s, session=%s, token_len=%d, reason=%s, active_session=%s, save_handler=%s',
         strtok($uri, '?'),
         $sessionStatus,
-        strlen($token)
+        strlen($token),
+        $reason,
+        session_name(),
+        (string) ini_get('session.save_handler')
     ));
 
     system_updater_csrf_failure_response(

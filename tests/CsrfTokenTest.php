@@ -291,4 +291,26 @@ final class CsrfTokenTest extends TestCase
 
         $this->assertSame($token, system_updater_csrf_get_stored());
     }
+
+    #[Test]
+    public function failureReasonClassifiesEachRejection(): void
+    {
+        $other = str_repeat('a', 64);
+        $this->assertSame('no_cookie', system_updater_csrf_failure_reason($other));
+
+        // Opens the plugin session (and remembers its cookie id) without a token.
+        $this->pluginSlot();
+        $this->assertSame('empty_session', system_updater_csrf_failure_reason($other));
+
+        $token = system_updater_csrf_generate();
+        $this->assertSame('valid', system_updater_csrf_failure_reason($token));
+        $this->assertSame('mismatch', system_updater_csrf_failure_reason($other));
+
+        system_updater_csrf_ensure_session();
+        $_SESSION['system_updater']['csrf_tokens']['system_updater_csrf']['created_at'] = time() - SYSTEM_UPDATER_CSRF_TTL - 1;
+        $_SESSION['system_updater']['csrf_tokens']['other_slot'] = ['value' => $token, 'created_at' => time()];
+        system_updater_csrf_restore_session();
+        $this->assertSame('expired', system_updater_csrf_failure_reason($token));
+        $this->assertSame('no_stored_token', system_updater_csrf_failure_reason($token, 'missing_slot'));
+    }
 }

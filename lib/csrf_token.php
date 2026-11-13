@@ -185,6 +185,34 @@ function system_updater_csrf_check_entry(string $token, string $tokenId): bool
 }
 
 /**
+ * Classify why a token would be rejected, for the failure log only.
+ *
+ * Must run BEFORE system_updater_csrf_validate(), which drops expired entries.
+ *
+ * @return string no_cookie|empty_session|no_stored_token|expired|mismatch|valid
+ */
+function system_updater_csrf_failure_reason(string $token, string $tokenId = 'system_updater_csrf'): string
+{
+    if (!isset($_COOKIE[system_updater_resolve_session_name()])) {
+        return 'no_cookie';
+    }
+
+    system_updater_csrf_ensure_session();
+    $entry = $_SESSION['system_updater']['csrf_tokens'][$tokenId] ?? null;
+    $sessionEmpty = empty($_SESSION);
+    system_updater_csrf_restore_session();
+
+    if (!is_array($entry) || !isset($entry['value'], $entry['created_at'])) {
+        return $sessionEmpty ? 'empty_session' : 'no_stored_token';
+    }
+    if (time() - (int) $entry['created_at'] > SYSTEM_UPDATER_CSRF_TTL) {
+        return 'expired';
+    }
+
+    return hash_equals((string) $entry['value'], $token) ? 'valid' : 'mismatch';
+}
+
+/**
  * Emit an HTML hidden input field with the current plugin CSRF token.
  *
  * Auto-generates a token if none exists in the session.
