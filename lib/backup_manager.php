@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/SqlDumpReader.php';
 require_once __DIR__ . '/pg_native_dump.php';
+require_once __DIR__ . '/base_url_preserver.php';
 
 /**
  * MySQL helper used by the standalone backup manager.
@@ -2143,8 +2144,20 @@ class backup_manager
         $backupPath = $resolved['path'];
         $tempDir = $resolved['temp_dir'];
 
+        // La URL base es de ESTE servidor, no de la copia (restaurar en otro host).
+        $baseUrl = $this->base_url_preserver();
+        $baseUrlState = $baseUrl->capture();
+
         try {
-            return $this->execute_database_restore($backupPath, $reportProgress, $result);
+            $result = $this->execute_database_restore($backupPath, $reportProgress, $result);
+            if (!empty($result['success'])) {
+                $message = $baseUrl->reapply($baseUrlState);
+                if ($message !== null) {
+                    $this->messages[] = $message;
+                }
+            }
+
+            return $result;
         } finally {
             if ($tempDir) {
                 $this->delete_directory($tempDir);
@@ -2159,6 +2172,23 @@ class backup_manager
      * CoreSchemaBootstrap (core >= 0.33; sin sellos no hace nada). Sin usar la
      * clase del core, porque recovery.php no puede cargar su autoloader.
      */
+    /**
+     * Overridable in tests; bound to this installation's database.
+     */
+    protected function base_url_preserver(): base_url_preserver
+    {
+        $dbType = $this->get_database_type();
+
+        return base_url_preserver::for_database(
+            $dbType,
+            defined('FS_DB_HOST') ? (string) FS_DB_HOST : 'localhost',
+            (string) $this->get_database_port($dbType),
+            defined('FS_DB_USER') ? (string) FS_DB_USER : 'root',
+            defined('FS_DB_PASS') ? (string) FS_DB_PASS : '',
+            defined('FS_DB_NAME') ? (string) FS_DB_NAME : 'facturascripts'
+        );
+    }
+
     private function invalidate_core_schema_stamp(): void
     {
         $tmpName = defined('FS_TMP_NAME') ? (string) FS_TMP_NAME : '';

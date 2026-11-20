@@ -59,6 +59,7 @@ final class RecoveryMarkerTest extends ConsoleHttpTestCase
         'lib/backup_manager.php',
         'lib/SqlDumpReader.php',
         'lib/pg_native_dump.php',
+        'lib/base_url_preserver.php',
         'lib/recovery_csrf.php',
         'lib/recovery_view.php',
         'download_backup.php',
