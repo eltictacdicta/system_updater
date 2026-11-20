@@ -70,6 +70,7 @@ class RestoreSessionStateTest extends TestCase
             'phase',
             'temp_dir',
             'dump_path',
+            'base_url',
             'db_backup_path',
             'tables',
             'drop_index',

@@ -20,10 +20,11 @@ class BaseUrlPreserverTest extends TestCase
     {
         $p = $this->preserver(['ok' => true, 'value' => 'https://staging.example']);
 
-        $message = $p->reapply($p->capture());
+        $result = $p->reapply($p->capture());
 
         $this->assertSame(['https://staging.example'], $this->writes);
-        $this->assertStringContainsString('https://staging.example', (string) $message);
+        $this->assertTrue($result['ok']);
+        $this->assertStringContainsString('https://staging.example', $result['message']);
     }
 
     public function testTargetWithoutValueDropsTheBackupOne(): void
@@ -48,10 +49,19 @@ class BaseUrlPreserverTest extends TestCase
     {
         $p = $this->preserver(['ok' => false, 'value' => null]);
 
-        $message = $p->reapply($p->capture());
+        $result = $p->reapply($p->capture());
 
         $this->assertSame([], $this->writes);
-        $this->assertStringContainsString('se mantiene la de la copia', (string) $message);
+        $this->assertFalse($result['ok']);
+        $this->assertStringContainsString('se mantiene la de la copia', $result['message']);
+    }
+
+    public function testStateNeverCapturedKeepsTheBackupValue(): void
+    {
+        $p = $this->preserver(['ok' => true, 'value' => 'https://a.example']);
+
+        $this->assertFalse($p->reapply(null)['ok']);
+        $this->assertSame([], $this->writes);
     }
 
     public function testReadThatThrowsIsUnknownNotFatal(): void
@@ -82,7 +92,10 @@ class BaseUrlPreserverTest extends TestCase
             }
         );
 
-        $this->assertStringContainsString('No se pudo conservar', (string) $p->reapply($p->capture()));
+        $result = $p->reapply($p->capture());
+
+        $this->assertFalse($result['ok']);
+        $this->assertStringContainsString('No se pudo conservar', $result['message']);
     }
 
     public function testRestoreDatabaseWrapsTheRestoreWithThePreserver(): void
@@ -96,6 +109,21 @@ class BaseUrlPreserverTest extends TestCase
         $this->assertNotFalse($restore);
         $this->assertNotFalse($reapply);
         $this->assertTrue($capture < $restore && $restore < $reapply, 'capture before the restore, reapply after it');
+    }
+
+    public function testSteppedRestoreCapturesInPrepareAndReappliesInCleanup(): void
+    {
+        $source = (string) file_get_contents(FS_FOLDER . '/plugins/system_updater/lib/backup_manager.php');
+        $prepare = strpos($source, 'private function restore_step_prepare(');
+        $capture = strpos($source, "\$state['base_url'] = \$this->base_url_preserver()->capture();");
+        $decompress = strpos($source, 'private function restore_step_decompress(');
+        $cleanup = strpos($source, 'private function restore_step_cleanup(');
+        $reapply = strpos($source, "\$this->base_url_preserver()->reapply(\$state['base_url'])");
+
+        $this->assertNotFalse($capture);
+        $this->assertNotFalse($reapply);
+        $this->assertTrue($prepare < $capture && $capture < $decompress, 'captured in prepare, before any database phase');
+        $this->assertTrue($cleanup < $reapply, 'reapplied in cleanup');
     }
 
     private function preserver(array $state): base_url_preserver

@@ -50,16 +50,19 @@ final class base_url_preserver
     }
 
     /**
-     * @param array{known: bool, value: ?string} $state from capture()
-     * @return string|null message for the operator, null when nothing was done
+     * Puts this server's state back. ok=false means the operator must check
+     * the URL (state unknown or write failed): callers report it as a warning.
+     *
+     * @param array{known: bool, value: ?string}|null $state from capture()
+     * @return array{ok: bool, message: string}
      */
-    public function reapply(array $state): ?string
+    public function reapply(?array $state): array
     {
-        if (empty($state['known'])) {
-            return 'No se pudo leer la URL base de este servidor antes de restaurar: se mantiene la de la copia de seguridad.';
+        if ($state === null || empty($state['known'])) {
+            return array('ok' => false, 'message' => 'No se pudo leer la URL base de este servidor antes de restaurar: se mantiene la de la copia de seguridad. Revísala en Admin » Avanzado.');
         }
 
-        $value = $state['value'] ?? null;
+        $value = isset($state['value']) && $state['value'] !== '' ? (string) $state['value'] : null;
         try {
             $ok = (bool) ($this->write)($value);
         } catch (\Throwable $e) {
@@ -67,12 +70,12 @@ final class base_url_preserver
         }
 
         if (!$ok) {
-            return 'No se pudo conservar la URL base de este servidor tras restaurar: revísala en Admin » Avanzado.';
+            return array('ok' => false, 'message' => 'No se pudo conservar la URL base de este servidor tras restaurar: revísala en Admin » Avanzado.');
         }
 
-        return $value !== null
+        return array('ok' => true, 'message' => $value !== null
             ? 'URL base de este servidor conservada: ' . $value
-            : 'Este servidor no tenía URL base guardada: se ha quitado la de la copia de seguridad.';
+            : 'Este servidor no tenía URL base guardada: se ha quitado la de la copia de seguridad.');
     }
 
     /**
@@ -116,12 +119,13 @@ final class base_url_preserver
                         return false;
                     }
                     try {
-                        if (@pg_query_params($conn, 'DELETE FROM fs_vars WHERE name = $1', array(self::VAR_NAME)) === false) {
-                            return false;
-                        }
+                        // One statement each: the row is never left missing halfway (PostgreSQL >= 9.5).
+                        $sql = $value === null
+                            ? 'DELETE FROM fs_vars WHERE name = $1'
+                            : 'INSERT INTO fs_vars (name, "varchar") VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET "varchar" = EXCLUDED."varchar"';
+                        $params = $value === null ? array(self::VAR_NAME) : array(self::VAR_NAME, $value);
 
-                        return $value === null
-                            || @pg_query_params($conn, 'INSERT INTO fs_vars (name, "varchar") VALUES ($1, $2)', array(self::VAR_NAME, $value)) !== false;
+                        return @pg_query_params($conn, $sql, $params) !== false;
                     } finally {
                         pg_close($conn);
                     }
@@ -161,13 +165,17 @@ final class base_url_preserver
                         return array('ok' => false, 'value' => null);
                     }
                     $name = self::VAR_NAME;
-                    $stmt->bind_param('s', $name);
-                    if (!$stmt->execute()) {
+                    $stored = null;
+                    // bind_result, not get_result: the latter needs mysqlnd.
+                    if (!$stmt->bind_param('s', $name) || !$stmt->execute() || !$stmt->bind_result($stored)) {
                         return array('ok' => false, 'value' => null);
                     }
-                    $row = $stmt->get_result()->fetch_row();
+                    $found = $stmt->fetch();
+                    if ($found === false) {
+                        return array('ok' => false, 'value' => null);
+                    }
 
-                    return array('ok' => true, 'value' => $row ? (string) $row[0] : null);
+                    return array('ok' => true, 'value' => $found === true && $stored !== null ? (string) $stored : null);
                 } finally {
                     $mysqli->close();
                 }
@@ -179,16 +187,16 @@ final class base_url_preserver
                 }
                 try {
                     $name = self::VAR_NAME;
-                    $del = $mysqli->prepare('DELETE FROM fs_vars WHERE name = ?');
-                    if ($del === false || !$del->bind_param('s', $name) || !$del->execute()) {
-                        return false;
-                    }
                     if ($value === null) {
-                        return true;
-                    }
-                    $ins = $mysqli->prepare('INSERT INTO fs_vars (name, `varchar`) VALUES (?, ?)');
+                        $stmt = $mysqli->prepare('DELETE FROM fs_vars WHERE name = ?');
 
-                    return $ins !== false && $ins->bind_param('ss', $name, $value) && $ins->execute();
+                        return $stmt !== false && $stmt->bind_param('s', $name) && $stmt->execute();
+                    }
+
+                    // One statement: the row is never left missing halfway.
+                    $stmt = $mysqli->prepare('INSERT INTO fs_vars (name, `varchar`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `varchar` = ?');
+
+                    return $stmt !== false && $stmt->bind_param('sss', $name, $value, $value) && $stmt->execute();
                 } finally {
                     $mysqli->close();
                 }

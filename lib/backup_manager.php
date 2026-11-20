@@ -2150,12 +2150,9 @@ class backup_manager
 
         try {
             $result = $this->execute_database_restore($backupPath, $reportProgress, $result);
-            if (!empty($result['success'])) {
-                $message = $baseUrl->reapply($baseUrlState);
-                if ($message !== null) {
-                    $this->messages[] = $message;
-                }
-            }
+            // Also after a failed import: the database may hold part of the backup.
+            // A message, never an error: it must not turn a good restore into a failed one.
+            $this->messages[] = $baseUrl->reapply($baseUrlState)['message'];
 
             return $result;
         } finally {
@@ -3758,6 +3755,11 @@ class backup_manager
             // fases (decompress / users): juntarlos acá hacía que un solo
             // request superara el límite del host y lo mataran.
             $state['db_backup_path'] = $dbBackupPath;
+
+            // La URL base es de ESTE servidor: se lee antes de tocar la BD y se repone en cleanup.
+            if ($state['base_url'] === null) {
+                $state['base_url'] = $this->base_url_preserver()->capture();
+            }
         }
 
         if ($needsDatabase && $this->get_database_type() === 'POSTGRESQL') {
@@ -4291,6 +4293,11 @@ class backup_manager
         }
 
         if (in_array($type, array('complete', 'database'), true)) {
+            // Also after import errors: the database may hold part of the backup.
+            $reapplied = $this->base_url_preserver()->reapply($state['base_url']);
+            if (!$reapplied['ok']) {
+                $state['warnings'][] = $reapplied['message'];
+            }
             $this->invalidate_core_schema_stamp();
         }
 
@@ -4359,6 +4366,7 @@ class backup_manager
             'files_done' => false,
             'errors' => array(),
             'warnings' => array(),
+            'base_url' => null,
         );
     }
 
@@ -4388,6 +4396,7 @@ class backup_manager
             'files_done' => false,
             'errors' => array(),
             'warnings' => array(),
+            'base_url' => null,
         );
 
         $state = array_merge($defaults, $state);
@@ -4402,6 +4411,12 @@ class backup_manager
         $state['sql_offset'] = max(0, (int) $state['sql_offset']);
         $state['statement_count'] = max(0, (int) $state['statement_count']);
         $state['files_done'] = (bool) $state['files_done'];
+        $state['base_url'] = is_array($state['base_url'])
+            ? array(
+                'known' => !empty($state['base_url']['known']),
+                'value' => isset($state['base_url']['value']) && is_string($state['base_url']['value']) ? $state['base_url']['value'] : null,
+            )
+            : null;
 
         return $state;
     }
